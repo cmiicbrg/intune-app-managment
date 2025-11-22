@@ -257,6 +257,26 @@ $script:AppConfigurations = @{
         DetectionOperator = "greaterThanOrEqual"
         AutoUpdate = $true
     }
+    
+    GeoGebra = @{
+        Name = "GeoGebra"
+        DisplayNameTemplate = "GeoGebra {0}"
+        Publisher = "International GeoGebra Institute"
+        Description = "GeoGebra - Dynamic mathematics software for all levels of education - Deployed automatically"
+        Folder = "geogebra"
+        IconFile = "geogebra-logo.png"
+        IntuneWinPattern = "GeoGebra-Windows-Installer-6-*.intunewin"
+        DownloadUrl = "https://download.geogebra.org/package/win-msi6"
+        FallbackVersion = "6.0.906.2"
+        FilenameTemplate = "GeoGebra-Windows-Installer-6-{0}.msi"
+        PackageType = "MSI"
+        InstallCommandTemplate = 'msiexec /i "{0}" ALLUSERS=2 /qn'
+        UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
+        DetectionType = "MSI"
+        DetectionOperator = "ProductCodeOnly"
+        VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
+        AutoUpdate = $false  # GeoGebra Classic 6 does not auto-update in mass installations
+    }
 }
 
 # Common settings

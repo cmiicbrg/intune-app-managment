@@ -476,7 +476,8 @@ $appsToDeploy = @(
     @{Name="Inkscape"; Folder="inkscape"; Pattern="inkscape-*.intunewin"; AppConfigName="Inkscape"; PackageType="MSI"},
     @{Name="Audacity"; Folder="audacity"; Pattern="audacity-*.intunewin"; AppConfigName="Audacity"; PackageType="EXE"},
     @{Name="LibreOffice"; Folder="libreoffice"; Pattern="LibreOffice_*.intunewin"; AppConfigName="LibreOffice"; PackageType="MSI"},
-    @{Name="OpenShot"; Folder="openshot"; Pattern="OpenShot-v*-x86_64.intunewin"; AppConfigName="OpenShot"; PackageType="EXE"}
+    @{Name="OpenShot"; Folder="openshot"; Pattern="OpenShot-v*-x86_64.intunewin"; AppConfigName="OpenShot"; PackageType="EXE"},
+    @{Name="GeoGebra"; Folder="geogebra"; Pattern="GeoGebra-Windows-Installer-6-*.intunewin"; AppConfigName="GeoGebra"; PackageType="MSI"}
 )
 
 # Filter apps if AppName parameter is specified
