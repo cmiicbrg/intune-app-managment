@@ -177,7 +177,7 @@ foreach ($appName in $allAppNames) {
         continue
     }
     
-    $appFolder = Join-Path $BaseDir "packages" $appConfig.Folder
+    $appFolder = Join-Path (Join-Path $BaseDir "packages") $appConfig.Folder
     if (-not (Test-Path $appFolder)) {
         New-Item -ItemType Directory -Path $appFolder -Force | Out-Null
     }

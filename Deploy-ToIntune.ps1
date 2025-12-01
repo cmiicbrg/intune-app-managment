@@ -521,7 +521,7 @@ foreach ($app in $appsToDeploy) {
     
     Write-Host "`n[Deploying $($app.Name)]" -ForegroundColor Magenta
     
-    $appFolder = Join-Path $BaseDir "packages" $app.Folder
+    $appFolder = Join-Path (Join-Path $BaseDir "packages") $app.Folder
     if (-not (Test-Path $appFolder)) {
         Write-Host "  Folder not found: $appFolder" -ForegroundColor Red
         $failedApps += $app.Name
