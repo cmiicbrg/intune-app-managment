@@ -2,6 +2,32 @@
 
 Automated download, packaging, and deployment of Windows applications to Microsoft Intune.
 
+## ⚠️ Breaking Changes in Version 2.0.0
+
+**Version 2.0.0 introduces a restructured folder layout.** All application packages have been moved to a `packages/` directory for better organization.
+
+### Migration from v1.x
+
+If you're upgrading from version 1.x:
+
+1. **Back up your existing app folders** (firefox, chrome, 7zip, etc.)
+2. **Create packages directory:** `New-Item -ItemType Directory -Path "packages"`
+3. **Move app folders:** `Move-Item -Path firefox,chrome,7zip,gimp,vlc,npp,affinity,inkscape,audacity,libreoffice,openshot,geogebra -Destination packages\`
+4. **Pull latest scripts** from v2.0.0
+
+Or stay on v1.0.0 by checking out the `v1.0.0` tag: `git checkout v1.0.0`
+
+### New Structure
+```
+intune-app-management/
+├── packages/           # ← All app packages now here
+│   ├── firefox/
+│   ├── chrome/
+│   └── ...
+├── Deploy-ToIntune.ps1
+└── ...
+```
+
 ## Features
 
 - **Automatic version detection** for 10 applications
@@ -207,20 +233,22 @@ For one-time testing only (not recommended for production):
 ## File Structure
 
 ```pre
-intune/
+intune-app-management/
 ├── AppConfig.ps1                          # Application configuration
 ├── SharedFunctions.ps1                    # Shared functions
 ├── Download-And-Package-Software.ps1      # Download & packaging script
 ├── Deploy-ToIntune.ps1                    # Deployment script
-├── IntuneWinAppUtil.exe                   # Microsoft packaging tool
-├── firefox/                               # Application folders
-│   ├── Firefox-Setup-133.0-de.exe
-│   ├── Firefox-Setup-133.0-de.intunewin
-│   └── firefox-logo.png
-├── chrome/
-│   ├── GoogleChrome-131.0.6778.86-Enterprise-x64.msi
-│   └── GoogleChrome-131.0.6778.86-Enterprise-x64.intunewin
-└── ... (other apps)
+├── VERSION.txt                            # Version tracking
+├── packages/                              # Application packages
+│   ├── firefox/
+│   │   ├── Firefox-Setup-145.0.2-de.exe
+│   │   ├── Firefox-Setup-145.0.2-de.intunewin
+│   │   └── firefox-logo.png
+│   ├── chrome/
+│   │   ├── GoogleChrome-142.0-Enterprise-x64.msi
+│   │   └── GoogleChrome-142.0-Enterprise-x64.intunewin
+│   └── ... (other apps)
+└── LICENSE
 ```
 
 ## Configuration

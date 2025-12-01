@@ -177,9 +177,9 @@ foreach ($appName in $allAppNames) {
         continue
     }
     
-    $appFolder = Join-Path $BaseDir $appConfig.Folder
+    $appFolder = Join-Path $BaseDir "packages" $appConfig.Folder
     if (-not (Test-Path $appFolder)) {
-        New-Item -ItemType Directory -Path $appFolder | Out-Null
+        New-Item -ItemType Directory -Path $appFolder -Force | Out-Null
     }
     
     # Get version info

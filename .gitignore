@@ -75,6 +75,7 @@
 /release/
 .Deploy-Cheat-Sheet.md
 
-/Lehrerkopierer/*
-/Schuelerkopierer/*
+# Application packages folder
+/packages/*/
+
 Download-AppLogos.ps1
