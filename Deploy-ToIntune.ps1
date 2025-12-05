@@ -204,6 +204,8 @@ function Publish-App {
                 Write-Host "  No exact match for display name, analyzing versions for supersedence..." -ForegroundColor Gray
                 $oldVersionApps = @()
                 $sameVersionExists = $false
+                $newestOlderApp = $null
+                $newestOlderVersion = $null
                 
                 foreach ($existingApp in $allExistingApps) {
                     # Get version from displayVersion field or parse from display name
@@ -231,8 +233,13 @@ function Publish-App {
                         $newVer = [version]$NewVersion
                         
                         if ($existingVer -lt $newVer) {
-                            Write-Host "      -> Will supersede (older: $existingVersion < $NewVersion)" -ForegroundColor Yellow
-                            $oldVersionApps += $existingApp
+                            Write-Host "      -> Older version: $existingVersion < $NewVersion" -ForegroundColor Gray
+                            
+                            # Track only the newest older version for supersedence (creates proper chain)
+                            if ($null -eq $newestOlderVersion -or $existingVer -gt $newestOlderVersion) {
+                                $newestOlderApp = $existingApp
+                                $newestOlderVersion = $existingVer
+                            }
                         }
                         elseif ($existingVer -eq $newVer) {
                             Write-Host "      -> Same version ($existingVersion = $NewVersion) - will skip creation" -ForegroundColor Yellow
@@ -247,6 +254,12 @@ function Publish-App {
                     }
                 }
                 
+                # Add only the newest older version for supersedence
+                if ($null -ne $newestOlderApp) {
+                    Write-Host "      -> Will supersede most recent older version: $($newestOlderApp.displayVersion)" -ForegroundColor Yellow
+                    $oldVersionApps += $newestOlderApp
+                }
+                
                 # Skip if same version already exists
                 if ($sameVersionExists) {
                     Write-Host "  Skipping: Version $NewVersion already exists in Intune" -ForegroundColor Yellow
@@ -255,7 +268,7 @@ function Publish-App {
                 }
                 
                 if ($oldVersionApps.Count -gt 0) {
-                    Write-Host "  Creating new version with supersedence for $($oldVersionApps.Count) older app(s)..." -ForegroundColor Cyan
+                    Write-Host "  Creating new version with supersedence for the most recent older version..." -ForegroundColor Cyan
                 }
                 else {
                     Write-Host "  No older versions found - creating new app without supersedence" -ForegroundColor Gray
