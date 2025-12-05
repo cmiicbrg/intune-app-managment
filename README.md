@@ -18,7 +18,8 @@ If you're upgrading from version 1.x:
 Or stay on v1.0.0 by checking out the `v1.0.0` tag: `git checkout v1.0.0`
 
 ### New Structure
-```
+
+```pre
 intune-app-management/
 ├── packages/           # ← All app packages now here
 │   ├── firefox/
@@ -107,6 +108,7 @@ Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force
 5. Search for and add these permissions:
    - `DeviceManagementApps.ReadWrite.All`
    - `DeviceManagementConfiguration.ReadWrite.All` (optional, for assignments)
+   - `Group.Read.All` (required for custom group assignments)
 6. Click **Add permissions**
 7. Click **✓ Grant admin consent for [Your Organization]**
 8. Confirm by clicking **Yes**
@@ -458,7 +460,3 @@ Third-party software notices - see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.
 - **IntuneWin32App Module**: [Nickolaj Andersen](https://github.com/MSEndpointMgr/IntuneWin32App)
 - **IntuneWinAppUtil**: Microsoft Win32 Content Prep Tool
 - **Development Assistance**: Created with assistance from GitHub Copilot (Claude Sonnet 4.5)
-
----
-
-**Last Updated**: November 22, 2025

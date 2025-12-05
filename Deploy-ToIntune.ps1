@@ -20,6 +20,12 @@
 .PARAMETER AssignToAllDevices
     If specified, assigns the app to "All Devices" group
 
+.PARAMETER AssignToGroupName
+    Optional. Name of Azure AD group to assign the app to (e.g., "Teachers", "IT-Staff")
+
+.PARAMETER GroupAssignmentIntent
+    Intent for group assignment: "Available" or "Required". Default is "Available"
+
 .PARAMETER ForceUpdate
     If specified, creates new versions even if apps already exist (for updates/supersedence)
 
@@ -49,6 +55,13 @@ param(
     [switch]$AssignToAllDevices,
     
     [Parameter(Mandatory=$false)]
+    [string]$AssignToGroupName,
+    
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("Available", "Required")]
+    [string]$GroupAssignmentIntent = "Available",
+    
+    [Parameter(Mandatory=$false)]
     [switch]$SkipInstallation,
     
     [Parameter(Mandatory=$false)]
@@ -76,7 +89,8 @@ function Install-RequiredModules {
     
     $requiredModules = @(
         "IntuneWin32App",
-        "Microsoft.Graph.Authentication"
+        "Microsoft.Graph.Authentication",
+        "Microsoft.Graph.Groups"
     )
     
     foreach ($moduleName in $requiredModules) {
@@ -438,6 +452,59 @@ function Publish-App {
             Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
             Add-IntuneWin32AppAssignmentAllDevices -ID $Win32App.id -Intent "required" -Notification "showAll"
             Write-Host "  Assigned to All Devices" -ForegroundColor Green
+        }
+        
+        if ($AssignToGroupName) {
+            Write-Host "  Assigning to group: $AssignToGroupName..." -ForegroundColor Cyan
+            
+            try {
+                # Ensure Microsoft.Graph.Groups module is available
+                if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
+                    Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
+                    Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
+                }
+                Import-Module Microsoft.Graph.Groups -ErrorAction Stop
+                
+                # Connect to Microsoft Graph if not already connected
+                try {
+                    # Test if already connected by attempting to get the context
+                    $null = Get-MgContext -ErrorAction Stop
+                }
+                catch {
+                    Write-Host "  Connecting to Microsoft Graph..." -ForegroundColor Gray
+                    if ($ClientId -and $ClientSecret) {
+                        # Use app-based authentication with client credentials
+                        $secureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+                        $credential = New-Object System.Management.Automation.PSCredential($ClientId, $secureSecret)
+                        Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $credential -NoWelcome
+                    }
+                    else {
+                        # Use interactive authentication
+                        Connect-MgGraph -TenantId $TenantId -Scopes "Group.Read.All" -NoWelcome
+                    }
+                }
+                
+                # Query Azure AD group by display name
+                $group = Get-MgGroup -Filter "displayName eq '$AssignToGroupName'" -ErrorAction Stop
+                
+                if ($group) {
+                    if ($group -is [array] -and $group.Count -gt 1) {
+                        Write-Host "  Warning: Multiple groups found with name '$AssignToGroupName', using first match" -ForegroundColor Yellow
+                        $group = $group[0]
+                    }
+                    
+                    $intent = $GroupAssignmentIntent.ToLower()
+                    Add-IntuneWin32AppAssignmentGroup -Include -ID $Win32App.id -GroupID $group.Id -Intent $intent -Notification "showAll"
+                    Write-Host "  Assigned to group '$AssignToGroupName' (ID: $($group.Id)) as $GroupAssignmentIntent" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  Warning: Group '$AssignToGroupName' not found" -ForegroundColor Yellow
+                }
+            }
+            catch {
+                Write-Host "  Warning: Failed to assign to group '$AssignToGroupName': $_" -ForegroundColor Yellow
+                Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
         }
         
         return $Win32App
