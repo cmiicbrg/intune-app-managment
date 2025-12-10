@@ -88,10 +88,5 @@
 Download-AppLogos.ps1
 
 /tests/*
-packages/Lehrerkopierer/addLehrerKopierer.ps1
-packages/Lehrerkopierer/description.md
-packages/Lehrerkopierer/removeLehrerKopierer.ps1
-packages/Schuelerkopierer/addSchuelerKopierer.ps1
-packages/Schuelerkopierer/description.md
-packages/Schuelerkopierer/removeSchuelerKopierer.ps1
-IntuneAppsResponse.json
+packages/Lehrerkopierer/*
+packages/Schuelerkopierer/*

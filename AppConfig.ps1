@@ -281,6 +281,30 @@ $script:AppConfigurations = @{
         # Note: GeoGebra doesn't update MSI Product Code or GeoGebra.exe version between releases
         # Real version is stored in latestVersion variable in HTML files (main.js or ggb-config.js)
     }
+    
+    Stellarium = @{
+        Name = "Stellarium"
+        DisplayNameTemplate = "Stellarium {0}"
+        Publisher = "Stellarium team"
+        Description = "Stellarium - Free open source planetarium for your computer"
+        Folder = "stellarium"
+        IconFile = "stellarium-logo.png"
+        IntuneWinPattern = "stellarium-*.intunewin"
+        GitHubRepo = "Stellarium/stellarium"
+        GitHubApiUrl = "https://api.github.com/repos/Stellarium/stellarium/releases/latest"
+        GitHubAssetPattern = "stellarium-[\d\.]+-qt6-win64\.exe$"
+        FallbackUrl = "https://github.com/Stellarium/stellarium/releases/download/v24.3/stellarium-24.3-qt6-win64.exe"
+        FallbackVersion = "24.3"
+        FilenamePattern = "stellarium-{0}-qt6-win64.exe"
+        PackageType = "EXE"
+        InstallCommandTemplate = '"{0}" /VERYSILENT /NORESTART /ALLUSERS'
+        UninstallCommandTemplate = '"C:\Program Files\Stellarium\unins000.exe" /VERYSILENT /NORESTART'
+        DetectionPath = "C:\Program Files\Stellarium"
+        DetectionFile = "stellarium.exe"
+        DetectionType = "File"
+        DetectionOperator = "greaterThanOrEqual"
+        AutoUpdate = $false
+    }
 }
 
 # Common settings
