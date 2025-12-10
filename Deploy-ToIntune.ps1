@@ -132,9 +132,11 @@ function Connect-ToIntune {
     
     try {
         if ($ClientId -and $ClientSecret) {
-            # App-based authentication
+            # App-based authentication using secure string
             Write-Host "Using app-based authentication (Client ID: $ClientId)" -ForegroundColor Gray
-            Connect-MSIntuneGraph -TenantID $TenantId -ClientID $ClientId -ClientSecret $ClientSecret
+            $secureSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+            $credential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $ClientId, $secureSecret
+            Connect-MSIntuneGraph -TenantID $TenantId -ClientID $ClientId -ClientSecret $secureSecret
         }
         else {
             # Interactive authentication
@@ -376,6 +378,31 @@ function Publish-App {
                     catch {
                         Write-Host "    [Err] Failed to set supersedence for $($oldApp.displayName): $_" -ForegroundColor Red
                     }
+                }
+                
+                # Enable auto-update for assignments after supersedence is configured
+                Write-Host "  Enabling auto-update for superseded app assignments..." -ForegroundColor Cyan
+                try {
+                    # Ensure Microsoft Graph is connected
+                    try {
+                        $null = Get-MgContext -ErrorAction Stop
+                    }
+                    catch {
+                        Write-Host "  Connecting to Microsoft Graph for auto-update configuration..." -ForegroundColor Gray
+                        if ($ClientId -and $ClientSecret) {
+                            $secureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+                            $credential = New-Object System.Management.Automation.PSCredential($ClientId, $secureSecret)
+                            Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $credential -NoWelcome
+                        }
+                        else {
+                            Connect-MgGraph -TenantId $TenantId -Scopes "DeviceManagementApps.ReadWrite.All" -NoWelcome
+                        }
+                    }
+                    
+                    Enable-IntuneAppAutoUpdate -AppId $Win32App.id
+                }
+                catch {
+                    Write-Host "  Warning: Failed to enable auto-update: $_" -ForegroundColor Yellow
                 }
             }
         }
@@ -641,12 +668,18 @@ foreach ($app in $appsToDeploy) {
     Write-Host "  Setup file: $setupFileName" -ForegroundColor Gray
     
     # Get app configuration using the appropriate generic function
-    if ($app.PackageType -eq "MSI") {
+    $appConfigFromFile = Get-AppConfiguration -AppName $app.AppConfigName
+    
+    # Check if this app uses script-based detection (like GeoGebra)
+    if ($appConfigFromFile.DetectionType -eq "Script") {
+        Write-Host "  Using script-based detection..." -ForegroundColor Gray
+        $appConfig = Get-ScriptAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName -IntuneWinPath $intunewinFile.FullName
+    }
+    elseif ($app.PackageType -eq "MSI") {
         $appConfig = Get-MsiAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName -IntuneWinPath $intunewinFile.FullName
     }
     else {
         # For EXE files, try to get the actual file version if detection is "equal"
-        $appConfigFromFile = Get-AppConfiguration -AppName $app.AppConfigName
         if ($appConfigFromFile.DetectionOperator -eq "equal") {
             # Find the actual setup file in the folder to get its real version
             $actualSetupFile = Get-ChildItem -Path $appFolder -File | Where-Object { $_.Name -eq $setupFileName } | Select-Object -First 1

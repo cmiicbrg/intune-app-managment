@@ -299,3 +299,162 @@ function Get-FileAppConfig {
         UninstallCommandLine = $UninstallCommand
     }
 }
+
+# Generic function to create Script-based app configuration (for apps like GeoGebra)
+function Get-ScriptAppConfig {
+    param(
+        [string]$AppName,
+        [string]$Version,
+        [string]$SetupFile,
+        [string]$IntuneWinPath
+    )
+    
+    $appConfig = Get-AppConfiguration -AppName $AppName
+    $commonSettings = Get-CommonSettings
+    
+    # Get detection script path
+    $scriptPath = Join-Path $PSScriptRoot $appConfig.DetectionScriptPath
+    
+    if (-not (Test-Path $scriptPath)) {
+        Write-Host "  Warning: Detection script not found: $scriptPath" -ForegroundColor Yellow
+        Write-Host "  Falling back to MSI detection..." -ForegroundColor Yellow
+        
+        # Fallback to MSI detection if script doesn't exist
+        $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $IntuneWinPath
+        $DetectionRule = New-IntuneWin32AppDetectionRuleMSI `
+            -ProductCode $IntuneWinMetaData.ApplicationInfo.MsiInfo.MsiProductCode
+    }
+    else {
+        # Read the detection script and inject the required version
+        $scriptContent = Get-Content $scriptPath -Raw
+        
+        # Replace the param block to inject the actual version
+        $scriptWithVersion = $scriptContent -replace 'param\(\s*\[Parameter\(Mandatory=\$true\)\]\s*\[string\]\$RequiredVersion\s*\)', "`$RequiredVersion = '$Version'"
+        
+        # Create a temporary script file with the version baked in
+        $tempScriptPath = Join-Path $env:TEMP "Detect-$AppName-$Version.ps1"
+        $scriptWithVersion | Out-File -FilePath $tempScriptPath -Encoding UTF8 -Force
+        
+        # Create script detection rule
+        $DetectionRule = New-IntuneWin32AppDetectionRuleScript `
+            -ScriptFile $tempScriptPath `
+            -EnforceSignatureCheck $false `
+            -RunAs32Bit $false
+        
+        # Clean up temp file
+        Remove-Item $tempScriptPath -Force -ErrorAction SilentlyContinue
+    }
+    
+    $RequirementRule = New-IntuneWin32AppRequirementRule `
+        -Architecture $commonSettings.Architecture `
+        -MinimumSupportedOperatingSystem $commonSettings.MinimumOS
+    
+    # Extract major version for display name (e.g., "6" from "6.0.907.0")
+    $majorVersion = if ($Version -match '^(\d+)') { $matches[1] } else { $Version }
+    
+    # Format display name with major version only
+    $DisplayName = $appConfig.DisplayNameTemplate -f $majorVersion
+    $Description = $appConfig.Description
+    
+    # Format commands
+    $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile
+    
+    # Get MSI product code for uninstall (even with script detection, we still uninstall via MSI)
+    if ($IntuneWinPath) {
+        $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $IntuneWinPath
+        $UninstallCommand = $appConfig.UninstallCommandTemplate -f $IntuneWinMetaData.ApplicationInfo.MsiInfo.MsiProductCode
+    }
+    else {
+        $UninstallCommand = $appConfig.UninstallCommandTemplate
+    }
+    
+    return @{
+        DisplayName = $DisplayName
+        Description = $Description
+        Publisher = $appConfig.Publisher
+        AppVersion = $Version
+        InstallExperience = $commonSettings.InstallExperience
+        RestartBehavior = $commonSettings.RestartBehavior
+        DetectionRules = $DetectionRule
+        RequirementRule = $RequirementRule
+        InstallCommandLine = $InstallCommand
+        UninstallCommandLine = $UninstallCommand
+    }
+}
+
+# Function to enable auto-update for app assignments with supersedence
+function Enable-IntuneAppAutoUpdate {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$AppId,
+        
+        [Parameter(Mandatory=$false)]
+        [string]$AssignmentId
+    )
+    
+    try {
+        # Get all assignments for the app
+        $assignmentsUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+        $assignments = Invoke-MgGraphRequest -Uri $assignmentsUri -Method GET
+        
+        if (-not $assignments.value -or $assignments.value.Count -eq 0) {
+            Write-Host "      No assignments found to enable auto-update" -ForegroundColor Yellow
+            return $false
+        }
+        
+        $updatedCount = 0
+        
+        foreach ($assignment in $assignments.value) {
+            # Skip if specific assignment ID provided and this isn't it
+            if ($AssignmentId -and $assignment.id -ne $AssignmentId) {
+                continue
+            }
+            
+            # Only update if settings exist and it's a Win32 app assignment
+            if ($assignment.settings -and $assignment.settings.'@odata.type' -eq '#microsoft.graph.win32LobAppAssignmentSettings') {
+                
+                # Check if auto-update is already enabled
+                if ($assignment.settings.autoUpdateSettings -and 
+                    $assignment.settings.autoUpdateSettings.autoUpdateSupersededAppsState -eq 'enabled') {
+                    Write-Host "      Assignment $($assignment.id) already has auto-update enabled" -ForegroundColor Gray
+                    continue
+                }
+                
+                # Update the assignment with auto-update enabled
+                $updateBody = @{
+                    '@odata.type' = $assignment.'@odata.type'
+                    intent = $assignment.intent
+                    target = $assignment.target
+                    settings = $assignment.settings
+                }
+                
+                # Add or update autoUpdateSettings
+                if (-not $updateBody.settings.autoUpdateSettings) {
+                    $updateBody.settings.autoUpdateSettings = @{}
+                }
+                $updateBody.settings.autoUpdateSettings.autoUpdateSupersededAppsState = 'enabled'
+                
+                # PATCH the assignment
+                $updateUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$($assignment.id)"
+                Invoke-MgGraphRequest -Uri $updateUri -Method PATCH -Body ($updateBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+                
+                Write-Host "      Enabled auto-update for assignment: $($assignment.target.'@odata.type' -replace '#microsoft.graph.','')" -ForegroundColor Green
+                $updatedCount++
+            }
+        }
+        
+        if ($updatedCount -gt 0) {
+            Write-Host "      Updated $updatedCount assignment(s) with auto-update" -ForegroundColor Green
+            return $true
+        }
+        else {
+            Write-Host "      No assignments needed auto-update update" -ForegroundColor Gray
+            return $false
+        }
+    }
+    catch {
+        Write-Host "      Failed to enable auto-update: $_" -ForegroundColor Red
+        Write-Host "      Error details: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}

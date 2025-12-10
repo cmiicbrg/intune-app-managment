@@ -272,10 +272,13 @@ $script:AppConfigurations = @{
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" ALLUSERS=2 /qn'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
-        DetectionType = "MSI"
-        DetectionOperator = "ProductCodeOnly"
+        DetectionType = "Script"  # Use PowerShell script detection (MSI Product Code doesn't change between versions)
+        DetectionOperator = "ScriptOnly"
+        DetectionScriptPath = "packages\geogebra\Detect-GeoGebraVersion.ps1"  # Custom script to extract version from HTML files
         VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
         AutoUpdate = $false  # GeoGebra Classic 6 does not auto-update in mass installations
+        # Note: GeoGebra doesn't update MSI Product Code or GeoGebra.exe version between releases
+        # Real version is stored in latestVersion variable in HTML files (main.js or ggb-config.js)
     }
 }
 
