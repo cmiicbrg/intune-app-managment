@@ -388,73 +388,79 @@ function Enable-IntuneAppAutoUpdate {
         [Parameter(Mandatory=$true)]
         [string]$AppId,
         
-        [Parameter(Mandatory=$false)]
+        [Parameter(Mandatory=$true)]
         [string]$AssignmentId
     )
     
     try {
-        # Get all assignments for the app
+        # Get the specific assignment
         $assignmentsUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
         $assignments = Invoke-MgGraphRequest -Uri $assignmentsUri -Method GET
         
         if (-not $assignments.value -or $assignments.value.Count -eq 0) {
-            Write-Host "      No assignments found to enable auto-update" -ForegroundColor Yellow
-            return $false
+            Write-Host "      No assignments found" -ForegroundColor Yellow
+            return 0
         }
         
-        $updatedCount = 0
+        # Find the specific assignment
+        $assignment = $assignments.value | Where-Object { $_.id -eq $AssignmentId }
         
-        foreach ($assignment in $assignments.value) {
-            # Skip if specific assignment ID provided and this isn't it
-            if ($AssignmentId -and $assignment.id -ne $AssignmentId) {
-                continue
-            }
-            
-            # Only update if settings exist and it's a Win32 app assignment
-            if ($assignment.settings -and $assignment.settings.'@odata.type' -eq '#microsoft.graph.win32LobAppAssignmentSettings') {
-                
-                # Check if auto-update is already enabled
-                if ($assignment.settings.autoUpdateSettings -and 
-                    $assignment.settings.autoUpdateSettings.autoUpdateSupersededAppsState -eq 'enabled') {
-                    Write-Host "      Assignment $($assignment.id) already has auto-update enabled" -ForegroundColor Gray
-                    continue
-                }
-                
-                # Update the assignment with auto-update enabled
-                $updateBody = @{
-                    '@odata.type' = $assignment.'@odata.type'
-                    intent = $assignment.intent
-                    target = $assignment.target
-                    settings = $assignment.settings
-                }
-                
-                # Add or update autoUpdateSettings
-                if (-not $updateBody.settings.autoUpdateSettings) {
-                    $updateBody.settings.autoUpdateSettings = @{}
-                }
-                $updateBody.settings.autoUpdateSettings.autoUpdateSupersededAppsState = 'enabled'
-                
-                # PATCH the assignment
-                $updateUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$($assignment.id)"
-                Invoke-MgGraphRequest -Uri $updateUri -Method PATCH -Body ($updateBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
-                
-                Write-Host "      Enabled auto-update for assignment: $($assignment.target.'@odata.type' -replace '#microsoft.graph.','')" -ForegroundColor Green
-                $updatedCount++
+        if (-not $assignment) {
+            Write-Host "      Assignment $AssignmentId not found" -ForegroundColor Yellow
+            return 0
+        }
+        
+        # Check if it's a Win32 app assignment
+        if (-not $assignment.settings -or $assignment.settings.'@odata.type' -ne '#microsoft.graph.win32LobAppAssignmentSettings') {
+            Write-Host "      Assignment is not a Win32 app assignment" -ForegroundColor Yellow
+            return 0
+        }
+        
+        # Check if auto-update is already enabled
+        if ($assignment.settings.autoUpdateSettings -and 
+            $assignment.settings.autoUpdateSettings.autoUpdateSupersededAppsState -eq 'enabled') {
+            Write-Host "      Auto-update already enabled for this assignment" -ForegroundColor Gray
+            return 0
+        }
+        
+        # Build new assignment body with auto-update enabled
+        $settingsBody = @{
+            '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'
+            autoUpdateSettings = @{
+                '@odata.type' = '#microsoft.graph.win32LobAppAutoUpdateSettings'
+                autoUpdateSupersededAppsState = 'enabled'
             }
         }
         
-        if ($updatedCount -gt 0) {
-            Write-Host "      Updated $updatedCount assignment(s) with auto-update" -ForegroundColor Green
-            return $true
+        # Copy specific known properties from original settings if they exist
+        $knownProperties = @('notifications', 'restartSettings', 'installTimeSettings', 'deliveryOptimizationPriority')
+        foreach ($prop in $knownProperties) {
+            if ($null -ne $assignment.settings.$prop) {
+                $settingsBody[$prop] = $assignment.settings.$prop
+            }
         }
-        else {
-            Write-Host "      No assignments needed auto-update update" -ForegroundColor Gray
-            return $false
+        
+        $newAssignmentBody = @{
+            '@odata.type' = '#microsoft.graph.mobileAppAssignment'
+            intent = $assignment.intent
+            target = $assignment.target
+            settings = $settingsBody
         }
+        
+        # Delete the old assignment
+        $deleteUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments/$AssignmentId"
+        $null = Invoke-MgGraphRequest -Uri $deleteUri -Method DELETE
+        
+        # Create new assignment with auto-update enabled
+        $createUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+        $null = Invoke-MgGraphRequest -Uri $createUri -Method POST -Body ($newAssignmentBody | ConvertTo-Json -Depth 10) -ContentType 'application/json'
+        
+        Write-Host "      Enabled auto-update for assignment: $($assignment.target.'@odata.type' -replace '#microsoft.graph.','')" -ForegroundColor Green
+        return 1
     }
     catch {
         Write-Host "      Failed to enable auto-update: $_" -ForegroundColor Red
         Write-Host "      Error details: $($_.Exception.Message)" -ForegroundColor Red
-        return $false
+        return 0
     }
 }

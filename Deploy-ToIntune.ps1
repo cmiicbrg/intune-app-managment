@@ -45,35 +45,35 @@
 #>
 
 param(
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [string]$AppName,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [switch]$AssignToAllUsers,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [switch]$AssignToAllDevices,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [string]$AssignToGroupName,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [ValidateSet("Available", "Required")]
     [string]$GroupAssignmentIntent = "Available",
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [switch]$SkipInstallation,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $false)]
     [switch]$ForceUpdate,
     
-    [Parameter(Mandatory=$false)]
-    [string]$TenantId = "common",
+    [Parameter(Mandatory = $true)]
+    [string]$TenantId,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $true)]
     [string]$ClientId,
     
-    [Parameter(Mandatory=$false)]
+    [Parameter(Mandatory = $true)]
     [string]$ClientSecret
 )
 
@@ -82,6 +82,7 @@ $BaseDir = $PSScriptRoot
 
 # Import shared functions and configuration
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
+. (Join-Path $PSScriptRoot "AuthenticationManager.ps1")
 
 # Check and install IntuneWin32App module
 function Install-RequiredModules {
@@ -119,45 +120,6 @@ function Install-RequiredModules {
     return $true
 }
 
-# Connect to Microsoft Graph
-function Connect-ToIntune {
-    param(
-        [string]$TenantId,
-        [string]$ClientId,
-        [string]$ClientSecret
-    )
-    
-    Write-Host "`nConnecting to Microsoft Intune..." -ForegroundColor Cyan
-    Write-Host "Tenant ID: $TenantId" -ForegroundColor Gray
-    
-    try {
-        if ($ClientId -and $ClientSecret) {
-            # App-based authentication using secure string
-            Write-Host "Using app-based authentication (Client ID: $ClientId)" -ForegroundColor Gray
-            $secureSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
-            $credential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $ClientId, $secureSecret
-            Connect-MSIntuneGraph -TenantID $TenantId -ClientID $ClientId -ClientSecret $secureSecret
-        }
-        else {
-            # Interactive authentication
-            Write-Host "Using interactive authentication" -ForegroundColor Gray
-            Write-Host "Please enter your tenant ID (or press Enter to use 'common' for multi-tenant):" -ForegroundColor Yellow
-            $interactiveTenantId = Read-Host "Tenant ID"
-            if ([string]::IsNullOrWhiteSpace($interactiveTenantId)) {
-                $interactiveTenantId = "common"
-            }
-            Write-Host "A browser window will open for authentication..." -ForegroundColor Yellow
-            Connect-MSIntuneGraph -TenantID $interactiveTenantId
-        }
-        Write-Host "Successfully connected to Microsoft Intune!" -ForegroundColor Green
-        return $true
-    }
-    catch {
-        Write-Host "Failed to connect: $_" -ForegroundColor Red
-        return $false
-    }
-}
-
 # Create app configuration and upload
 function Publish-App {
     param(
@@ -184,294 +146,188 @@ function Publish-App {
         if ($allExistingApps) {
             Write-Host "  Found $($allExistingApps.Count) existing app(s) for '$AppName'" -ForegroundColor Yellow
             
-            # Check for exact match with current display name
-            $exactMatch = $allExistingApps | Where-Object { $_.displayName -eq $AppConfig.DisplayName }
+            # Analyze all existing apps to find versions (always check all, don't rely on exact match)
+            $oldVersionApps = @()
+            $sameVersionExists = $false
+            $newestOlderApp = $null
+            $newestOlderVersion = $null
             
-            if ($exactMatch) {
-                # Check if it's the same version using displayVersion property
-                if ($exactMatch.displayVersion -eq $AppConfig.AppVersion -and -not $ForceUpdate) {
-                    Write-Host "  Exact version match found: $($exactMatch.displayName) v$($exactMatch.displayVersion)" -ForegroundColor Yellow
-                    Write-Host "  Skipping - app already exists (use -ForceUpdate to recreate)" -ForegroundColor Yellow
-                    return $exactMatch
+            foreach ($existingApp in $allExistingApps) {
+                # Get version from displayVersion field or parse from display name
+                $existingVersion = $null
+                
+                if ($existingApp.displayVersion) {
+                    $existingVersion = $existingApp.displayVersion
+                    Write-Host "    - $($existingApp.displayName) (v$existingVersion)" -ForegroundColor Gray
                 }
                 else {
-                    # Same display name but different version - this is an update
-                    Write-Host "  Existing app: $($exactMatch.displayName) v$($exactMatch.displayVersion)" -ForegroundColor Yellow
-                    Write-Host "  New version: v$($AppConfig.AppVersion)" -ForegroundColor Cyan
-                    
-                    try {
-                        if ([version]$AppConfig.AppVersion -gt [version]$exactMatch.displayVersion) {
-                            Write-Host "  Creating newer version with supersedence..." -ForegroundColor Cyan
-                            $oldVersionApps = @($exactMatch)
-                        }
-                        else {
-                            Write-Host "  Version $($AppConfig.AppVersion) is not newer than existing $($exactMatch.displayVersion), skipping" -ForegroundColor Yellow
-                            return $exactMatch
-                        }
-                    }
-                    catch {
-                        Write-Host "  Warning: Could not compare versions, will create anyway" -ForegroundColor Yellow
-                        $oldVersionApps = @($exactMatch)
-                    }
-                }
-            }
-            else {
-                # No exact display name match, but similar apps found - check for older versions
-                Write-Host "  No exact match for display name, analyzing versions for supersedence..." -ForegroundColor Gray
-                $oldVersionApps = @()
-                $sameVersionExists = $false
-                $newestOlderApp = $null
-                $newestOlderVersion = $null
-                
-                foreach ($existingApp in $allExistingApps) {
-                    # Get version from displayVersion field or parse from display name
-                    $existingVersion = $null
-                    
-                    if ($existingApp.displayVersion) {
-                        $existingVersion = $existingApp.displayVersion
-                        Write-Host "    - $($existingApp.displayName) (v$existingVersion from displayVersion)" -ForegroundColor Gray
+                    # Try to extract version from display name
+                    if ($existingApp.displayName -match '(\d+(?:\.\d+)*)') {
+                        $existingVersion = $matches[1]
+                        Write-Host "    - $($existingApp.displayName) (v$existingVersion extracted from name)" -ForegroundColor Gray
                     }
                     else {
-                        # Try to extract version from display name
-                        if ($existingApp.displayName -match '(\d+(?:\.\d+)*)') {
-                            $existingVersion = $matches[1]
-                            Write-Host "    - $($existingApp.displayName) (v$existingVersion extracted from name)" -ForegroundColor Gray
-                        }
-                        else {
-                            Write-Host "    - $($existingApp.displayName) (version unknown - skipping)" -ForegroundColor Yellow
-                            continue
+                        Write-Host "    - $($existingApp.displayName) (version unknown - skipping)" -ForegroundColor Yellow
+                        continue
+                    }
+                }
+                
+                try {
+                    # Compare versions
+                    $existingVer = [version]$existingVersion
+                    $newVer = [version]$NewVersion
+                    
+                    if ($existingVer -lt $newVer) {
+                        Write-Host "      -> Older version: $existingVersion < $NewVersion" -ForegroundColor Gray
+                        
+                        # Track only the newest older version for supersedence (creates proper chain)
+                        if ($null -eq $newestOlderVersion -or $existingVer -gt $newestOlderVersion) {
+                            $newestOlderApp = $existingApp
+                            $newestOlderVersion = $existingVer
                         }
                     }
-                    
-                    try {
-                        # Compare versions
-                        $existingVer = [version]$existingVersion
-                        $newVer = [version]$NewVersion
-                        
-                        if ($existingVer -lt $newVer) {
-                            Write-Host "      -> Older version: $existingVersion < $NewVersion" -ForegroundColor Gray
-                            
-                            # Track only the newest older version for supersedence (creates proper chain)
-                            if ($null -eq $newestOlderVersion -or $existingVer -gt $newestOlderVersion) {
-                                $newestOlderApp = $existingApp
-                                $newestOlderVersion = $existingVer
-                            }
-                        }
-                        elseif ($existingVer -eq $newVer) {
-                            Write-Host "      -> Same version ($existingVersion = $NewVersion) - will skip creation" -ForegroundColor Yellow
+                    elseif ($existingVer -eq $newVer) {
+                        Write-Host "      -> Same version ($existingVersion = $NewVersion)" -ForegroundColor Yellow
+                        if (-not $ForceUpdate) {
                             $sameVersionExists = $true
                         }
-                        else {
-                            Write-Host "      -> Newer version exists ($existingVersion > $NewVersion)" -ForegroundColor Cyan
-                        }
                     }
-                    catch {
-                        Write-Host "      Warning: Could not compare versions: $_" -ForegroundColor Yellow
+                    else {
+                        Write-Host "      -> Newer version exists ($existingVersion > $NewVersion)" -ForegroundColor Cyan
                     }
-                }
-                
-                # Add only the newest older version for supersedence
-                if ($null -ne $newestOlderApp) {
-                    Write-Host "      -> Will supersede most recent older version: $($newestOlderApp.displayVersion)" -ForegroundColor Yellow
-                    $oldVersionApps += $newestOlderApp
-                }
-                
-                # Skip if same version already exists
-                if ($sameVersionExists) {
-                    Write-Host "  Skipping: Version $NewVersion already exists in Intune" -ForegroundColor Yellow
-                    $deployedApps += $AppName
-                    continue
-                }
-                
-                if ($oldVersionApps.Count -gt 0) {
-                    Write-Host "  Creating new version with supersedence for the most recent older version..." -ForegroundColor Cyan
-                }
-                else {
-                    Write-Host "  No older versions found - creating new app without supersedence" -ForegroundColor Gray
-                }
-            }
-            
-            # Create new app
-            $appParams = @{
-                FilePath = $IntuneWinPath
-                DisplayName = $AppConfig.DisplayName
-                Description = $AppConfig.Description
-                Publisher = $AppConfig.Publisher
-                AppVersion = $AppConfig.AppVersion
-                InstallExperience = $AppConfig.InstallExperience
-                RestartBehavior = $AppConfig.RestartBehavior
-                DetectionRule = $AppConfig.DetectionRules
-                RequirementRule = $AppConfig.RequirementRule
-                InstallCommandLine = $AppConfig.InstallCommandLine
-                UninstallCommandLine = $AppConfig.UninstallCommandLine
-                Verbose = $true
-            }
-            
-            # Add icon if available (must be converted to base64)
-            if ($IconPath -and (Test-Path $IconPath)) {
-                Write-Host "  Adding app icon: $(Split-Path $IconPath -Leaf)" -ForegroundColor Gray
-                try {
-                    $iconFile = New-IntuneWin32AppIcon -FilePath $IconPath
-                    $appParams.Icon = $iconFile
                 }
                 catch {
-                    Write-Host "  Warning: Failed to add icon: $_" -ForegroundColor Yellow
+                    Write-Host "      Warning: Could not compare versions: $_" -ForegroundColor Yellow
                 }
             }
             
-            # Upload app to Intune with error handling for Azure Storage failures
-            $Win32App = $null
-            try {
-                $Win32App = Add-IntuneWin32App @appParams -ErrorAction Stop
-                
-                # Validate that the app was created successfully with a valid ID
-                if (-not $Win32App -or -not $Win32App.id) {
-                    throw "App creation returned but no valid app ID was provided"
-                }
-                
-                Write-Host "  Successfully created new app: $($AppConfig.DisplayName) v$($AppConfig.AppVersion)" -ForegroundColor Green
-                Write-Host "    App ID: $($Win32App.id)" -ForegroundColor Gray
-            }
-            catch {
-                Write-Host "  Warning: Upload encountered an error: $_" -ForegroundColor Yellow
-                
-                # Check if app was created in Intune despite the error
-                Write-Host "  Checking if app was created in Intune..." -ForegroundColor Gray
-                Start-Sleep -Seconds 10
-                
-                $createdApp = Get-IntuneWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
-                if ($createdApp -and $createdApp.id) {
-                    Write-Host "  Found created app in Intune (ID: $($createdApp.id))" -ForegroundColor Green
-                    $Win32App = $createdApp
-                }
-                else {
-                    throw "App creation failed and app not found in Intune: $_"
-                }
+            # Add only the newest older version for supersedence
+            if ($null -ne $newestOlderApp) {
+                Write-Host "  Will supersede most recent older version: $($newestOlderApp.displayName) v$($newestOlderApp.displayVersion)" -ForegroundColor Yellow
+                $oldVersionApps = @($newestOlderApp)
             }
             
-            # Final validation
-            if (-not $Win32App -or -not $Win32App.id) {
-                throw "No valid app object available for supersedence and assignment operations"
+            # Skip if same version already exists (unless ForceUpdate)
+            if ($sameVersionExists) {
+                Write-Host "  Skipping: Version $NewVersion already exists in Intune (use -ForceUpdate to recreate)" -ForegroundColor Yellow
+                $deployedApps += $AppName
+                continue
             }
-                
-            # Set up supersedence for older versions
+            
             if ($oldVersionApps.Count -gt 0) {
-                Write-Host "  Setting up supersedence relationships..." -ForegroundColor Cyan
-                
-                foreach ($oldApp in $oldVersionApps) {
-                    try {
-                        Write-Host "    Superseding: $($oldApp.displayName) v$($oldApp.displayVersion)" -ForegroundColor Gray
-                        
-                        # Step 1: Create supersedence object (Update type, no uninstall)
-                        $supersedence = New-IntuneWin32AppSupersedence `
-                            -ID $oldApp.id `
-                            -SupersedenceType "Update"
-                        
-                        # Step 2: Add supersedence to the new app
-                        Add-IntuneWin32AppSupersedence `
-                            -ID $Win32App.id `
-                            -Supersedence $supersedence `
-                            -Verbose
-                        
-                        Write-Host "    [OK] Supersedence configured (Update): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
-                    }
-                    catch {
-                        Write-Host "    [Err] Failed to set supersedence for $($oldApp.displayName): $_" -ForegroundColor Red
-                    }
-                }
-                
-                # Enable auto-update for assignments after supersedence is configured
-                Write-Host "  Enabling auto-update for superseded app assignments..." -ForegroundColor Cyan
-                try {
-                    # Ensure Microsoft Graph is connected
-                    try {
-                        $null = Get-MgContext -ErrorAction Stop
-                    }
-                    catch {
-                        Write-Host "  Connecting to Microsoft Graph for auto-update configuration..." -ForegroundColor Gray
-                        if ($ClientId -and $ClientSecret) {
-                            $secureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
-                            $credential = New-Object System.Management.Automation.PSCredential($ClientId, $secureSecret)
-                            Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $credential -NoWelcome
-                        }
-                        else {
-                            Connect-MgGraph -TenantId $TenantId -Scopes "DeviceManagementApps.ReadWrite.All" -NoWelcome
-                        }
-                    }
-                    
-                    Enable-IntuneAppAutoUpdate -AppId $Win32App.id
-                }
-                catch {
-                    Write-Host "  Warning: Failed to enable auto-update: $_" -ForegroundColor Yellow
-                }
+                Write-Host "  Creating new version with supersedence..." -ForegroundColor Cyan
+            }
+            else {
+                Write-Host "  No older versions found - creating new app without supersedence" -ForegroundColor Gray
             }
         }
         else {
             Write-Host "  No existing apps found - creating new..." -ForegroundColor Cyan
-            # Create the Win32 app
-            $appParams = @{
-                FilePath = $IntuneWinPath
-                DisplayName = $AppConfig.DisplayName
-                Description = $AppConfig.Description
-                Publisher = $AppConfig.Publisher
-                AppVersion = $AppConfig.AppVersion
-                InstallExperience = $AppConfig.InstallExperience
-                RestartBehavior = $AppConfig.RestartBehavior
-                DetectionRule = $AppConfig.DetectionRules
-                RequirementRule = $AppConfig.RequirementRule
-                InstallCommandLine = $AppConfig.InstallCommandLine
-                UninstallCommandLine = $AppConfig.UninstallCommandLine
-                Verbose = $true
-            }
+        }
             
-            # Add icon if available (must be converted to base64)
-            if ($IconPath -and (Test-Path $IconPath)) {
-                Write-Host "  Adding app icon: $(Split-Path $IconPath -Leaf)" -ForegroundColor Gray
-                try {
-                    $iconFile = New-IntuneWin32AppIcon -FilePath $IconPath
-                    $appParams.Icon = $iconFile
-                }
-                catch {
-                    Write-Host "  Warning: Failed to add icon: $_" -ForegroundColor Yellow
-                }
-            }
+        # Create new app
+        $appParams = @{
+            FilePath             = $IntuneWinPath
+            DisplayName          = $AppConfig.DisplayName
+            Description          = $AppConfig.Description
+            Publisher            = $AppConfig.Publisher
+            AppVersion           = $AppConfig.AppVersion
+            InstallExperience    = $AppConfig.InstallExperience
+            RestartBehavior      = $AppConfig.RestartBehavior
+            DetectionRule        = $AppConfig.DetectionRules
+            RequirementRule      = $AppConfig.RequirementRule
+            InstallCommandLine   = $AppConfig.InstallCommandLine
+            UninstallCommandLine = $AppConfig.UninstallCommandLine
+            Verbose              = $true
+        }
             
-            # Upload app to Intune with error handling
-            $Win32App = $null
+        # Add icon if available (must be converted to base64)
+        if ($IconPath -and (Test-Path $IconPath)) {
+            Write-Host "  Adding app icon: $(Split-Path $IconPath -Leaf)" -ForegroundColor Gray
             try {
-                $Win32App = Add-IntuneWin32App @appParams -ErrorAction Stop
-                
-                if (-not $Win32App -or -not $Win32App.id) {
-                    throw "App creation returned but no valid app ID was provided"
-                }
-                
-                Write-Host "  Successfully created app: $($AppConfig.DisplayName) v$($AppConfig.AppVersion)" -ForegroundColor Green
-                Write-Host "    App ID: $($Win32App.id)" -ForegroundColor Gray
+                $iconFile = New-IntuneWin32AppIcon -FilePath $IconPath
+                $appParams.Icon = $iconFile
             }
             catch {
-                Write-Host "  Warning: Upload encountered an error: $_" -ForegroundColor Yellow
-                Write-Host "  Checking if app was created in Intune..." -ForegroundColor Gray
-                Start-Sleep -Seconds 10
-                
-                $createdApp = Get-IntuneWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
-                if ($createdApp -and $createdApp.id) {
-                    Write-Host "  Found created app in Intune (ID: $($createdApp.id))" -ForegroundColor Green
-                    $Win32App = $createdApp
-                }
-                else {
-                    throw "App creation failed and app not found in Intune: $_"
-                }
+                Write-Host "  Warning: Failed to add icon: $_" -ForegroundColor Yellow
             }
+        }
             
+        # Upload app to Intune with error handling for Azure Storage failures
+        $Win32App = $null
+        try {
+            $Win32App = Add-IntuneWin32App @appParams -ErrorAction Stop
+                
+            # Validate that the app was created successfully with a valid ID
             if (-not $Win32App -or -not $Win32App.id) {
-                throw "No valid app object available for assignment operations"
+                throw "App creation returned but no valid app ID was provided"
+            }
+                
+            Write-Host "  Successfully created new app: $($AppConfig.DisplayName) v$($AppConfig.AppVersion)" -ForegroundColor Green
+            Write-Host "    App ID: $($Win32App.id)" -ForegroundColor Gray
+        }
+        catch {
+            Write-Host "  Warning: Upload encountered an error: $_" -ForegroundColor Yellow
+                
+            # Check if app was created in Intune despite the error
+            Write-Host "  Checking if app was created in Intune..." -ForegroundColor Gray
+            Start-Sleep -Seconds 10
+                
+            $createdApp = Get-IntuneWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
+            if ($createdApp -and $createdApp.id) {
+                Write-Host "  Found created app in Intune (ID: $($createdApp.id))" -ForegroundColor Green
+                $Win32App = $createdApp
+            }
+            else {
+                throw "App creation failed and app not found in Intune: $_"
+            }
+        }
+            
+        # Final validation
+        if (-not $Win32App -or -not $Win32App.id) {
+            throw "No valid app object available for supersedence and assignment operations"
+        }
+                
+        # Set up supersedence for older versions
+        if ($oldVersionApps.Count -gt 0) {
+            Write-Host "  Setting up supersedence relationships..." -ForegroundColor Cyan
+                
+            foreach ($oldApp in $oldVersionApps) {
+                try {
+                    Write-Host "    Superseding: $($oldApp.displayName) v$($oldApp.displayVersion)" -ForegroundColor Gray
+                        
+                    # Get supersedence type from app config (default to "Update" if not specified)
+                    $supersedenceType = if ($AppConfig.SupersedenceType) { $AppConfig.SupersedenceType } else { "Update" }
+                    Write-Host "      Supersedence type: $supersedenceType" -ForegroundColor Gray
+                        
+                    # Step 1: Create supersedence object
+                    $supersedence = New-IntuneWin32AppSupersedence `
+                        -ID $oldApp.id `
+                        -SupersedenceType $supersedenceType
+                        
+                    # Step 2: Add supersedence to the new app
+                    Add-IntuneWin32AppSupersedence `
+                        -ID $Win32App.id `
+                        -Supersedence $supersedence `
+                        -Verbose
+                        
+                    Write-Host "    [OK] Supersedence configured (Update): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
+                }
+                catch {
+                    Write-Host "    [Err] Failed to set supersedence for $($oldApp.displayName): $_" -ForegroundColor Red
+                }
             }
         }
         
-        # Assign if requested
+        # Assign if requested and collect assignment IDs for auto-update
+        $assignmentIds = @()
+        
         if ($AssignToAllUsers) {
             Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-            Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent "available" -Notification "showAll"
+            $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent "available" -Notification "showAll"
+            if ($assignment -and $assignment.id) {
+                $assignmentIds += $assignment.id
+            }
             Write-Host "  Assigned to All Users" -ForegroundColor Green
         }
         
@@ -492,23 +348,10 @@ function Publish-App {
                 }
                 Import-Module Microsoft.Graph.Groups -ErrorAction Stop
                 
-                # Connect to Microsoft Graph if not already connected
-                try {
-                    # Test if already connected by attempting to get the context
-                    $null = Get-MgContext -ErrorAction Stop
-                }
-                catch {
-                    Write-Host "  Connecting to Microsoft Graph..." -ForegroundColor Gray
-                    if ($ClientId -and $ClientSecret) {
-                        # Use app-based authentication with client credentials
-                        $secureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
-                        $credential = New-Object System.Management.Automation.PSCredential($ClientId, $secureSecret)
-                        Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $credential -NoWelcome
-                    }
-                    else {
-                        # Use interactive authentication
-                        Connect-MgGraph -TenantId $TenantId -Scopes "Group.Read.All" -NoWelcome
-                    }
+                # Ensure connection is still valid
+                if (-not (Test-IntuneConnection)) {
+                    Write-Warning "  Connection lost, group assignment will be skipped"
+                    continue
                 }
                 
                 # Query Azure AD group by display name
@@ -531,6 +374,34 @@ function Publish-App {
             catch {
                 Write-Host "  Warning: Failed to assign to group '$AssignToGroupName': $_" -ForegroundColor Yellow
                 Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+        
+        # Enable auto-update for assignments if supersedence was configured
+        if ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0) {
+            Write-Host "  Enabling auto-update for app assignments..." -ForegroundColor Cyan
+            try {
+                # Ensure connection is still valid
+                if (-not (Test-IntuneConnection)) {
+                    Write-Warning "  Connection lost, auto-update will be skipped"
+                }
+                else {
+                    $updatedCount = 0
+                    foreach ($assignmentId in $assignmentIds) {
+                        $result = Enable-IntuneAppAutoUpdate -AppId $Win32App.id -AssignmentId $assignmentId
+                        $updatedCount += [int]$result
+                    }
+                    
+                    if ($updatedCount -gt 0) {
+                        Write-Host "  Auto-update enabled for $updatedCount assignment(s)" -ForegroundColor Green
+                    }
+                    else {
+                        Write-Host "  No assignments were updated with auto-update" -ForegroundColor Yellow
+                    }
+                }
+            }
+            catch {
+                Write-Host "  Warning: Failed to enable auto-update: $_" -ForegroundColor Yellow
             }
         }
         
@@ -565,26 +436,39 @@ if (-not (Install-RequiredModules)) {
     exit 1
 }
 
-# Connect to Intune
-if (-not (Connect-ToIntune -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret)) {
-    Write-Host "`nFailed to connect to Intune. Exiting." -ForegroundColor Red
+# Authenticate to Microsoft Intune
+Write-Host "`nConnecting to Microsoft Intune..." -ForegroundColor Cyan
+Write-Host "Tenant ID: $TenantId" -ForegroundColor Gray
+
+if (-not $ClientId -or -not $ClientSecret) {
+    Write-Host "Error: ClientId and ClientSecret are required for authentication" -ForegroundColor Red
+    Write-Host "Usage: .\Deploy-ToIntune.ps1 -TenantId <tenant> -ClientId <id> -ClientSecret <secret>" -ForegroundColor Yellow
     exit 1
 }
 
+Write-Host "Using app-based authentication (Client ID: $ClientId)" -ForegroundColor Gray
+
+if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret)) {
+    Write-Host "`nAuthentication failed. Exiting." -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Successfully connected to Microsoft Intune!" -ForegroundColor Green
+
 # Define apps to deploy
 $appsToDeploy = @(
-    @{Name="Firefox"; Folder="firefox"; Pattern="Firefox-Setup-*-de.intunewin"; AppConfigName="Firefox"; PackageType="EXE"},
-    @{Name="Chrome"; Folder="chrome"; Pattern="GoogleChrome-*-Enterprise-x64.intunewin"; AppConfigName="Chrome"; PackageType="MSI"},
-    @{Name="7-Zip"; Folder="7zip"; Pattern="7z*-x64.intunewin"; AppConfigName="SevenZip"; PackageType="MSI"},
-    @{Name="GIMP"; Folder="gimp"; Pattern="gimp-*-setup*.intunewin"; AppConfigName="GIMP"; PackageType="EXE"},
-    @{Name="VLC"; Folder="vlc"; Pattern="vlc-*-win64.intunewin"; AppConfigName="VLC"; PackageType="EXE"},
-    @{Name="Notepad++"; Folder="npp"; Pattern="npp.*Installer.x64.intunewin"; AppConfigName="NotepadPlusPlus"; PackageType="EXE"},
-    @{Name="Affinity Studio"; Folder="affinity"; Pattern="Affinity*.intunewin"; AppConfigName="AffinityStudio"; PackageType="MSI"},
-    @{Name="Inkscape"; Folder="inkscape"; Pattern="inkscape-*.intunewin"; AppConfigName="Inkscape"; PackageType="MSI"},
-    @{Name="Audacity"; Folder="audacity"; Pattern="audacity-*.intunewin"; AppConfigName="Audacity"; PackageType="EXE"},
-    @{Name="LibreOffice"; Folder="libreoffice"; Pattern="LibreOffice_*.intunewin"; AppConfigName="LibreOffice"; PackageType="MSI"},
-    @{Name="OpenShot"; Folder="openshot"; Pattern="OpenShot-v*-x86_64.intunewin"; AppConfigName="OpenShot"; PackageType="EXE"},
-    @{Name="GeoGebra"; Folder="geogebra"; Pattern="GeoGebra-Windows-Installer-6-*.intunewin"; AppConfigName="GeoGebra"; PackageType="MSI"}
+    @{Name = "Firefox"; Folder = "firefox"; Pattern = "Firefox-Setup-*-de.intunewin"; AppConfigName = "Firefox"; PackageType = "EXE" },
+    @{Name = "Chrome"; Folder = "chrome"; Pattern = "GoogleChrome-*-Enterprise-x64.intunewin"; AppConfigName = "Chrome"; PackageType = "MSI" },
+    @{Name = "7-Zip"; Folder = "7zip"; Pattern = "7z*-x64.intunewin"; AppConfigName = "SevenZip"; PackageType = "MSI" },
+    @{Name = "GIMP"; Folder = "gimp"; Pattern = "gimp-*-setup*.intunewin"; AppConfigName = "GIMP"; PackageType = "EXE" },
+    @{Name = "VLC"; Folder = "vlc"; Pattern = "vlc-*-win64.intunewin"; AppConfigName = "VLC"; PackageType = "EXE" },
+    @{Name = "Notepad++"; Folder = "npp"; Pattern = "npp.*Installer.x64.intunewin"; AppConfigName = "NotepadPlusPlus"; PackageType = "EXE" },
+    @{Name = "Affinity Studio"; Folder = "affinity"; Pattern = "Affinity*.intunewin"; AppConfigName = "AffinityStudio"; PackageType = "MSI" },
+    @{Name = "Inkscape"; Folder = "inkscape"; Pattern = "inkscape-*.intunewin"; AppConfigName = "Inkscape"; PackageType = "MSI" },
+    @{Name = "Audacity"; Folder = "audacity"; Pattern = "audacity-*.intunewin"; AppConfigName = "Audacity"; PackageType = "EXE" },
+    @{Name = "LibreOffice"; Folder = "libreoffice"; Pattern = "LibreOffice_*.intunewin"; AppConfigName = "LibreOffice"; PackageType = "MSI" },
+    @{Name = "OpenShot"; Folder = "openshot"; Pattern = "OpenShot-v*-x86_64.intunewin"; AppConfigName = "OpenShot"; PackageType = "EXE" },
+    @{Name = "GeoGebra"; Folder = "geogebra"; Pattern = "GeoGebra-Windows-Installer-6-*.intunewin"; AppConfigName = "GeoGebra"; PackageType = "MSI" }
 )
 
 # Filter apps if AppName parameter is specified
@@ -604,26 +488,14 @@ $deployedApps = @()
 $failedApps = @()
 
 foreach ($app in $appsToDeploy) {
-    # Validate token before each app deployment (tokens can expire)
-    try {
-        $null = Get-IntuneWin32App -ErrorAction Stop | Select-Object -First 1
-    }
-    catch {
-        if ($_.Exception.Message -like "*token*expired*" -or $_.Exception.Message -like "*authentication*") {
-            Write-Host "`n  Token expired, reconnecting..." -ForegroundColor Yellow
-            if ($ClientId -and $ClientSecret) {
-                Connect-MSIntuneGraph -TenantID $TenantId -ClientID $ClientId -ClientSecret $ClientSecret
-            }
-            else {
-                Write-Host "  Interactive re-authentication required" -ForegroundColor Yellow
-                $interactiveTenantId = Read-Host "Tenant ID"
-                if ([string]::IsNullOrWhiteSpace($interactiveTenantId)) {
-                    $interactiveTenantId = "common"
-                }
-                Connect-MSIntuneGraph -TenantID $interactiveTenantId
-            }
-            Write-Host "  Reconnected successfully!" -ForegroundColor Green
+    # Validate connection before each app deployment
+    if (-not (Test-IntuneConnection)) {
+        Write-Host "`n  Connection lost, attempting to reconnect..." -ForegroundColor Yellow
+        if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret)) {
+            Write-Host "  Reconnection failed, skipping remaining apps" -ForegroundColor Red
+            break
         }
+        Write-Host "  Reconnected successfully!" -ForegroundColor Green
     }
     
     Write-Host "`n[Deploying $($app.Name)]" -ForegroundColor Magenta
@@ -638,8 +510,8 @@ foreach ($app in $appsToDeploy) {
     # Find the latest intunewin package
     Write-Host "  Looking for pattern: $($app.Pattern)" -ForegroundColor Gray
     $intunewinFiles = Get-ChildItem -Path $appFolder -File | 
-        Where-Object { $_.Name -like $app.Pattern -and $_.Extension -eq ".intunewin" } | 
-        Sort-Object LastWriteTime -Descending
+    Where-Object { $_.Name -like $app.Pattern -and $_.Extension -eq ".intunewin" } | 
+    Sort-Object LastWriteTime -Descending
     
     if ($intunewinFiles.Count -eq 0) {
         Write-Host "  No IntuneWin package found matching pattern: $($app.Pattern)" -ForegroundColor Red
@@ -714,6 +586,11 @@ foreach ($app in $appsToDeploy) {
         }
     }
     
+    # Add SupersedenceType to appConfig if specified in config file
+    if ($appConfigFromFile.SupersedenceType) {
+        $appConfig.SupersedenceType = $appConfigFromFile.SupersedenceType
+    }
+    
     # Deploy the app with version info for supersedence
     $result = Publish-App `
         -AppName $app.Name `
@@ -752,3 +629,7 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "Deployment complete!" -ForegroundColor Green
 Write-Host "Check the Intune portal to verify deployments" -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Cyan
+
+# Clean up connection
+Write-Host "`nDisconnecting from Microsoft Graph..." -ForegroundColor Gray
+Disconnect-IntuneSession -Force
