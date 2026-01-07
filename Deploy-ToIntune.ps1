@@ -469,7 +469,8 @@ $appsToDeploy = @(
     @{Name = "LibreOffice"; Folder = "libreoffice"; Pattern = "LibreOffice_*.intunewin"; AppConfigName = "LibreOffice"; PackageType = "MSI" },
     @{Name = "OpenShot"; Folder = "openshot"; Pattern = "OpenShot-v*-x86_64.intunewin"; AppConfigName = "OpenShot"; PackageType = "EXE" },
     @{Name = "GeoGebra"; Folder = "geogebra"; Pattern = "GeoGebra-Windows-Installer-6-*.intunewin"; AppConfigName = "GeoGebra"; PackageType = "MSI" },
-    @{Name = "Stellarium"; Folder = "stellarium"; Pattern = "stellarium-*.intunewin"; AppConfigName = "Stellarium"; PackageType = "EXE" }
+    @{Name = "Stellarium"; Folder = "stellarium"; Pattern = "stellarium-*.intunewin"; AppConfigName = "Stellarium"; PackageType = "EXE" },
+    @{Name = "Google Drive"; Folder = "googledrive"; Pattern = "GoogleDriveSetup-*.intunewin"; AppConfigName = "GoogleDrive"; PackageType = "EXE" }
 )
 
 # Filter apps if AppName parameter is specified

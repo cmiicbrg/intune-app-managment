@@ -305,6 +305,28 @@ $script:AppConfigurations = @{
         DetectionOperator = "greaterThanOrEqual"
         AutoUpdate = $false
     }
+    
+    GoogleDrive = @{
+        Name = "GoogleDrive"
+        DisplayNameTemplate = "Google Drive {0}"
+        Publisher = "Google LLC"
+        Description = "Google Drive for Desktop - Access your Google Drive files directly from your computer"
+        Folder = "googledrive"
+        IconFile = "googledrive-logo.png"
+        IntuneWinPattern = "GoogleDriveSetup-*.intunewin"
+        DownloadUrl = "https://dl.google.com/drive-file-stream/GoogleDriveSetup.exe"
+        FallbackVersion = "Latest"
+        FilenameTemplate = "GoogleDriveSetup-{0}.exe"
+        PackageType = "EXE"
+        InstallCommandTemplate = '"{0}" --silent --desktop_shortcut --skip_launch_new --gsuite_shortcuts=false'
+        UninstallCommandTemplate = '"C:\Program Files\Google\Drive File Stream\{0}\GoogleDriveFS.exe" --uninstall --silent'
+        DetectionType = "Registry"
+        DetectionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6BBB3539-2232-434A-A4E5-9A33560C6283}"
+        DetectionValueName = "DisplayVersion"
+        DetectionOperator = "greaterThanOrEqual"
+        VersionExtraction = "AppLocker"
+        AutoUpdate = $true
+    }
 }
 
 # Common settings
