@@ -1,6 +1,11 @@
 # TenantConfig.ps1
 # Secure tenant configuration management with password-encrypted secrets
 # Secrets are stored AES-256 encrypted in a portable JSON file
+#
+# NOTE: Only one copy of this repository should be used per PowerShell session.
+# The credential cache is session-global, so loading multiple repo checkouts
+# (each with its own intune-tenants.json) in the same session can cause
+# cache collisions. Use separate PowerShell windows for separate checkouts.
 
 # Suppress PSScriptAnalyzer warning for internal helper functions that require plain strings for crypto operations
 # Public-facing functions use SecureString for user input
@@ -10,8 +15,8 @@ param()
 
 $script:ConfigFileName = "intune-tenants.json"
 $script:ConfigFilePath = Join-Path $PSScriptRoot $script:ConfigFileName
-if ($null -eq $script:CachedMasterKey) { $script:CachedMasterKey = $null }
-if ($null -eq $script:CachedTenantSecrets) { $script:CachedTenantSecrets = @{} }
+if ($null -eq $global:__IntuneCachedMasterKey) { $global:__IntuneCachedMasterKey = $null }
+if ($null -eq $global:__IntuneCachedTenantSecrets) { $global:__IntuneCachedTenantSecrets = @{} }
 
 #region Encryption Helpers
 
@@ -97,19 +102,22 @@ function Protect-Secret {
     $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
     
     $encryptor = $aes.CreateEncryptor()
-    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
-    $cipherBytes = $encryptor.TransformFinalBlock($plainBytes, 0, $plainBytes.Length)
+    try {
+        $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+        $cipherBytes = $encryptor.TransformFinalBlock($plainBytes, 0, $plainBytes.Length)
     
-    # Combine salt + IV + ciphertext
-    $combined = New-Object byte[] ($salt.Length + $iv.Length + $cipherBytes.Length)
-    [System.Buffer]::BlockCopy($salt, 0, $combined, 0, $salt.Length)
-    [System.Buffer]::BlockCopy($iv, 0, $combined, $salt.Length, $iv.Length)
-    [System.Buffer]::BlockCopy($cipherBytes, 0, $combined, $salt.Length + $iv.Length, $cipherBytes.Length)
+        # Combine salt + IV + ciphertext
+        $combined = New-Object byte[] ($salt.Length + $iv.Length + $cipherBytes.Length)
+        [System.Buffer]::BlockCopy($salt, 0, $combined, 0, $salt.Length)
+        [System.Buffer]::BlockCopy($iv, 0, $combined, $salt.Length, $iv.Length)
+        [System.Buffer]::BlockCopy($cipherBytes, 0, $combined, $salt.Length + $iv.Length, $cipherBytes.Length)
     
-    # Cleanup
-    $aes.Dispose()
-    
-    return [System.Convert]::ToBase64String($combined)
+        return [System.Convert]::ToBase64String($combined)
+    }
+    finally {
+        $encryptor.Dispose()
+        $aes.Dispose()
+    }
 }
 
 function Unprotect-Secret {
@@ -152,12 +160,14 @@ function Unprotect-Secret {
         $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
         
         $decryptor = $aes.CreateDecryptor()
-        $plainBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
-        
-        # Cleanup
-        $aes.Dispose()
-        
-        return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+        try {
+            $plainBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
+            return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+        }
+        finally {
+            $decryptor.Dispose()
+            $aes.Dispose()
+        }
     }
     catch {
         return $null
@@ -220,7 +230,7 @@ function Get-CachedMasterKey {
     .SYNOPSIS
     Gets the master key from the in-session cache
     #>
-    return $script:CachedMasterKey
+    return $global:__IntuneCachedMasterKey
 }
 
 function Set-CachedMasterKey {
@@ -233,7 +243,7 @@ function Set-CachedMasterKey {
         [string]$Password
     )
     
-    $script:CachedMasterKey = $Password
+    $global:__IntuneCachedMasterKey = $Password
 }
 
 function Get-CachedTenantSecret {
@@ -246,7 +256,7 @@ function Get-CachedTenantSecret {
         [string]$TenantName
     )
     
-    return $script:CachedTenantSecrets[$TenantName]
+    return $global:__IntuneCachedTenantSecrets[$TenantName]
 }
 
 function Set-CachedTenantSecret {
@@ -262,7 +272,7 @@ function Set-CachedTenantSecret {
         [string]$Secret
     )
     
-    $script:CachedTenantSecrets[$TenantName] = $Secret
+    $global:__IntuneCachedTenantSecrets[$TenantName] = $Secret
 }
 
 function Clear-CachedTenantSecret {
@@ -275,7 +285,7 @@ function Clear-CachedTenantSecret {
         [string]$TenantName
     )
     
-    $script:CachedTenantSecrets.Remove($TenantName)
+    $global:__IntuneCachedTenantSecrets.Remove($TenantName)
 }
 
 #endregion
@@ -388,25 +398,6 @@ function Add-IntuneTenant {
         Write-Host "A tenant with name '$Name' already exists." -ForegroundColor Yellow
         Write-Host "To update it, first remove it with: Remove-IntuneTenant -Name '$Name'" -ForegroundColor Yellow
         return
-    }
-    
-    # Check for cache key collision with existing tenants
-    # Names like "School-1" and "School_1" both map to INTUNE_SECRET_SCHOOL_1
-    $newCacheKey = $Name.ToUpper() -replace '[^A-Z0-9]', '_'
-    foreach ($existingName in $config.tenants.PSObject.Properties.Name) {
-        $existingCacheKey = $existingName.ToUpper() -replace '[^A-Z0-9]', '_'
-        if ($existingCacheKey -eq $newCacheKey) {
-            Write-Host "Warning: Tenant name '$Name' has a cache key collision with existing tenant '$existingName'." -ForegroundColor Yellow
-            Write-Host "Both names map to the same session cache key: INTUNE_SECRET_$newCacheKey" -ForegroundColor Yellow
-            Write-Host "This may cause incorrect credentials to be used when both tenants are accessed in the same session." -ForegroundColor Yellow
-            Write-Host ""
-            $confirm = Read-Host "Continue anyway? (y/N)"
-            if ($confirm -notmatch '^[Yy]') {
-                Write-Host "Aborted. Choose a different tenant name." -ForegroundColor Red
-                return
-            }
-            break
-        }
     }
     
     # Display setup instructions if TenantId not provided
@@ -725,7 +716,7 @@ function Get-IntuneTenant {
         
         # Decryption failed: clear cached master key and retry once
         Write-Host "Failed to decrypt client secret. Wrong password?" -ForegroundColor Red
-        $script:CachedMasterKey = $null
+        $global:__IntuneCachedMasterKey = $null
         
         if ($attempt -lt 2) {
             Write-Host "Cleared cached encryption password. Please try again." -ForegroundColor Yellow
@@ -853,10 +844,10 @@ function Clear-IntuneTenantCache {
     param()
     
     # Clear master key
-    $script:CachedMasterKey = $null
+    $global:__IntuneCachedMasterKey = $null
     
     # Clear all tenant secrets
-    $script:CachedTenantSecrets = @{}
+    $global:__IntuneCachedTenantSecrets = @{}
     
     Write-Host "Session cache cleared. You will need to enter the encryption password again." -ForegroundColor Green
 }

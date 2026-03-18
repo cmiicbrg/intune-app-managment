@@ -56,12 +56,15 @@ param(
     [string]$TenantName,
     
     [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]
+    [ValidateNotNullOrEmpty()]
     [string]$TenantId,
     
     [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]
+    [ValidateNotNullOrEmpty()]
     [string]$ClientId,
     
     [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]
+    [ValidateNotNullOrEmpty()]
     [string]$ClientSecret,
     
     [Parameter(Mandatory = $false)]

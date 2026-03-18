@@ -457,12 +457,13 @@ Clear-IntuneTenantCache
   - Each secret has a unique random salt and IV
   - File is portable — can be copied to other machines
   - **Excluded from git** via `.gitignore`
-  - Master password is cached in memory only (environment variable), never written to disk
+  - Master password is cached in memory only (global PowerShell variable), never written to disk
   
 - **Session Security**:
   - Decrypted secrets exist only in memory during PowerShell session
   - Run `Clear-IntuneTenantCache` before leaving workstation
   - Closing PowerShell automatically clears cached credentials
+  - **One checkout per session**: The credential cache is session-global. Do not use multiple copies of this repository in the same PowerShell window — use separate sessions instead
   
 - **App Registration Secrets**:
   - Set appropriate expiration periods (e.g., 24 months)
