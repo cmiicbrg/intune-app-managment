@@ -1,5 +1,8 @@
 # Ignore common binary files and build artifacts
 
+# Tenant configuration with encrypted secrets (portable but sensitive)
+intune-tenants.json
+
 # Executables & binaries
 *.exe
 *.dll
@@ -90,3 +93,5 @@ Download-AppLogos.ps1
 /tests/*
 packages/Lehrerkopierer/*
 packages/Schuelerkopierer/*
+
+tmp/
