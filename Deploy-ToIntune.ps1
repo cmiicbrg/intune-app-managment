@@ -52,6 +52,7 @@
 [CmdletBinding(DefaultParameterSetName = 'TenantName')]
 param(
     [Parameter(Mandatory = $true, ParameterSetName = 'TenantName')]
+    [ValidateNotNullOrEmpty()]
     [string]$TenantName,
     
     [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]

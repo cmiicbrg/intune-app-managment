@@ -148,14 +148,9 @@ For automated pipelines, you can still pass credentials directly:
 .\Deploy-ToIntune.ps1 -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret -AppName "Chrome"
 ```
 
-### Alternative: Interactive Authentication
-
-For one-time or testing scenarios, you can use interactive authentication:
-
-- Requires **Intune Administrator** or **Global Administrator** role
-- Browser-based authentication with your user account
-- **Note**: May require Microsoft Graph PowerShell app consent in your tenant
-- **Not recommended** for automated/scheduled deployments
+> **Note:** `Deploy-ToIntune.ps1` currently supports only client-secret-based authentication
+> (via stored tenant credentials or direct parameters as shown above). An interactive
+> user sign-in flow is **not** available at this time.
 
 ### Required Files
 

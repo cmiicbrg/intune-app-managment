@@ -10,7 +10,8 @@ param()
 
 $script:ConfigFileName = "intune-tenants.json"
 $script:ConfigFilePath = Join-Path $PSScriptRoot $script:ConfigFileName
-$script:MasterKeyEnvVar = "INTUNE_MASTER_KEY"
+if ($null -eq $script:CachedMasterKey) { $script:CachedMasterKey = $null }
+if ($null -eq $script:CachedTenantSecrets) { $script:CachedTenantSecrets = @{} }
 
 #region Encryption Helpers
 
@@ -30,14 +31,24 @@ function Get-DerivedKey {
     $iterations = 100000  # OWASP recommended minimum for PBKDF2-SHA256
     $keySize = 32  # 256 bits for AES-256
     
-    $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
-        $Password, 
-        $Salt, 
-        $iterations, 
-        [System.Security.Cryptography.HashAlgorithmName]::SHA256
-    )
+    $deriveBytes = $null
+    try {
+        $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
+            $Password, 
+            $Salt, 
+            $iterations, 
+            [System.Security.Cryptography.HashAlgorithmName]::SHA256
+        )
+        
+        $keyBytes = $deriveBytes.GetBytes($keySize)
+    }
+    finally {
+        if ($null -ne $deriveBytes) {
+            $deriveBytes.Dispose()
+        }
+    }
     
-    return $deriveBytes.GetBytes($keySize)
+    return $keyBytes
 }
 
 function Protect-Secret {
@@ -67,8 +78,13 @@ function Protect-Secret {
     $salt = New-Object byte[] 16
     $iv = New-Object byte[] 16
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $rng.GetBytes($salt)
-    $rng.GetBytes($iv)
+    try {
+        $rng.GetBytes($salt)
+        $rng.GetBytes($iv)
+    }
+    finally {
+        $rng.Dispose()
+    }
     
     # Derive key from password
     $key = Get-DerivedKey -Password $Password -Salt $salt
@@ -163,7 +179,18 @@ function Read-TenantConfig {
     #>
     if (Test-Path $script:ConfigFilePath) {
         $content = Get-Content -Path $script:ConfigFilePath -Raw -Encoding UTF8
-        return $content | ConvertFrom-Json
+        try {
+            $config = $content | ConvertFrom-Json
+        }
+        catch {
+            throw "Failed to parse tenant configuration file '$script:ConfigFilePath'. The file may contain invalid JSON. Fix or delete the file before retrying."
+        }
+        
+        if ($null -eq $config -or -not ($config.PSObject.Properties.Name -contains 'tenants')) {
+            throw "Tenant configuration file '$script:ConfigFilePath' is missing required 'tenants' field. Fix or delete the file before retrying."
+        }
+        
+        return $config
     }
     else {
         return [PSCustomObject]@{ tenants = [PSCustomObject]@{} }
@@ -191,22 +218,22 @@ function Write-TenantConfig {
 function Get-CachedMasterKey {
     <#
     .SYNOPSIS
-    Gets the master key from session cache (environment variable)
+    Gets the master key from the in-session cache
     #>
-    return [System.Environment]::GetEnvironmentVariable($script:MasterKeyEnvVar, "Process")
+    return $script:CachedMasterKey
 }
 
 function Set-CachedMasterKey {
     <#
     .SYNOPSIS
-    Caches the master key in the session (environment variable)
+    Caches the master key in the current session
     #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$Password
     )
     
-    [System.Environment]::SetEnvironmentVariable($script:MasterKeyEnvVar, $Password, "Process")
+    $script:CachedMasterKey = $Password
 }
 
 function Get-CachedTenantSecret {
@@ -219,8 +246,7 @@ function Get-CachedTenantSecret {
         [string]$TenantName
     )
     
-    $envVarName = "INTUNE_SECRET_$($TenantName.ToUpper() -replace '[^A-Z0-9]', '_')"
-    return [System.Environment]::GetEnvironmentVariable($envVarName, "Process")
+    return $script:CachedTenantSecrets[$TenantName]
 }
 
 function Set-CachedTenantSecret {
@@ -236,8 +262,7 @@ function Set-CachedTenantSecret {
         [string]$Secret
     )
     
-    $envVarName = "INTUNE_SECRET_$($TenantName.ToUpper() -replace '[^A-Z0-9]', '_')"
-    [System.Environment]::SetEnvironmentVariable($envVarName, $Secret, "Process")
+    $script:CachedTenantSecrets[$TenantName] = $Secret
 }
 
 function Clear-CachedTenantSecret {
@@ -250,8 +275,7 @@ function Clear-CachedTenantSecret {
         [string]$TenantName
     )
     
-    $envVarName = "INTUNE_SECRET_$($TenantName.ToUpper() -replace '[^A-Z0-9]', '_')"
-    [System.Environment]::SetEnvironmentVariable($envVarName, $null, "Process")
+    $script:CachedTenantSecrets.Remove($TenantName)
 }
 
 #endregion
@@ -460,9 +484,16 @@ function Add-IntuneTenant {
     Write-Host ""
     
     $secureSecret = Read-Host "Enter Client Secret Value" -AsSecureString
-    $clientSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
-    )
+    $clientSecretPtr = [System.IntPtr]::Zero
+    try {
+        $clientSecretPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
+        $clientSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($clientSecretPtr)
+    }
+    finally {
+        if ($clientSecretPtr -ne [System.IntPtr]::Zero) {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($clientSecretPtr)
+        }
+    }
     
     if ([string]::IsNullOrWhiteSpace($clientSecret)) {
         Write-Host "Client Secret is required. Aborting." -ForegroundColor Red
@@ -500,9 +531,16 @@ function Add-IntuneTenant {
         Write-Host ""
         
         $securePassword = Read-Host "Enter encryption password" -AsSecureString
-        $masterKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-        )
+        $masterKeyPtr = [System.IntPtr]::Zero
+        try {
+            $masterKeyPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+            $masterKey = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($masterKeyPtr)
+        }
+        finally {
+            if ($masterKeyPtr -ne [System.IntPtr]::Zero) {
+                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($masterKeyPtr)
+            }
+        }
         
         if ([string]::IsNullOrWhiteSpace($masterKey)) {
             Write-Host "Encryption password is required. Aborting." -ForegroundColor Red
@@ -514,9 +552,16 @@ function Add-IntuneTenant {
         if (-not (Test-Path $script:ConfigFilePath)) {
             # New config - confirm password
             $securePasswordConfirm = Read-Host "Confirm encryption password" -AsSecureString
-            $masterKeyConfirm = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-                [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePasswordConfirm)
-            )
+            $confirmPtr = [System.IntPtr]::Zero
+            try {
+                $confirmPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePasswordConfirm)
+                $masterKeyConfirm = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($confirmPtr)
+            }
+            finally {
+                if ($confirmPtr -ne [System.IntPtr]::Zero) {
+                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($confirmPtr)
+                }
+            }
             
             if ($masterKey -ne $masterKeyConfirm) {
                 Write-Host "Passwords do not match. Aborting." -ForegroundColor Red
@@ -640,38 +685,55 @@ function Get-IntuneTenant {
         }
     }
     
-    # Get or prompt for master password
-    $masterKey = Get-CachedMasterKey
-    if (-not $masterKey) {
-        Write-Host "Enter encryption password for tenant config:" -ForegroundColor Cyan
-        $securePassword = Read-Host "Password" -AsSecureString
-        $masterKey = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-        )
+    # Get or prompt for master password, with retry on decryption failure
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $masterKey = Get-CachedMasterKey
+        if (-not $masterKey) {
+            Write-Host "Enter encryption password for tenant config:" -ForegroundColor Cyan
+            $securePassword = Read-Host "Password" -AsSecureString
+            $passwordPtr = [System.IntPtr]::Zero
+            try {
+                $passwordPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
+                $masterKey = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPtr)
+            }
+            finally {
+                if ($passwordPtr -ne [System.IntPtr]::Zero) {
+                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr)
+                }
+            }
+            
+            if ([string]::IsNullOrWhiteSpace($masterKey)) {
+                Write-Host "Password is required." -ForegroundColor Red
+                return $null
+            }
+        }
         
-        if ([string]::IsNullOrWhiteSpace($masterKey)) {
-            Write-Host "Password is required." -ForegroundColor Red
-            return $null
+        # Decrypt the secret
+        $clientSecret = Unprotect-Secret -EncryptedBase64 $tenant.encryptedSecret -Password $masterKey
+        
+        if ($null -ne $clientSecret) {
+            # Cache for this session
+            Set-CachedMasterKey -Password $masterKey
+            Set-CachedTenantSecret -TenantName $Name -Secret $clientSecret
+            
+            return [PSCustomObject]@{
+                TenantId     = $tenant.tenantId
+                ClientId     = $tenant.clientId
+                ClientSecret = $clientSecret
+            }
+        }
+        
+        # Decryption failed: clear cached master key and retry once
+        Write-Host "Failed to decrypt client secret. Wrong password?" -ForegroundColor Red
+        $script:CachedMasterKey = $null
+        
+        if ($attempt -lt 2) {
+            Write-Host "Cleared cached encryption password. Please try again." -ForegroundColor Yellow
         }
     }
     
-    # Decrypt the secret
-    $clientSecret = Unprotect-Secret -EncryptedBase64 $tenant.encryptedSecret -Password $masterKey
-    
-    if ($null -eq $clientSecret) {
-        Write-Host "Failed to decrypt client secret. Wrong password?" -ForegroundColor Red
-        return $null
-    }
-    
-    # Cache for this session
-    Set-CachedMasterKey -Password $masterKey
-    Set-CachedTenantSecret -TenantName $Name -Secret $clientSecret
-    
-    return [PSCustomObject]@{
-        TenantId     = $tenant.tenantId
-        ClientId     = $tenant.clientId
-        ClientSecret = $clientSecret
-    }
+    # All attempts exhausted
+    return $null
 }
 
 function Get-AllIntuneTenants {
@@ -713,7 +775,7 @@ function Get-AllIntuneTenants {
         }
     }
     
-    return $tenants | Format-Table -AutoSize
+    return $tenants
 }
 
 function Remove-IntuneTenant {
@@ -781,7 +843,7 @@ function Clear-IntuneTenantCache {
     Clears all cached credentials from the current session
     
     .DESCRIPTION
-    Removes the master password and all decrypted secrets from environment variables.
+    Removes the master password and all decrypted secrets from the session cache.
     Use this when switching users or before leaving your workstation.
     
     .EXAMPLE
@@ -791,15 +853,10 @@ function Clear-IntuneTenantCache {
     param()
     
     # Clear master key
-    [System.Environment]::SetEnvironmentVariable($script:MasterKeyEnvVar, $null, "Process")
+    $script:CachedMasterKey = $null
     
     # Clear all tenant secrets
-    $envVars = [System.Environment]::GetEnvironmentVariables("Process")
-    foreach ($key in $envVars.Keys) {
-        if ($key -like "INTUNE_SECRET_*") {
-            [System.Environment]::SetEnvironmentVariable($key, $null, "Process")
-        }
-    }
+    $script:CachedTenantSecrets = @{}
     
     Write-Host "Session cache cleared. You will need to enter the encryption password again." -ForegroundColor Green
 }
@@ -808,8 +865,11 @@ function Clear-IntuneTenantCache {
 
 # Export functions (only works when imported as module)
 if ($MyInvocation.Line -notmatch '^\.\s') {
-    # Script is being run directly, not dot-sourced
-    Write-Host "TenantConfig.ps1 loaded. Available commands:" -ForegroundColor Cyan
+    # Script is being run directly, not dot-sourced — functions won't remain in the caller's session
+    Write-Host "To use these commands in your current PowerShell session, dot-source this script:" -ForegroundColor Cyan
+    Write-Host "  . .\TenantConfig.ps1" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "After dot-sourcing, the following commands will be available:" -ForegroundColor Cyan
     Write-Host "  Add-IntuneTenant      - Add a new tenant configuration"
     Write-Host "  Get-IntuneTenant      - Get credentials for a tenant"
     Write-Host "  Get-AllIntuneTenants  - List all configured tenants"
