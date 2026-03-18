@@ -28,7 +28,7 @@ function Initialize-IntuneAuthentication {
         - Group.Read.All
     
     .PARAMETER TenantId
-        Azure AD Tenant ID (GUID or domain.onmicrosoft.com)
+        Azure AD Tenant ID (GUID)
     
     .PARAMETER ClientId
         Azure AD App Registration Client ID (Application ID)
@@ -40,7 +40,7 @@ function Initialize-IntuneAuthentication {
         Optional array of required permission scopes. Defaults to Intune management scopes.
     
     .EXAMPLE
-        Initialize-IntuneAuthentication -TenantId "contoso.onmicrosoft.com" -ClientId "abc123" -ClientSecret "secret123"
+        Initialize-IntuneAuthentication -TenantId "00000000-0000-0000-0000-000000000000" -ClientId "abc123" -ClientSecret "secret123"
     
     .OUTPUTS
         Boolean - $true if connection successful, $false otherwise

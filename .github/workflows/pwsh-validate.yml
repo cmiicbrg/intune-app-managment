@@ -1,0 +1,45 @@
+name: PowerShell Validation
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  merge_group:
+
+jobs:
+  pwsh-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Parse PowerShell scripts
+        shell: pwsh
+        run: |
+          $hadErrors = $false
+
+          Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' -and $_.FullName -notmatch '[\\/]\.git[\\/]'} | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            )
+
+            if ($errors.Count -gt 0) {
+              $hadErrors = $true
+              Write-Host "::error file=$($_.FullName)::PowerShell syntax validation failed"
+
+              $errors | ForEach-Object {
+                Write-Host "::error file=$($_.Extent.File),line=$($_.Extent.StartLineNumber),col=$($_.Extent.StartColumnNumber)::$($_.Message)"
+              }
+            }
+          }
+
+          if ($hadErrors) {
+            throw "PowerShell syntax validation failed."
+          }
