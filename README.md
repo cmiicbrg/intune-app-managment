@@ -114,18 +114,35 @@ Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force
 8. Confirm by clicking **Yes**
 9. Verify all permissions show green checkmarks under "Status"
 
-#### Step 5: Test the Configuration
+#### Step 5: Save Tenant Configuration (Recommended)
 
-Save your values in a secure location:
+Instead of passing secrets on the command line, save your tenant configuration securely:
 
 ```powershell
-# Your configuration values:
-$TenantId = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"      # Directory (tenant) ID
-$ClientId = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"      # Application (client) ID
-$ClientSecret = "your-secret-value-here"                 # Client secret Value
+# Import the tenant configuration module
+. .\TenantConfig.ps1
+
+# Add your tenant (interactive wizard with credential testing)
+Add-IntuneTenant -Name "School"
 ```
 
-Test the connection:
+The wizard will:
+
+1. Guide you through finding your Tenant ID and creating an app registration
+2. Prompt for your Client Secret (entered securely, not shown)
+3. **Test the credentials** before saving
+4. Encrypt the secret with a master password you choose
+5. Save to `intune-tenants.json` (excluded from git)
+
+**Session workflow:**
+
+- First command in a new PowerShell session prompts for your encryption password
+- Password is cached in memory for the session (no repeated prompts)
+- Secrets never appear in command history or process lists
+
+#### Alternative: Direct Credentials (for CI/CD)
+
+For automated pipelines, you can still pass credentials directly:
 
 ```powershell
 .\Deploy-ToIntune.ps1 -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret -AppName "Chrome"
@@ -148,10 +165,21 @@ For one-time or testing scenarios, you can use interactive authentication:
   - Latest version: Check releases page above
 - `AppConfig.ps1` - Application configuration (included)
 - `SharedFunctions.ps1` - Common functions (included)
+- `TenantConfig.ps1` - Secure tenant credential management (included)
 
 ## Quick Start
 
-### 1. Download and Package Software
+### 1. Configure Your Tenant (One-Time Setup)
+
+```powershell
+# Import tenant configuration module
+. .\TenantConfig.ps1
+
+# Add a tenant - interactive wizard guides you through Azure AD setup
+Add-IntuneTenant -Name "School"
+```
+
+### 2. Download and Package Software
 
 Download latest versions and create IntuneWin packages:
 
@@ -163,41 +191,31 @@ Download latest versions and create IntuneWin packages:
 .\Download-And-Package-Software.ps1 -AppName "Chrome"
 ```
 
-### 2. Deploy to Intune (Recommended: App-Based Authentication)
+### 3. Deploy to Intune
 
-Upload packages to Intune with automatic configuration using app registration:
+Upload packages to Intune with automatic configuration:
 
 ```powershell
-# Deploy all applications with app-based auth (recommended)
-.\Deploy-ToIntune.ps1 `
-    -TenantId "your-tenant-id" `
-    -ClientId "your-app-client-id" `
-    -ClientSecret "your-client-secret" `
-    -AssignToAllUsers
+# Deploy all applications (prompts for encryption password once per session)
+.\Deploy-ToIntune.ps1 -TenantName "School" -AssignToAllUsers
 
 # Deploy single application
-.\Deploy-ToIntune.ps1 `
-    -TenantId "your-tenant-id" `
-    -ClientId "your-app-client-id" `
-    -ClientSecret "your-client-secret" `
-    -AppName "Chrome" `
-    -AssignToAllUsers
+.\Deploy-ToIntune.ps1 -TenantName "School" -AppName "Chrome" -AssignToAllUsers
 
 # Deploy to devices instead of users
-.\Deploy-ToIntune.ps1 `
-    -TenantId "your-tenant-id" `
-    -ClientId "your-app-client-id" `
-    -ClientSecret "your-client-secret" `
-    -AssignToAllDevices
+.\Deploy-ToIntune.ps1 -TenantName "School" -AssignToAllDevices
 ```
 
-### 3. Alternative: Interactive Authentication
+### Alternative: Direct Credentials (CI/CD Pipelines)
 
-For one-time testing only (not recommended for production):
+For automated deployments where secrets come from environment variables or vault:
 
 ```powershell
-# Interactive login - will prompt for tenant ID
-.\Deploy-ToIntune.ps1 -AppName "Chrome"
+.\Deploy-ToIntune.ps1 `
+    -TenantId $env:INTUNE_TENANT_ID `
+    -ClientId $env:INTUNE_CLIENT_ID `
+    -ClientSecret $env:INTUNE_CLIENT_SECRET `
+    -AssignToAllUsers
 ```
 
 ## Usage Examples
@@ -215,11 +233,17 @@ For one-time testing only (not recommended for production):
 ### Deploy to Multiple Tenants
 
 ```powershell
-# Tenant 1
-.\Deploy-ToIntune.ps1 -TenantId "tenant1-id" -ClientId "app1-id" -ClientSecret "secret1" -AssignToAllUsers
+# Configure tenants once
+. .\TenantConfig.ps1
+Add-IntuneTenant -Name "School"
+Add-IntuneTenant -Name "District"
 
-# Tenant 2
-.\Deploy-ToIntune.ps1 -TenantId "tenant2-id" -ClientId "app2-id" -ClientSecret "secret2" -AssignToAllDevices
+# Deploy to different tenants (same encryption password for both)
+.\Deploy-ToIntune.ps1 -TenantName "School" -AssignToAllUsers
+.\Deploy-ToIntune.ps1 -TenantName "District" -AssignToAllDevices
+
+# List configured tenants
+Get-AllIntuneTenants
 ```
 
 ### Update Existing Apps
@@ -228,8 +252,8 @@ For one-time testing only (not recommended for production):
 # Download new versions
 .\Download-And-Package-Software.ps1
 
-# Deploy updates with app-based auth (new versions supersede old ones automatically)
-.\Deploy-ToIntune.ps1 -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+# Deploy updates (new versions supersede old ones automatically)
+.\Deploy-ToIntune.ps1 -TenantName "School"
 ```
 
 ## File Structure
@@ -238,9 +262,12 @@ For one-time testing only (not recommended for production):
 intune-app-management/
 ├── AppConfig.ps1                          # Application configuration
 ├── SharedFunctions.ps1                    # Shared functions
+├── TenantConfig.ps1                       # Secure tenant credential management
+├── AuthenticationManager.ps1              # Microsoft Graph authentication
 ├── Download-And-Package-Software.ps1      # Download & packaging script
 ├── Deploy-ToIntune.ps1                    # Deployment script
 ├── VERSION.txt                            # Version tracking
+├── intune-tenants.json                    # Encrypted tenant config (git-ignored)
 ├── packages/                              # Application packages
 │   ├── firefox/
 │   │   ├── Firefox-Setup-145.0.2-de.exe
@@ -402,8 +429,8 @@ This error indicates Azure Storage upload failures, typically caused by:
 # 1. Download latest versions
 .\Download-And-Package-Software.ps1
 
-# 2. Deploy to Intune with app-based auth
-.\Deploy-ToIntune.ps1 -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+# 2. Deploy to Intune
+.\Deploy-ToIntune.ps1 -TenantName "School"
 ```
 
 ### Cleanup Old Versions
@@ -412,13 +439,39 @@ This error indicates Azure Storage upload failures, typically caused by:
 - Old .intunewin files are kept (one per version)
 - Manually retire old versions in Intune portal if needed
 
+### Tenant Management
+
+```powershell
+# Import module
+. .\TenantConfig.ps1
+
+# List all configured tenants
+Get-AllIntuneTenants
+
+# Remove a tenant
+Remove-IntuneTenant -Name "OldTenant"
+
+# Clear cached credentials (e.g., before leaving workstation)
+Clear-IntuneTenantCache
+```
+
 ## Security Considerations
 
+- **Tenant Configuration File** (`intune-tenants.json`):
+  - Client secrets are AES-256 encrypted with PBKDF2 key derivation (100,000 iterations)
+  - Each secret has a unique random salt and IV
+  - File is portable — can be copied to other machines
+  - **Excluded from git** via `.gitignore`
+  - Master password is cached in memory only (environment variable), never written to disk
+  
+- **Session Security**:
+  - Decrypted secrets exist only in memory during PowerShell session
+  - Run `Clear-IntuneTenantCache` before leaving workstation
+  - Closing PowerShell automatically clears cached credentials
+  
 - **App Registration Secrets**:
-  - Store client secrets securely (Azure Key Vault, password manager, or secure environment variables)
-  - Never commit secrets to version control
   - Set appropriate expiration periods (e.g., 24 months)
-  - Rotate secrets before expiration
+  - Rotate secrets before expiration (delete and re-add tenant)
   - Use different app registrations per environment (dev/test/prod)
   
 - **Permissions**:
@@ -429,10 +482,6 @@ This error indicates Azure Storage upload failures, typically caused by:
 - **Audit**:
   - Enable Intune audit logging
   - Monitor app registration sign-in logs in Azure AD
-  
-- **MFA**:
-  - Require for all administrator accounts
-  - Not applicable for app-based authentication (uses client secret instead)
 
 ## Time Estimates
 

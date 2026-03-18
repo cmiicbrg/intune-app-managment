@@ -95,3 +95,4 @@ packages/Lehrerkopierer/*
 packages/Schuelerkopierer/*
 
 tmp/
+sccm-management/

@@ -11,6 +11,10 @@
     This script automatically deploys all IntuneWin packages to Microsoft Intune.
     It uses the IntuneWin32App PowerShell module for proper Win32 app management.
 
+.PARAMETER TenantName
+    Name of pre-configured tenant from intune-tenants.json (see Add-IntuneTenant).
+    Use this OR provide TenantId/ClientId/ClientSecret directly.
+
 .PARAMETER AppName
     Optional. If specified, only deploys the specified app from AppConfig (e.g., "Firefox", "Chrome")
 
@@ -30,21 +34,35 @@
     If specified, creates new versions even if apps already exist (for updates/supersedence)
 
 .EXAMPLE
-    .\Deploy-ToIntune.ps1 -AssignToAllUsers
+    .\Deploy-ToIntune.ps1 -TenantName "School" -AssignToAllUsers
 
 .EXAMPLE
-    .\Deploy-ToIntune.ps1 -AppName "Firefox" -AssignToAllUsers
+    .\Deploy-ToIntune.ps1 -TenantName "School" -AppName "Firefox" -AssignToAllUsers
 
 .EXAMPLE
-    .\Deploy-ToIntune.ps1 -ForceUpdate -AssignToAllDevices
+    .\Deploy-ToIntune.ps1 -TenantId "xxx" -ClientId "yyy" -ClientSecret "zzz" -AppName "Chrome"
 
 .NOTES
     Prerequisites:
     1. Install-Module -Name IntuneWin32App
-    2. Appropriate Intune permissions (Intune Administrator or Global Administrator)
+    2. Configure tenant: Add-IntuneTenant -Name "YourTenant"
+       OR provide TenantId, ClientId, ClientSecret parameters directly
 #>
 
+[CmdletBinding(DefaultParameterSetName = 'TenantName')]
 param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'TenantName')]
+    [string]$TenantName,
+    
+    [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]
+    [string]$TenantId,
+    
+    [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]
+    [string]$ClientId,
+    
+    [Parameter(Mandatory = $true, ParameterSetName = 'DirectCredentials')]
+    [string]$ClientSecret,
+    
     [Parameter(Mandatory = $false)]
     [string]$AppName,
     
@@ -65,16 +83,7 @@ param(
     [switch]$SkipInstallation,
     
     [Parameter(Mandatory = $false)]
-    [switch]$ForceUpdate,
-    
-    [Parameter(Mandatory = $true)]
-    [string]$TenantId,
-    
-    [Parameter(Mandatory = $true)]
-    [string]$ClientId,
-    
-    [Parameter(Mandatory = $true)]
-    [string]$ClientSecret
+    [switch]$ForceUpdate
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +92,28 @@ $BaseDir = $PSScriptRoot
 # Import shared functions and configuration
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
 . (Join-Path $PSScriptRoot "AuthenticationManager.ps1")
+. (Join-Path $PSScriptRoot "TenantConfig.ps1")
+
+# Resolve TenantName to credentials if using that parameter set
+if ($PSCmdlet.ParameterSetName -eq 'TenantName') {
+    Write-Host "Loading credentials for tenant '$TenantName'..." -ForegroundColor Cyan
+    $tenantCreds = Get-IntuneTenant -Name $TenantName
+    
+    if ($null -eq $tenantCreds) {
+        Write-Host "Failed to retrieve credentials for tenant '$TenantName'." -ForegroundColor Red
+        Write-Host ""
+        Write-Host "To configure a new tenant, run:" -ForegroundColor Yellow
+        Write-Host "  . .\TenantConfig.ps1" -ForegroundColor Gray
+        Write-Host "  Add-IntuneTenant -Name '$TenantName'" -ForegroundColor Gray
+        exit 1
+    }
+    
+    $TenantId = $tenantCreds.TenantId
+    $ClientId = $tenantCreds.ClientId
+    $ClientSecret = $tenantCreds.ClientSecret
+    
+    Write-Host "Credentials loaded for tenant: $TenantName (TenantId: $TenantId)" -ForegroundColor Green
+}
 
 # Check and install IntuneWin32App module
 function Install-RequiredModules {
