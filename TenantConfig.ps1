@@ -56,6 +56,30 @@ function Get-DerivedKey {
     return $keyBytes
 }
 
+function Test-IntuneDecryptedSecret {
+    <#
+    .SYNOPSIS
+    Sanity-checks a decrypted client secret for plausibility
+    
+    .DESCRIPTION
+    AES-CBC decryption with a wrong password can occasionally produce non-$null
+    garbage (valid PKCS7 padding). This rejects secrets that are clearly invalid
+    so callers can fall back to the retry/re-prompt path.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Secret
+    )
+    
+    if ([string]::IsNullOrWhiteSpace($Secret)) { return $false }
+    if ($Secret.Length -lt 8 -or $Secret.Length -gt 256) { return $false }
+    foreach ($ch in $Secret.ToCharArray()) {
+        $code = [int][char]$ch
+        if ($code -lt 32 -or $code -gt 126) { return $false }
+    }
+    return $true
+}
+
 function Protect-Secret {
     <#
     .SYNOPSIS
@@ -567,7 +591,7 @@ function Add-IntuneTenant {
                 $testTenant = $config.tenants.$testTenantName
                 $testDecrypt = Unprotect-Secret -EncryptedBase64 $testTenant.encryptedSecret -Password $masterKey
                 
-                if ($null -eq $testDecrypt) {
+                if ($null -eq $testDecrypt -or -not (Test-IntuneDecryptedSecret -Secret $testDecrypt)) {
                     Write-Host "Incorrect encryption password (could not decrypt existing tenant '$testTenantName')." -ForegroundColor Red
                     Write-Host "Aborting to prevent mixing passwords in the config file." -ForegroundColor Yellow
                     return
@@ -702,7 +726,7 @@ function Get-IntuneTenant {
         # Decrypt the secret
         $clientSecret = Unprotect-Secret -EncryptedBase64 $tenant.encryptedSecret -Password $masterKey
         
-        if ($null -ne $clientSecret) {
+        if ($null -ne $clientSecret -and (Test-IntuneDecryptedSecret -Secret $clientSecret)) {
             # Cache for this session
             Set-CachedMasterKey -Password $masterKey
             Set-CachedTenantSecret -TenantName $Name -Secret $clientSecret
