@@ -855,7 +855,7 @@ function Clear-IntuneTenantCache {
 #endregion
 
 # Export functions (only works when imported as module)
-if ($MyInvocation.Line -notmatch '^\.\s') {
+if (($MyInvocation.InvocationName -ne '.') -and ($null -eq $MyInvocation.MyCommand.Module)) {
     # Script is being run directly, not dot-sourced — functions won't remain in the caller's session
     Write-Host "To use these commands in your current PowerShell session, dot-source this script:" -ForegroundColor Cyan
     Write-Host "  . .\TenantConfig.ps1" -ForegroundColor Yellow

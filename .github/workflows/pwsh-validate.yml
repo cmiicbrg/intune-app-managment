@@ -20,7 +20,7 @@ jobs:
         run: |
           $hadErrors = $false
 
-          Get-ChildItem -Recurse -File -Include *.ps1,*.psm1 | ForEach-Object {
+          Get-ChildItem -Recurse -File -Include *.ps1,*.psm1 | Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' } | ForEach-Object {
             $tokens = $null
             $errors = $null
 
