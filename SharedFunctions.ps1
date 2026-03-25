@@ -264,7 +264,10 @@ function Get-FileAppConfig {
     
     # Create detection rule based on detection type
     if ($appConfig.DetectionType -eq "Registry") {
-        if ($detectionOperator -eq "exists" -or $detectionOperator -eq "notExists") {
+        if ($detectionOperator -eq "exists" -or $detectionOperator -eq "doesNotExist" -or $detectionOperator -eq "notExists") {
+            if ($detectionOperator -eq "notExists") {
+                $detectionOperator = "doesNotExist"
+            }
             $existenceParams = @{
                 Existence            = $true
                 KeyPath              = $appConfig.DetectionPath
@@ -308,9 +311,9 @@ function Get-FileAppConfig {
     $DisplayName = $appConfig.DisplayNameTemplate -f $majorVersion
     $Description = $appConfig.Description
     
-    # Format commands
-    $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile
-    $UninstallCommand = $appConfig.UninstallCommandTemplate -f $SetupFile
+    # Format commands - {0} = setup filename, {1} = app version
+    $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile, $Version
+    $UninstallCommand = $appConfig.UninstallCommandTemplate -f $SetupFile, $Version
     
     return @{
         DisplayName = $DisplayName

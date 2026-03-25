@@ -358,6 +358,7 @@ function Publish-App {
         if ($AppConfig.Dependencies -and $AppConfig.Dependencies.Count -gt 0) {
             Write-Host "  Setting up dependency relationships..." -ForegroundColor Cyan
             $dependencyObjects = @()
+            $allIntuneApps = Get-IntuneWin32App
             
             foreach ($depName in $AppConfig.Dependencies) {
                 try {
@@ -372,7 +373,7 @@ function Publish-App {
                     
                     # Search Intune for the dependency app by base display name
                     $depBaseName = $depConfig.DisplayNameTemplate -replace '\s*\{0\}', ''
-                    $depIntuneApp = Get-IntuneWin32App | Where-Object { $_.displayName -like "$depBaseName*" } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
+                    $depIntuneApp = $allIntuneApps | Where-Object { $_.displayName -like "$depBaseName*" } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
                     
                     # Auto-deploy dependency if not found in Intune
                     if (-not $depIntuneApp) {
