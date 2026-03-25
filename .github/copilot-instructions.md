@@ -21,6 +21,7 @@
 
 ## Code Patterns
 
+- `AutoUpdate` in `AppConfig.ps1` controls whether the Intune assignment setting "If superseded app(s) have been installed by the user from Company Portal, require superseding app to be installed" is enabled. It does **not** control `DetectionOperator` — those are independent properties. `DetectionOperator` determines version comparison logic (`greaterThanOrEqual`, `equal`, `ProductCodeOnly`, `ScriptOnly`) and is set explicitly per app.
 - Use `SecureString` + `SecureStringToBSTR` for user-facing password input; internal crypto helpers accept plain strings (suppressed via `PSScriptAnalyzer` attributes at file level).
 - Always dispose `IDisposable` crypto objects (`Rfc2898DeriveBytes`, `Aes`, `ICryptoTransform`, `RandomNumberGenerator`) in `try/finally` blocks.
 - Always free BSTR pointers with `ZeroFreeBSTR` in `finally` blocks.

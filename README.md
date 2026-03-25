@@ -51,6 +51,7 @@ intune-app-management/
 - Audacity
 - LibreOffice (German, Enterprise version)
 - OpenShot Video Editor
+- KeePassXC
 
 ## Prerequisites
 
@@ -299,7 +300,7 @@ NewApp = @{
     DetectionFile = "newapp.exe"
     DetectionType = "File"
     DetectionOperator = "greaterThanOrEqual"
-    AutoUpdate = $false
+    AutoUpdate = $true  # Enable "require superseding app" on Intune assignments
 }
 ```
 
