@@ -37,7 +37,6 @@ $script:AppConfigurations = @{
         IntuneWinPattern = "GoogleChrome-*-Enterprise-x64.intunewin"
         DownloadUrl = "https://dl.google.com/chrome/install/googlechromestandaloneenterprise64.msi"
         FilenameTemplate = "GoogleChrome-{0}-Enterprise-x64.msi"
-        FilenameTempate = "googlechromestandaloneenterprise64.msi"
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
@@ -69,7 +68,7 @@ $script:AppConfigurations = @{
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"  # Simple product code detection, no version operator needed
         VersionFormat = "NoPrefix"  # Version like "7z2501" needs special handling
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     GIMP = @{
@@ -93,7 +92,7 @@ $script:AppConfigurations = @{
         DetectionFile = "gimp-3.0.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     VLC = @{
@@ -117,7 +116,7 @@ $script:AppConfigurations = @{
         DetectionFile = "vlc.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     NotepadPlusPlus = @{
@@ -133,7 +132,7 @@ $script:AppConfigurations = @{
         GitHubAssetPattern = "Installer\.x64\.exe$"
         FallbackUrl = "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.6.9/npp.8.6.9.Installer.x64.exe"
         FallbackVersion = "8.6.9"
-        FilenamePattern = "npp.{0}.Installer.x64.exe"
+        FilenameTemplate = "npp.{0}.Installer.x64.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" /S'
         UninstallCommandTemplate = '"C:\Program Files\Notepad++\uninstall.exe" /S'
@@ -141,7 +140,7 @@ $script:AppConfigurations = @{
         DetectionFile = "notepad++.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     AffinityStudio = @{
@@ -162,7 +161,7 @@ $script:AppConfigurations = @{
         VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
         ManualExtraction = $true  # Requires manual extraction: Run downloaded EXE with /extract /defaults
         ExtractionCommand = '"{0}" /extract /defaults'  # Command to extract MSI from EXE
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     Inkscape = @{
@@ -185,7 +184,7 @@ $script:AppConfigurations = @{
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     Audacity = @{
@@ -201,7 +200,7 @@ $script:AppConfigurations = @{
         GitHubAssetPattern = "audacity-win-[\d\.]+-64bit\.exe$"
         FallbackUrl = "https://github.com/audacity/audacity/releases/download/Audacity-3.7.5/audacity-win-3.7.5-64bit.exe"
         FallbackVersion = "3.7.5"
-        FilenamePattern = "audacity-win-{0}-64bit.exe"
+        FilenameTemplate = "audacity-win-{0}-64bit.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" /VERYSILENT /ALLUSERS /NORESTART'
         UninstallCommandTemplate = '"C:\Program Files\Audacity\unins000.exe" /VERYSILENT'
@@ -209,7 +208,7 @@ $script:AppConfigurations = @{
         DetectionFile = "Audacity.exe"
         DetectionType = "File"
         DetectionOperator = "greaterThanOrEqual"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     LibreOffice = @{
@@ -231,7 +230,7 @@ $script:AppConfigurations = @{
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     OpenShot = @{
@@ -247,7 +246,7 @@ $script:AppConfigurations = @{
         GitHubAssetPattern = "OpenShot-v[\d\.]+-x86_64\.exe$"
         FallbackUrl = "https://github.com/OpenShot/openshot-qt/releases/download/v3.3.0/OpenShot-v3.3.0-x86_64.exe"
         FallbackVersion = "3.3.0"
-        FilenamePattern = "OpenShot-v{0}-x86_64.exe"
+        FilenameTemplate = "OpenShot-v{0}-x86_64.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" /S'
         UninstallCommandTemplate = '"C:\Program Files\OpenShot Video Editor\uninstall.exe" /S'
@@ -277,7 +276,7 @@ $script:AppConfigurations = @{
         DetectionScriptPath = "packages\geogebra\Detect-GeoGebraVersion.ps1"  # Custom script to extract version from HTML files
         VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
         SupersedenceType = "Replace"  # Use Replace instead of Update (uninstalls old version)
-        AutoUpdate = $false  # GeoGebra Classic 6 does not auto-update in mass installations
+        AutoUpdate = $true
         # Note: GeoGebra doesn't update MSI Product Code or GeoGebra.exe version between releases
         # Real version is stored in latestVersion variable in HTML files (main.js or ggb-config.js)
     }
@@ -295,7 +294,7 @@ $script:AppConfigurations = @{
         GitHubAssetPattern = "stellarium-[\d\.]+-qt6-win64\.exe$"
         FallbackUrl = "https://github.com/Stellarium/stellarium/releases/download/v24.3/stellarium-24.3-qt6-win64.exe"
         FallbackVersion = "24.3"
-        FilenamePattern = "stellarium-{0}-qt6-win64.exe"
+        FilenameTemplate = "stellarium-{0}-qt6-win64.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" /VERYSILENT /NORESTART /ALLUSERS'
         UninstallCommandTemplate = '"C:\Program Files\Stellarium\unins000.exe" /VERYSILENT /NORESTART'
@@ -303,7 +302,7 @@ $script:AppConfigurations = @{
         DetectionFile = "stellarium.exe"
         DetectionType = "File"
         DetectionOperator = "greaterThanOrEqual"
-        AutoUpdate = $false
+        AutoUpdate = $true
     }
     
     GoogleDrive = @{
@@ -319,13 +318,61 @@ $script:AppConfigurations = @{
         FilenameTemplate = "GoogleDriveSetup-{0}.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" --silent --desktop_shortcut --skip_launch_new --gsuite_shortcuts=false'
-        UninstallCommandTemplate = '"C:\Program Files\Google\Drive File Stream\{0}\GoogleDriveFS.exe" --uninstall --silent'
+        UninstallCommandTemplate = '"C:\Program Files\Google\Drive File Stream\{1}\GoogleDriveFS.exe" --uninstall --silent'
         DetectionType = "Registry"
-        DetectionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6BBB3539-2232-434A-A4E5-9A33560C6283}"
+        DetectionPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6BBB3539-2232-434A-A4E5-9A33560C6283}"
         DetectionValueName = "DisplayVersion"
         DetectionOperator = "greaterThanOrEqual"
         VersionExtraction = "AppLocker"
         AutoUpdate = $true
+    }
+    
+    KeePassXC = @{
+        Name = "KeePassXC"
+        DisplayNameTemplate = "KeePassXC {0}"
+        Publisher = "KeePassXC Team"
+        Description = "KeePassXC - Cross-platform password manager"
+        Folder = "keepassxc"
+        IconFile = "keepassxc-logo.png"
+        IntuneWinPattern = "KeePassXC-*-Win64.intunewin"
+        GitHubRepo = "keepassxreboot/keepassxc"
+        GitHubApiUrl = "https://api.github.com/repos/keepassxreboot/keepassxc/releases/latest"
+        GitHubAssetPattern = "KeePassXC-[\d\.]+-Win64\.msi$"
+        FallbackUrl = "https://github.com/keepassxreboot/keepassxc/releases/download/2.7.12/KeePassXC-2.7.12-Win64.msi"
+        FallbackVersion = "2.7.12"
+        FilenameTemplate = "KeePassXC-{0}-Win64.msi"
+        PackageType = "EXE"
+        InstallCommandTemplate = 'powershell.exe -ExecutionPolicy Bypass -File "Install-KeePassXC.ps1"'
+        UninstallCommandTemplate = '"C:\Program Files\KeePassXC\Uninstall.exe" /S'
+        DetectionType = "File"
+        DetectionPath = "C:\Program Files\KeePassXC"
+        DetectionFile = "KeePassXC.exe"
+        DetectionOperator = "greaterThanOrEqual"
+        Dependencies = @("VCRedist")
+        AutoUpdate = $true
+    }
+    
+    VCRedist = @{
+        Name = "VCRedist"
+        DisplayNameTemplate = "Visual C++ Redistributable {0}"
+        Publisher = "Microsoft"
+        Description = "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+        Folder = "vcredist"
+        IconFile = "vcredist-logo.png"
+        IntuneWinPattern = "vc_redist*.intunewin"
+        DownloadUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        FallbackVersion = "14.40.33816"
+        FilenameTemplate = "vc_redist.x64-{0}.exe"
+        PackageType = "EXE"
+        InstallCommandTemplate = '"{0}" /install /quiet /norestart'
+        UninstallCommandTemplate = '"{0}" /uninstall /quiet /norestart'
+        DetectionType = "Registry"
+        DetectionPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\X64"
+        DetectionValueName = "Installed"
+        DetectionOperator = "exists"
+        VersionExtraction = "AppLocker"
+        HideFromPortal = $true
+        AutoUpdate = $false
     }
 }
 

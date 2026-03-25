@@ -262,14 +262,43 @@ function Get-FileAppConfig {
         $commonSettings.DetectionOperator
     }
     
-    # Create file detection rule
-    $DetectionRule = New-IntuneWin32AppDetectionRuleFile `
-        -Version `
-        -Path $appConfig.DetectionPath `
-        -FileOrFolder $appConfig.DetectionFile `
-        -Check32BitOn64System $commonSettings.Check32BitOn64System `
-        -Operator $detectionOperator `
-        -VersionValue $Version
+    # Create detection rule based on detection type
+    if ($appConfig.DetectionType -eq "Registry") {
+        if ($detectionOperator -eq "exists" -or $detectionOperator -eq "doesNotExist" -or $detectionOperator -eq "notExists") {
+            if ($detectionOperator -eq "notExists") {
+                $detectionOperator = "doesNotExist"
+            }
+            $existenceParams = @{
+                Existence            = $true
+                KeyPath              = $appConfig.DetectionPath
+                DetectionType        = $detectionOperator
+                Check32BitOn64System = $commonSettings.Check32BitOn64System
+            }
+            if ($appConfig.DetectionValueName) {
+                $existenceParams['ValueName'] = $appConfig.DetectionValueName
+            }
+            $DetectionRule = New-IntuneWin32AppDetectionRuleRegistry @existenceParams
+        }
+        else {
+            $DetectionRule = New-IntuneWin32AppDetectionRuleRegistry `
+                -VersionComparison `
+                -KeyPath $appConfig.DetectionPath `
+                -ValueName $appConfig.DetectionValueName `
+                -VersionComparisonOperator $detectionOperator `
+                -VersionComparisonValue $Version `
+                -Check32BitOn64System $commonSettings.Check32BitOn64System
+        }
+    }
+    else {
+        # Default: file-based detection
+        $DetectionRule = New-IntuneWin32AppDetectionRuleFile `
+            -Version `
+            -Path $appConfig.DetectionPath `
+            -FileOrFolder $appConfig.DetectionFile `
+            -Check32BitOn64System $commonSettings.Check32BitOn64System `
+            -Operator $detectionOperator `
+            -VersionValue $Version
+    }
     
     $RequirementRule = New-IntuneWin32AppRequirementRule `
         -Architecture $commonSettings.Architecture `
@@ -282,9 +311,9 @@ function Get-FileAppConfig {
     $DisplayName = $appConfig.DisplayNameTemplate -f $majorVersion
     $Description = $appConfig.Description
     
-    # Format commands
-    $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile
-    $UninstallCommand = $appConfig.UninstallCommandTemplate
+    # Format commands - {0} = setup filename, {1} = app version
+    $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile, $Version
+    $UninstallCommand = $appConfig.UninstallCommandTemplate -f $SetupFile, $Version
     
     return @{
         DisplayName = $DisplayName

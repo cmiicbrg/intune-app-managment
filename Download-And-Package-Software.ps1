@@ -115,15 +115,9 @@ function Get-LatestVersionInfo {
             }
         }
         elseif ($AppConfig.VersionExtraction -eq "AppLocker") {
-            # Version extracted after download (Chrome, Affinity)
-            # Use FilenameTempate if it exists (Chrome typo compatibility), otherwise extract filename from URL
-            $filename = if ($AppConfig.FilenameTempate) {
-                $AppConfig.FilenameTempate
-            } else {
-                # Extract filename from URL
-                $uri = [System.Uri]$AppConfig.DownloadUrl
-                [System.IO.Path]::GetFileName($uri.LocalPath)
-            }
+            # Version extracted after download (Chrome, Affinity, VCRedist)
+            $uri = [System.Uri]$AppConfig.DownloadUrl
+            $filename = [System.IO.Path]::GetFileName($uri.LocalPath)
             return @{Url = $AppConfig.DownloadUrl; Version = "Latest"; Filename = $filename}
         }
         

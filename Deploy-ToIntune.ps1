@@ -354,25 +354,146 @@ function Publish-App {
             }
         }
         
+        # Set up dependencies
+        if ($AppConfig.Dependencies -and $AppConfig.Dependencies.Count -gt 0) {
+            Write-Host "  Setting up dependency relationships..." -ForegroundColor Cyan
+            $dependencyObjects = @()
+            $allIntuneApps = Get-IntuneWin32App
+            
+            foreach ($depName in $AppConfig.Dependencies) {
+                try {
+                    Write-Host "    Resolving dependency: $depName" -ForegroundColor Gray
+                    
+                    # Get the dependency's config to find its display name pattern
+                    $depConfig = Get-AppConfiguration -AppName $depName
+                    if (-not $depConfig) {
+                        Write-Host "    [Err] Dependency '$depName' not found in AppConfig" -ForegroundColor Red
+                        continue
+                    }
+                    
+                    # Search Intune for the dependency app by base display name
+                    $depBaseName = $depConfig.DisplayNameTemplate -replace '\s*\{0\}', ''
+                    $depIntuneApp = $allIntuneApps | Where-Object { $_.displayName -like "$depBaseName*" } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
+                    
+                    # Auto-deploy dependency if not found in Intune
+                    if (-not $depIntuneApp) {
+                        Write-Host "    Dependency '$depName' not found in Intune, auto-deploying..." -ForegroundColor Yellow
+                        
+                        # Find the dependency's app entry in $appsToDeploy
+                        $depAppEntry = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $depName }
+                        if (-not $depAppEntry) {
+                            Write-Host "    [Err] Dependency '$depName' not found in appsToDeploy" -ForegroundColor Red
+                            continue
+                        }
+                        
+                        $depFolder = Join-Path (Join-Path $BaseDir "packages") $depAppEntry.Folder
+                        $depIntunewinFiles = Get-ChildItem -Path $depFolder -File |
+                            Where-Object { $_.Name -like $depAppEntry.Pattern -and $_.Extension -eq ".intunewin" } |
+                            Sort-Object LastWriteTime -Descending
+                        
+                        if ($depIntunewinFiles.Count -eq 0) {
+                            Write-Host "    [Err] No .intunewin package found for dependency '$depName'" -ForegroundColor Red
+                            Write-Host "    Run: .\Download-And-Package-Software.ps1 -AppName $depName" -ForegroundColor Yellow
+                            continue
+                        }
+                        
+                        $depIntunewinFile = $depIntunewinFiles[0]
+                        $depVersion = "1.0"
+                        if ($depIntunewinFile.BaseName -match '(\d+\.[\d\.]+)') {
+                            $depVersion = $matches[1].TrimEnd('.')
+                        }
+                        
+                        $depMetaData = Get-IntuneWin32AppMetaData -FilePath $depIntunewinFile.FullName
+                        $depSetupFile = $depMetaData.ApplicationInfo.SetupFile
+                        
+                        # Build config for the dependency
+                        if ($depAppEntry.PackageType -eq "MSI") {
+                            $depAppConfig = Get-MsiAppConfig -AppName $depName -Version $depVersion -SetupFile $depSetupFile -IntuneWinPath $depIntunewinFile.FullName
+                        }
+                        else {
+                            $depAppConfig = Get-FileAppConfig -AppName $depName -Version $depVersion -SetupFile $depSetupFile
+                        }
+                        
+                        # Build upload params (no assignment)
+                        $depAppParams = @{
+                            FilePath             = $depIntunewinFile.FullName
+                            DisplayName          = $depAppConfig.DisplayName
+                            Description          = $depAppConfig.Description
+                            Publisher            = $depAppConfig.Publisher
+                            AppVersion           = $depAppConfig.AppVersion
+                            InstallExperience    = $depAppConfig.InstallExperience
+                            RestartBehavior      = $depAppConfig.RestartBehavior
+                            DetectionRule        = $depAppConfig.DetectionRules
+                            RequirementRule      = $depAppConfig.RequirementRule
+                            InstallCommandLine   = $depAppConfig.InstallCommandLine
+                            UninstallCommandLine = $depAppConfig.UninstallCommandLine
+                            Verbose              = $true
+                        }
+                        
+                        # Add icon if available
+                        $depIconPath = Join-Path $depFolder $depConfig.IconFile
+                        if ($depConfig.IconFile -and (Test-Path $depIconPath)) {
+                            try {
+                                $depAppParams.Icon = New-IntuneWin32AppIcon -FilePath $depIconPath
+                            }
+                            catch { }
+                        }
+                        
+                        $depIntuneApp = Add-IntuneWin32App @depAppParams -ErrorAction Stop
+                        Write-Host "    Auto-deployed '$depName' to Intune (ID: $($depIntuneApp.id))" -ForegroundColor Green
+                    }
+                    
+                    # Collect dependency object for batch linking
+                    $dependency = New-IntuneWin32AppDependency `
+                        -ID $depIntuneApp.id `
+                        -DependencyType "AutoInstall"
+                    $dependencyObjects += $dependency
+                    Write-Host "    [OK] Resolved: $($depIntuneApp.displayName)" -ForegroundColor Green
+                }
+                catch {
+                    Write-Host "    [Err] Failed to resolve dependency '$depName': $_" -ForegroundColor Red
+                }
+            }
+            
+            # Link all dependencies in a single call
+            if ($dependencyObjects.Count -gt 0) {
+                try {
+                    Add-IntuneWin32AppDependency `
+                        -ID $Win32App.id `
+                        -Dependency $dependencyObjects `
+                        -Verbose
+                    Write-Host "  Dependencies linked ($($dependencyObjects.Count))" -ForegroundColor Green
+                }
+                catch {
+                    Write-Host "  [Err] Failed to link dependencies: $_" -ForegroundColor Red
+                }
+            }
+        }
+        
         # Assign if requested and collect assignment IDs for auto-update
         $assignmentIds = @()
         
-        if ($AssignToAllUsers) {
-            Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-            $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent "available" -Notification "showAll"
-            if ($assignment -and $assignment.id) {
-                $assignmentIds += $assignment.id
+        # Skip assignments for apps marked as hidden (dependency-only apps)
+        if ($AppConfig.HideFromPortal -eq $true) {
+            Write-Host "  Skipping assignments (HideFromPortal = true)" -ForegroundColor Gray
+        }
+        else {
+            if ($AssignToAllUsers) {
+                Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
+                $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent "available" -Notification "showAll"
+                if ($assignment -and $assignment.id) {
+                    $assignmentIds += $assignment.id
+                }
+                Write-Host "  Assigned to All Users" -ForegroundColor Green
             }
-            Write-Host "  Assigned to All Users" -ForegroundColor Green
-        }
-        
-        if ($AssignToAllDevices) {
-            Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
-            Add-IntuneWin32AppAssignmentAllDevices -ID $Win32App.id -Intent "required" -Notification "showAll"
-            Write-Host "  Assigned to All Devices" -ForegroundColor Green
-        }
-        
-        if ($AssignToGroupName) {
+            
+            if ($AssignToAllDevices) {
+                Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
+                Add-IntuneWin32AppAssignmentAllDevices -ID $Win32App.id -Intent "required" -Notification "showAll"
+                Write-Host "  Assigned to All Devices" -ForegroundColor Green
+            }
+            
+            if ($AssignToGroupName) {
             Write-Host "  Assigning to group: $AssignToGroupName..." -ForegroundColor Cyan
             
             try {
@@ -411,9 +532,10 @@ function Publish-App {
                 Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
             }
         }
+        }  # end else (not HideFromPortal)
         
-        # Enable auto-update for assignments if supersedence was configured
-        if ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0) {
+        # Enable auto-update for assignments if supersedence was configured and AutoUpdate is enabled
+        if ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0 -and $AppConfig.AutoUpdate -eq $true) {
             Write-Host "  Enabling auto-update for app assignments..." -ForegroundColor Cyan
             try {
                 # Ensure connection is still valid
@@ -438,6 +560,9 @@ function Publish-App {
             catch {
                 Write-Host "  Warning: Failed to enable auto-update: $_" -ForegroundColor Yellow
             }
+        }
+        elseif ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0) {
+            Write-Host "  Skipping auto-update for assignments (AutoUpdate is disabled for this app)" -ForegroundColor Gray
         }
         
         return $Win32App
@@ -491,7 +616,7 @@ if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientI
 Write-Host "Successfully connected to Microsoft Intune!" -ForegroundColor Green
 
 # Define apps to deploy
-$appsToDeploy = @(
+$script:appsToDeploy = @(
     @{Name = "Firefox"; Folder = "firefox"; Pattern = "Firefox-Setup-*-de.intunewin"; AppConfigName = "Firefox"; PackageType = "EXE" },
     @{Name = "Chrome"; Folder = "chrome"; Pattern = "GoogleChrome-*-Enterprise-x64.intunewin"; AppConfigName = "Chrome"; PackageType = "MSI" },
     @{Name = "7-Zip"; Folder = "7zip"; Pattern = "7z*-x64.intunewin"; AppConfigName = "SevenZip"; PackageType = "MSI" },
@@ -505,18 +630,21 @@ $appsToDeploy = @(
     @{Name = "OpenShot"; Folder = "openshot"; Pattern = "OpenShot-v*-x86_64.intunewin"; AppConfigName = "OpenShot"; PackageType = "EXE" },
     @{Name = "GeoGebra"; Folder = "geogebra"; Pattern = "GeoGebra-Windows-Installer-6-*.intunewin"; AppConfigName = "GeoGebra"; PackageType = "MSI" },
     @{Name = "Stellarium"; Folder = "stellarium"; Pattern = "stellarium-*.intunewin"; AppConfigName = "Stellarium"; PackageType = "EXE" },
-    @{Name = "Google Drive"; Folder = "googledrive"; Pattern = "GoogleDriveSetup-*.intunewin"; AppConfigName = "GoogleDrive"; PackageType = "EXE" }
+    @{Name = "Google Drive"; Folder = "googledrive"; Pattern = "GoogleDriveSetup-*.intunewin"; AppConfigName = "GoogleDrive"; PackageType = "EXE" },
+    @{Name = "KeePassXC"; Folder = "keepassxc"; Pattern = "KeePassXC-*-Win64.intunewin"; AppConfigName = "KeePassXC"; PackageType = "EXE" },
+    @{Name = "VCRedist"; Folder = "vcredist"; Pattern = "vc_redist*.intunewin"; AppConfigName = "VCRedist"; PackageType = "EXE" }
 )
 
 # Filter apps if AppName parameter is specified
+$appsToProcess = $script:appsToDeploy
 if ($AppName) {
-    $filteredApp = $appsToDeploy | Where-Object { $_.AppConfigName -eq $AppName }
+    $filteredApp = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $AppName }
     if (-not $filteredApp) {
         Write-Host "Error: App '$AppName' not found in deployment configuration" -ForegroundColor Red
-        Write-Host "Available apps: $($appsToDeploy.AppConfigName -join ', ')" -ForegroundColor Yellow
+        Write-Host "Available apps: $($script:appsToDeploy.AppConfigName -join ', ')" -ForegroundColor Yellow
         exit 1
     }
-    $appsToDeploy = @($filteredApp)
+    $appsToProcess = @($filteredApp)
     Write-Host "Processing single app: $AppName" -ForegroundColor Yellow
     Write-Host ""
 }
@@ -524,7 +652,7 @@ if ($AppName) {
 $deployedApps = @()
 $failedApps = @()
 
-foreach ($app in $appsToDeploy) {
+foreach ($app in $appsToProcess) {
     # Validate connection before each app deployment
     if (-not (Test-IntuneConnection)) {
         Write-Host "`n  Connection lost, attempting to reconnect..." -ForegroundColor Yellow
@@ -626,6 +754,21 @@ foreach ($app in $appsToDeploy) {
     # Add SupersedenceType to appConfig if specified in config file
     if ($appConfigFromFile.SupersedenceType) {
         $appConfig.SupersedenceType = $appConfigFromFile.SupersedenceType
+    }
+    
+    # Forward AutoUpdate flag ($false is falsy, so use ContainsKey to forward both $true and $false)
+    if ($appConfigFromFile.ContainsKey('AutoUpdate')) {
+        $appConfig.AutoUpdate = $appConfigFromFile.AutoUpdate
+    }
+    
+    # Forward Dependencies array
+    if ($appConfigFromFile.Dependencies) {
+        $appConfig.Dependencies = $appConfigFromFile.Dependencies
+    }
+    
+    # Forward HideFromPortal flag
+    if ($appConfigFromFile.HideFromPortal -eq $true) {
+        $appConfig.HideFromPortal = $true
     }
     
     # Deploy the app with version info for supersedence
