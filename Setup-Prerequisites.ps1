@@ -56,6 +56,7 @@ Write-Host ""
 # Install required modules
 $modules = @(
     @{Name="Microsoft.Graph.Authentication"; Description="Microsoft Graph Authentication"},
+    @{Name="Microsoft.Graph.Groups"; Description="Microsoft Graph Groups Management"},
     @{Name="IntuneWin32App"; Description="Intune Win32 App Management"}
 )
 
