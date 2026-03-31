@@ -132,13 +132,21 @@ function Test-DownloadedFileIntegrity {
         return $false
     }
 
-    # SHA-256 takes precedence — if provided, skip Authenticode (hash is a stronger guarantee)
+    # SHA-256 takes precedence — if provided, Authenticode checks are intentionally skipped
+    # because an explicit hash pins the exact binary content (stronger than signature alone).
     if ($ExpectedSha256) {
+        # Normalize: strip whitespace, uppercase, validate 64 hex chars
+        $normalizedHash = ($ExpectedSha256 -replace '\s','').ToUpperInvariant()
+        if ($normalizedHash.Length -ne 64 -or $normalizedHash -notmatch '^[0-9A-F]{64}$') {
+            Write-Host "Integrity check FAILED: ExpectedSha256 is not a valid 64-character hex string." -ForegroundColor Red
+            Write-Host "  Received: $ExpectedSha256" -ForegroundColor Red
+            return $false
+        }
         try {
             $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop).Hash
-            if ($actualHash -ne $ExpectedSha256.ToUpperInvariant()) {
+            if ($actualHash -ne $normalizedHash) {
                 Write-Host "Integrity check FAILED: SHA-256 mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
-                Write-Host "  Expected: $($ExpectedSha256.ToUpperInvariant())" -ForegroundColor Red
+                Write-Host "  Expected: $normalizedHash" -ForegroundColor Red
                 Write-Host "  Actual:   $actualHash" -ForegroundColor Red
                 return $false
             }
