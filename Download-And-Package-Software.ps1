@@ -198,14 +198,12 @@ foreach ($appName in $allAppNames) {
                 Write-Host "  Extracting version information from EXE..." -ForegroundColor White
                 
                 # Extract version from the downloaded EXE
-                try {
-                    $fileInfo = Get-AppLockerFileInformation -Path $installerTemp -ErrorAction Stop
-                    $version = $fileInfo.Publisher.BinaryVersion.ToString()
+                $version = Get-InstallerVersion -FilePath $installerTemp
+                if ($version) {
                     Write-Host "  Detected version: $version" -ForegroundColor Green
                 }
-                catch {
-                    Write-Host "  Warning: Could not extract version from EXE: $_" -ForegroundColor Yellow
-                    Write-Host "  Using version from download: $version" -ForegroundColor Yellow
+                else {
+                    Write-Host "  Warning: Could not extract version from EXE" -ForegroundColor Yellow
                 }
                 
                 # Determine expected MSI filename with extracted version
@@ -246,14 +244,14 @@ foreach ($appName in $allAppNames) {
                     Write-Host "  Extraction dialog closed." -ForegroundColor White
                     Write-Host ""
                     
-                    # Check if MSI was created
+                    # Check if MSI was created at expected path
                     if (Test-Path $expectedMsiPath) {
-                        Write-Host "  ✓ MSI file found: $expectedMsiPath" -ForegroundColor Green
+                        Write-Host "  MSI file found: $expectedMsiPath" -ForegroundColor Green
                         
                         # Delete the original EXE
                         Write-Host "  Removing original EXE..." -ForegroundColor White
                         Remove-Item $installerTemp -Force
-                        Write-Host "  ✓ Original EXE removed" -ForegroundColor Green
+                        Write-Host "  Original EXE removed" -ForegroundColor Green
                         
                         # Update installerTemp to point to MSI for packaging
                         $installerTemp = $expectedMsiPath
@@ -262,9 +260,9 @@ foreach ($appName in $allAppNames) {
                         Write-Host ""
                     }
                     else {
-                        Write-Host "  ✗ MSI file not found at expected location" -ForegroundColor Red
+                        Write-Host "  MSI file not found at expected location" -ForegroundColor Red
                         Write-Host "  Expected: $expectedMsiPath" -ForegroundColor Yellow
-                        Write-Host "  Please manually save the MSI and re-run this script" -ForegroundColor Yellow
+                        Write-Host "  Please manually save the MSI to the path shown above and re-run this script" -ForegroundColor Yellow
                         Write-Host ""
                         continue
                     }
@@ -274,12 +272,20 @@ foreach ($appName in $allAppNames) {
                     Write-Host ""
                     continue
                 }
+                
+                # Package the extracted MSI directly (skip the general rename logic below
+                # which would rename the MSI back to an EXE based on FilenameTemplate)
+                Remove-OldAppFiles -AppFolder $appFolder -KeepFileName (Split-Path $installerTemp -Leaf)
+                
+                Write-Host "  Creating IntuneWin package..." -ForegroundColor Cyan
+                New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installerTemp -Leaf) -OutputFolder $appFolder
+                continue
             }
             
             try {
                 Write-Host "  Extracting version from file..." -ForegroundColor Gray
-                $appLockerInfo = Get-AppLockerFileInformation -Path $installerTemp | Select-Object -ExpandProperty Publisher
-                $version = $appLockerInfo.BinaryVersion.ToString()
+                $version = Get-InstallerVersion -FilePath $installerTemp
+                if (-not $version) { throw "Could not extract version from installer" }
                 Write-Host "  Version detected: $version" -ForegroundColor Cyan
                 
                 # Check if this version already exists

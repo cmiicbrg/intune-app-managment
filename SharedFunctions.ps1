@@ -6,6 +6,70 @@
 # Import configuration
 . (Join-Path $PSScriptRoot "AppConfig.ps1")
 
+# Function to extract version from an installer file
+# Works on both PowerShell 5.1 and 7+. For MSI files, queries the MSI database
+# directly via the WindowsInstaller COM object. For EXE files, falls back to
+# Get-AppLockerFileInformation (structured object on PS 5.1, parsed string on PS 7).
+function Get-InstallerVersion {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FilePath
+    )
+
+    $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
+
+    # MSI: query ProductVersion from the MSI database (reliable on all PS versions)
+    if ($extension -eq '.msi') {
+        $dbObject = $null
+        $viewObject = $null
+        try {
+            $msiInstaller = New-Object -ComObject WindowsInstaller.Installer
+            $dbObject = $msiInstaller.OpenDatabase($FilePath, 0)
+            $viewObject = $dbObject.OpenView("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
+            [void]$viewObject.Execute()
+            $record = $viewObject.Fetch()
+            if ($record) {
+                $ver = $record.StringData(1)
+                if (-not [string]::IsNullOrWhiteSpace($ver)) {
+                    return $ver
+                }
+            }
+        }
+        catch {
+            Write-Verbose "MSI COM version extraction failed: $_"
+        }
+        finally {
+            if ($null -ne $viewObject) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($viewObject) | Out-Null } catch {} }
+            if ($null -ne $dbObject)   { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($dbObject)   | Out-Null } catch {} }
+        }
+    }
+
+    # Fallback: Get-AppLockerFileInformation (works for both MSI and EXE)
+    try {
+        $info = Get-AppLockerFileInformation -Path $FilePath -ErrorAction Stop
+        $pub = $info.Publisher
+
+        # PS 5.1 returns a structured object with BinaryVersion; PS 7+ returns a string
+        if ($null -ne $pub -and $pub -is [string]) {
+            # Format: "PUBLISHER\PRODUCT\BINARY,VERSION"
+            if ($pub -match ',(\d+[\d\.]+)') {
+                return $matches[1]
+            }
+        }
+        elseif ($null -ne $pub) {
+            $bv = $pub.BinaryVersion
+            if ($null -ne $bv) {
+                return $bv.ToString()
+            }
+        }
+    }
+    catch {
+        Write-Verbose "AppLocker version extraction failed: $_"
+    }
+
+    return $null
+}
+
 # Function to check if version already exists
 function Test-VersionExists {
     param(

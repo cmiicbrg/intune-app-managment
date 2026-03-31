@@ -124,18 +124,41 @@ function Initialize-IntuneAuthentication {
             $response = Invoke-RestMethod -Method Post -Uri $tokenEndpoint -Body $body -ContentType "application/x-www-form-urlencoded" -ErrorAction Stop
             $accessToken = $response.access_token
             
+            # ExpiresOn handling for IntuneWin32App compatibility on non-English locales:
+            # - AuthenticationHeader.ExpiresOn must be [DateTime] (UTC) because
+            #   New-IntuneWin32AppSupersedence does DateTime subtraction on it.
+            # - AccessToken.ExpiresOn needs a wrapper because Test-AccessToken calls
+            #   .ToString() then parses with InvariantCulture — bare DateTime.ToString()
+            #   uses CurrentCulture which fails on e.g. German locale (dd.MM.yyyy).
+            $expiresOnUtc = (Get-Date).ToUniversalTime().AddSeconds($response.expires_in)
+            
+            $expiresOnWrapped = New-Object -TypeName PSObject
+            $expiresOnWrapped | Add-Member -MemberType NoteProperty -Name '_utc' -Value $expiresOnUtc
+            $expiresOnWrapped | Add-Member -MemberType ScriptMethod -Name 'ToUniversalTime' -Value {
+                return $this._utc
+            }
+            $expiresOnWrapped | Add-Member -MemberType ScriptMethod -Name 'ToString' -Force -Value {
+                return $this._utc.ToString('o')
+            }
+            
             # Create the authentication header structure that IntuneWin32App expects
+            # ExpiresOn as plain [DateTime] for arithmetic support in supersedence cmdlets
             $Global:AuthenticationHeader = @{
                 "Authorization" = "Bearer $accessToken"
                 "Content-Type"  = "application/json"
-                "ExpiresOn"     = ([System.DateTimeOffset]::UtcNow.AddSeconds($response.expires_in))
+                "ExpiresOn"     = $expiresOnUtc
             }
             
             # Also set the AccessToken variable that some cmdlets check
-            $Global:AccessToken = @{
+            # Must be PSCustomObject so Test-AccessToken can find ExpiresOn via .PSObject.Properties
+            # ExpiresOn uses wrapper for culture-invariant ToString()
+            $Global:AccessToken = [PSCustomObject]@{
                 AccessToken = $accessToken
-                ExpiresOn   = ([System.DateTimeOffset]::UtcNow.AddSeconds($response.expires_in))
+                ExpiresOn   = $expiresOnWrapped
             }
+            
+            # Set tenant ID variable required by IntuneWin32App Test-AuthenticationState
+            $Global:AccessTokenTenantID = $TenantId
             
             Write-Verbose "IntuneWin32App authentication header configured"
         }
