@@ -190,7 +190,10 @@ foreach ($appName in $allAppNames) {
         $installerTemp = Join-Path $appFolder $versionInfo.Filename
         
         Write-Host "  Downloading (version will be determined from file)..." -ForegroundColor Cyan
-        if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installerTemp) {
+        if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installerTemp `
+            -ExpectedSha256 $appConfig.ExpectedSha256 `
+            -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
+            -ExpectedPublisher $appConfig.ExpectedPublisher) {
             
             # Check if extraction is required (Affinity Studio)
             if ($appConfig.ManualExtraction) {
@@ -369,7 +372,10 @@ foreach ($appName in $allAppNames) {
     }
     
     Write-Host "  Downloading version $($versionInfo.Version)..." -ForegroundColor Cyan
-    if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installer) {
+    if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installer `
+        -ExpectedSha256 $appConfig.ExpectedSha256 `
+        -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
+        -ExpectedPublisher $appConfig.ExpectedPublisher) {
         # Clean up old files before packaging
         Remove-OldAppFiles -AppFolder $appFolder -KeepFileName (Split-Path $installer -Leaf)
         

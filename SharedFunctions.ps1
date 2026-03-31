@@ -116,11 +116,88 @@ function Test-VersionExists {
     return $false
 }
 
+# Function to verify integrity of a downloaded installer file.
+# Checks SHA-256 hash (if provided) or Authenticode signature + optional publisher match.
+# Returns $true if the file passes verification, $false otherwise (fail closed).
+function Test-DownloadedFileIntegrity {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedSha256,
+        [bool]$EnforceSignatureCheck = $true,
+        [string]$ExpectedPublisher
+    )
+
+    if (-not (Test-Path $FilePath)) {
+        Write-Host "Integrity check failed: file does not exist ($FilePath)" -ForegroundColor Red
+        return $false
+    }
+
+    # SHA-256 takes precedence — if provided, skip Authenticode (hash is a stronger guarantee)
+    if ($ExpectedSha256) {
+        try {
+            $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop).Hash
+            if ($actualHash -ne $ExpectedSha256.ToUpperInvariant()) {
+                Write-Host "Integrity check FAILED: SHA-256 mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+                Write-Host "  Expected: $($ExpectedSha256.ToUpperInvariant())" -ForegroundColor Red
+                Write-Host "  Actual:   $actualHash" -ForegroundColor Red
+                return $false
+            }
+            Write-Host "Integrity check passed: SHA-256 verified." -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "Integrity check FAILED: unable to compute SHA-256 for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    # Authenticode signature check (default path)
+    if ($EnforceSignatureCheck) {
+        try {
+            $signature = Get-AuthenticodeSignature -FilePath $FilePath -ErrorAction Stop
+        }
+        catch {
+            Write-Host "Integrity check FAILED: unable to verify Authenticode signature for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+
+        if ($signature.Status -ne 'Valid') {
+            Write-Host "Integrity check FAILED: Authenticode signature status is '$($signature.Status)' for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+            return $false
+        }
+
+        # Publisher match (substring, case-insensitive)
+        if ($ExpectedPublisher) {
+            $subject = $signature.SignerCertificate.Subject
+            if (-not $subject -or $subject.IndexOf($ExpectedPublisher, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                Write-Host "Integrity check FAILED: publisher mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+                Write-Host "  Expected publisher containing: $ExpectedPublisher" -ForegroundColor Red
+                Write-Host "  Actual certificate subject:    $subject" -ForegroundColor Red
+                return $false
+            }
+            Write-Host "Integrity check passed: valid signature from '$ExpectedPublisher'." -ForegroundColor Green
+        }
+        else {
+            Write-Host "Integrity check passed: valid Authenticode signature." -ForegroundColor Green
+        }
+        return $true
+    }
+
+    # Signature enforcement explicitly disabled (AllowUnsignedInstaller = $true)
+    Write-Host "Integrity check skipped: signature enforcement disabled for this app." -ForegroundColor Yellow
+    return $true
+}
+
 # Function to download file with progress
 function Invoke-FileDownload {
     param(
         [string]$Url,
-        [string]$OutputPath
+        [string]$OutputPath,
+        [string]$ExpectedSha256,
+        [bool]$EnforceSignatureCheck = $true,
+        [string]$ExpectedPublisher
     )
     
     Write-Host "Downloading from: $Url" -ForegroundColor Cyan
@@ -135,6 +212,13 @@ function Invoke-FileDownload {
         $ProgressPreference = 'SilentlyContinue'  # Speeds up download
         Invoke-WebRequest -Uri $Url -OutFile $OutputPath -UseBasicParsing -ErrorAction Stop
         $ProgressPreference = 'Continue'
+
+        # Verify integrity before declaring success
+        if (-not (Test-DownloadedFileIntegrity -FilePath $OutputPath -ExpectedSha256 $ExpectedSha256 -EnforceSignatureCheck $EnforceSignatureCheck -ExpectedPublisher $ExpectedPublisher)) {
+            Write-Host "Removing unverified download: $(Split-Path $OutputPath -Leaf)" -ForegroundColor Red
+            Remove-Item -Path $OutputPath -Force -ErrorAction SilentlyContinue
+            return $false
+        }
         
         Write-Host "Download completed successfully!" -ForegroundColor Green
         return $true

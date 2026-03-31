@@ -24,6 +24,7 @@ $script:AppConfigurations = @{
         DetectionFile = "firefox.exe"
         DetectionType = "File"
         DetectionOperator = "greaterThanOrEqual"
+        ExpectedPublisher = "Mozilla Corporation"
         AutoUpdate = $true
     }
     
@@ -45,6 +46,7 @@ $script:AppConfigurations = @{
         DetectionFile = "chrome.exe"
         DetectionOperator = "greaterThanOrEqual"
         VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
+        ExpectedPublisher = "Google LLC"
         AutoUpdate = $true
     }
     
@@ -68,6 +70,7 @@ $script:AppConfigurations = @{
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"  # Simple product code detection, no version operator needed
         VersionFormat = "NoPrefix"  # Version like "7z2501" needs special handling
+        AllowUnsignedInstaller = $true  # 7-Zip MSI is not Authenticode-signed
         AutoUpdate = $true
     }
     
@@ -92,6 +95,7 @@ $script:AppConfigurations = @{
         DetectionFile = "gimp-3.0.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
+        ExpectedPublisher = "Jernej"
         AutoUpdate = $true
     }
     
@@ -116,6 +120,7 @@ $script:AppConfigurations = @{
         DetectionFile = "vlc.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
+        AllowUnsignedInstaller = $true  # VLC EXE signature status is unreliable across versions
         AutoUpdate = $true
     }
     
@@ -140,6 +145,7 @@ $script:AppConfigurations = @{
         DetectionFile = "notepad++.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
+        ExpectedPublisher = "NOTEPAD++"
         AutoUpdate = $true
     }
     
@@ -161,6 +167,7 @@ $script:AppConfigurations = @{
         VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
         ManualExtraction = $true  # Requires manual extraction: Run downloaded EXE with /extract /defaults
         ExtractionCommand = '"{0}" /extract /defaults'  # Command to extract MSI from EXE
+        ExpectedPublisher = "Canva"  # Affinity is now owned by Canva; signature check runs on EXE before extraction
         AutoUpdate = $true
     }
     
@@ -184,6 +191,7 @@ $script:AppConfigurations = @{
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
+        AllowUnsignedInstaller = $true  # Inkscape MSI has unreliable signature (self-signed/incomplete cert chain)
         AutoUpdate = $true
     }
     
@@ -208,6 +216,7 @@ $script:AppConfigurations = @{
         DetectionFile = "Audacity.exe"
         DetectionType = "File"
         DetectionOperator = "greaterThanOrEqual"
+        ExpectedPublisher = "MuseCY"
         AutoUpdate = $true
     }
     
@@ -230,6 +239,7 @@ $script:AppConfigurations = @{
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
+        ExpectedPublisher = "Document Foundation"
         AutoUpdate = $true
     }
     
@@ -254,6 +264,7 @@ $script:AppConfigurations = @{
         DetectionFile = "OpenShot Video Editor.exe"
         DetectionType = "File"
         DetectionOperator = "greaterThanOrEqual"
+        ExpectedPublisher = "OpenShot Studios"
         AutoUpdate = $true
     }
     
@@ -276,6 +287,7 @@ $script:AppConfigurations = @{
         DetectionScriptPath = "packages\geogebra\Detect-GeoGebraVersion.ps1"  # Custom script to extract version from HTML files
         VersionExtraction = "AppLocker"  # Extract version after download using Get-AppLockerFileInformation
         SupersedenceType = "Replace"  # Use Replace instead of Update (uninstalls old version)
+        ExpectedPublisher = "GeoGebra GmbH"
         AutoUpdate = $true
         # Note: GeoGebra doesn't update MSI Product Code or GeoGebra.exe version between releases
         # Real version is stored in latestVersion variable in HTML files (main.js or ggb-config.js)
@@ -302,6 +314,7 @@ $script:AppConfigurations = @{
         DetectionFile = "stellarium.exe"
         DetectionType = "File"
         DetectionOperator = "greaterThanOrEqual"
+        ExpectedPublisher = "SignPath Foundation"
         AutoUpdate = $true
     }
     
@@ -324,6 +337,7 @@ $script:AppConfigurations = @{
         DetectionValueName = "DisplayVersion"
         DetectionOperator = "greaterThanOrEqual"
         VersionExtraction = "AppLocker"
+        ExpectedPublisher = "Google LLC"
         AutoUpdate = $true
     }
     
@@ -349,6 +363,7 @@ $script:AppConfigurations = @{
         DetectionFile = "KeePassXC.exe"
         DetectionOperator = "greaterThanOrEqual"
         Dependencies = @("VCRedist")
+        ExpectedPublisher = "DroidMonkey Apps"
         AutoUpdate = $true
     }
     
@@ -371,6 +386,7 @@ $script:AppConfigurations = @{
         DetectionValueName = "Installed"
         DetectionOperator = "exists"
         VersionExtraction = "AppLocker"
+        ExpectedPublisher = "Microsoft Corporation"
         HideFromPortal = $true
         AutoUpdate = $false
     }
