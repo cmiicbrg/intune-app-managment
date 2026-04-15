@@ -1,7 +1,6 @@
 # Shared Functions Module
 # Common functions used by both Download-And-Package-Software.ps1 and Deploy-ToIntune.ps1
-# Author: GitHub Copilot
-# Date: October 11, 2025
+
 
 # Import configuration
 . (Join-Path $PSScriptRoot "AppConfig.ps1")
@@ -544,13 +543,15 @@ function Get-ScriptAppConfig {
     # Format commands
     $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile
     
-    # Get MSI product code for uninstall (even with script detection, we still uninstall via MSI)
-    if ($IntuneWinPath) {
+    # Format uninstall command based on package type
+    if ($appConfig.PackageType -eq "MSI" -and $IntuneWinPath) {
+        # MSI apps: use product code for uninstall
         $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $IntuneWinPath
         $UninstallCommand = $appConfig.UninstallCommandTemplate -f $IntuneWinMetaData.ApplicationInfo.MsiInfo.MsiProductCode
     }
     else {
-        $UninstallCommand = $appConfig.UninstallCommandTemplate
+        # EXE apps: use version for uninstall command (e.g., versioned folder paths)
+        $UninstallCommand = $appConfig.UninstallCommandTemplate -f $Version
     }
     
     return @{

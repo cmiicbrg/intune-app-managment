@@ -1,6 +1,5 @@
 # Script to download latest software versions and create IntuneWin packages
-# Author: GitHub Copilot
-# Date: October 10, 2025
+
 
 param(
     [Parameter(Mandatory=$false)]
@@ -111,6 +110,14 @@ function Get-LatestVersionInfo {
                     else {
                         Write-Host "  No matches found with regex pattern" -ForegroundColor Yellow
                     }
+                }
+                elseif ($AppConfig.Name -eq "Google Earth Pro") {
+                    # Google Earth Pro - scrape version from release notes, build versioned URL
+                    $version = $matches[1]  # e.g., "7.3.7"
+                    $url = $AppConfig.DownloadUrlTemplate -f $version
+                    $filename = $AppConfig.FilenameTemplate -f $version
+                    Write-Host "  Found version: $version" -ForegroundColor Green
+                    return @{Url = $url; Version = $version; Filename = $filename}
                 }
             }
         }

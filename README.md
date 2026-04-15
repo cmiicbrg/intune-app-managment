@@ -31,7 +31,7 @@ intune-app-management/
 
 ## Features
 
-- **Automatic version detection** for 10 applications
+- **Automatic version detection** for 20 applications
 - **Silent installation** with pre-configured commands
 - **Supersedence management** - automatically replaces older versions
 - **Icon support** for Company Portal
@@ -40,18 +40,28 @@ intune-app-management/
 
 ## Supported Applications
 
-- Mozilla Firefox (German)
-- Google Chrome Enterprise
-- 7-Zip
-- GIMP
-- VLC Media Player
-- Notepad++
-- Affinity Studio
-- Inkscape
-- Audacity
-- LibreOffice (German, Enterprise version)
-- OpenShot Video Editor
-- KeePassXC
+| Application | Type | Version Detection |
+| --- | --- | --- |
+| Mozilla Firefox (German) | EXE | Mozilla Product Details API |
+| Google Chrome Enterprise | MSI | Web scraping (AppLocker XML) |
+| 7-Zip | EXE | Web scraping |
+| GIMP | EXE | Web scraping |
+| VLC Media Player | MSI | Web scraping |
+| Notepad++ | EXE | GitHub Releases |
+| Affinity Studio | MSI | AppLocker XML extraction |
+| Inkscape | MSI | Web scraping |
+| Audacity | EXE | GitHub Releases |
+| LibreOffice (German) | MSI | Web scraping (Enterprise version) |
+| OpenShot Video Editor | EXE | GitHub Releases |
+| KeePassXC | MSI | GitHub Releases |
+| GeoGebra | MSI | Direct download (version in filename) |
+| Stellarium | EXE | GitHub Releases |
+| Google Drive | EXE | GitHub JSON feed |
+| Google Earth Pro | EXE | Web scraping (Release notes) |
+| GPG4Win (Kleopatra) | EXE | Direct download |
+| Visual C++ Redistributable | EXE | Web scraping (Microsoft) |
+| NextExam Teacher | MSI | Manual update |
+| NextExam Student | MSI | Manual update |
 
 ## Prerequisites
 
@@ -318,10 +328,15 @@ Edit `AppConfig.ps1` to modify:
 
 ### Version Detection Methods
 
-- **API-based**: Firefox (Mozilla product details API)
-- **GitHub Releases**: Notepad++, Audacity
-- **Web Scraping**: 7-Zip, GIMP, VLC, Inkscape, LibreOffice
-- **AppLocker Extraction**: Chrome, Affinity Studio
+| Method | Applications |
+| --- | --- |
+| **Mozilla API** | Firefox |
+| **GitHub Releases** | Notepad++, Audacity, OpenShot, KeePassXC, Stellarium |
+| **GitHub JSON** | Google Drive |
+| **Web Scraping** | 7-Zip, GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro, Visual C++ Redist |
+| **AppLocker XML** | Chrome, Affinity Studio |
+| **Direct Download** | GeoGebra, GPG4Win |
+| **Manual Update** | NextExam Teacher, NextExam Student |
 
 ### Special Handling
 
@@ -329,6 +344,9 @@ Edit `AppConfig.ps1` to modify:
 - **Inkscape**: Two-step download (main page → platforms page)
 - **LibreOffice**: Enterprise version selection (stable vs. fresh)
 - **Chrome**: File-based detection for auto-update support
+- **GeoGebra**: PowerShell script detection (MSI product code doesn't change between versions)
+- **KeePassXC**: Custom install script with silent INI config deployment
+- **Google Earth Pro**: Uses OMAHA=1 flag for built-in auto-update
 
 ### Supersedence
 
