@@ -46,17 +46,17 @@ intune-app-management/
 | Google Chrome Enterprise | MSI | Web scraping (AppLocker XML) |
 | 7-Zip | EXE | Web scraping |
 | GIMP | EXE | Web scraping |
-| VLC Media Player | MSI | Web scraping |
+| VLC Media Player | EXE | Web scraping |
 | Notepad++ | EXE | GitHub Releases |
 | Affinity Studio | MSI | AppLocker XML extraction |
 | Inkscape | MSI | Web scraping |
 | Audacity | EXE | GitHub Releases |
 | LibreOffice (German) | MSI | Web scraping (Enterprise version) |
 | OpenShot Video Editor | EXE | GitHub Releases |
-| KeePassXC | MSI | GitHub Releases |
+| KeePassXC | EXE | GitHub Releases |
 | GeoGebra | MSI | Direct download (version in filename) |
 | Stellarium | EXE | GitHub Releases |
-| Google Drive | EXE | GitHub JSON feed |
+| Google Drive | EXE | AppLocker XML extraction |
 | Google Earth Pro | EXE | Web scraping (Release notes) |
 | GPG4Win (Kleopatra) | EXE | Direct download |
 | Visual C++ Redistributable | EXE | Web scraping (Microsoft) |
@@ -332,9 +332,8 @@ Edit `AppConfig.ps1` to modify:
 | --- | --- |
 | **Mozilla API** | Firefox |
 | **GitHub Releases** | Notepad++, Audacity, OpenShot, KeePassXC, Stellarium |
-| **GitHub JSON** | Google Drive |
 | **Web Scraping** | 7-Zip, GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro, Visual C++ Redist |
-| **AppLocker XML** | Chrome, Affinity Studio |
+| **AppLocker XML** | Chrome, Google Drive, Affinity Studio |
 | **Direct Download** | GeoGebra, GPG4Win |
 | **Manual Update** | NextExam Teacher, NextExam Student |
 

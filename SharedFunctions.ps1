@@ -496,6 +496,17 @@ function Get-ScriptAppConfig {
     $appConfig = Get-AppConfiguration -AppName $AppName
     $commonSettings = Get-CommonSettings
     
+    # Validate version for EXE apps (required for uninstall command and detection script)
+    if ($appConfig.PackageType -eq "EXE") {
+        try {
+            $null = [version]$Version
+        }
+        catch {
+            throw "Script-detected EXE app '$AppName' requires a valid version number (got '$Version'). " +
+                  "Update FallbackVersion in AppConfig.ps1 or ensure the installer filename contains a parseable version."
+        }
+    }
+    
     # Get detection script path
     $scriptPath = Join-Path $PSScriptRoot $appConfig.DetectionScriptPath
     
