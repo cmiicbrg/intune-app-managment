@@ -1,7 +1,6 @@
 # Authentication Manager Module
 # Centralized authentication for Microsoft Intune operations
-# Author: GitHub Copilot
-# Date: December 10, 2025
+
 
 <#
 .SYNOPSIS

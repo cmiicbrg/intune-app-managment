@@ -1,7 +1,6 @@
 # Application Configuration File
 # Centralized configuration for all software packages
-# Author: GitHub Copilot
-# Date: October 11, 2025
+
 
 # Application definitions with all metadata
 $script:AppConfigurations = @{
@@ -331,14 +330,65 @@ $script:AppConfigurations = @{
         FilenameTemplate = "GoogleDriveSetup-{0}.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" --silent --desktop_shortcut --skip_launch_new --gsuite_shortcuts=false'
-        UninstallCommandTemplate = '"C:\Program Files\Google\Drive File Stream\{1}\GoogleDriveFS.exe" --uninstall --silent'
-        DetectionType = "Registry"
-        DetectionPath = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6BBB3539-2232-434A-A4E5-9A33560C6283}"
-        DetectionValueName = "DisplayVersion"
-        DetectionOperator = "greaterThanOrEqual"
+        UninstallCommandTemplate = '"C:\Program Files\Google\Drive File Stream\{0}\GoogleDriveFS.exe" --uninstall --silent'
+        DetectionType = "Script"  # Use script detection (version folders: C:\Program Files\Google\Drive File Stream\X.X.X.X\)
+        DetectionOperator = "ScriptOnly"
+        DetectionScriptPath = "packages\googledrive\Detect-GoogleDriveVersion.ps1"
         VersionExtraction = "AppLocker"
         ExpectedPublisher = "Google LLC"
         AutoUpdate = $true
+        # Note: Google Drive installs GoogleDriveFS.exe in versioned subfolders
+        # Registry DisplayVersion may not reflect auto-updated version
+    }
+    
+    GoogleEarthPro = @{
+        Name = "Google Earth Pro"
+        DisplayNameTemplate = "Google Earth Pro {0}"
+        Publisher = "Google LLC"
+        Description = "Google Earth Pro - 3D globe with GIS data support for education"
+        Folder = "googleearthpro"
+        IconFile = "googleearthpro-logo.png"
+        IntuneWinPattern = "googleearthprowin-*.intunewin"
+        DownloadPageUrl = "https://support.google.com/earth/answer/40901?hl=en"
+        DownloadUrlRegex = 'Earth version (7\.\d+\.\d+)'
+        DownloadUrlTemplate = "https://dl.google.com/dl/earth/client/advanced/current/googleearthprowin-{0}-x64.exe"
+        FallbackUrl = "https://dl.google.com/dl/earth/client/advanced/current/googleearthprowin-7.3.7-x64.exe"
+        FallbackVersion = "7.3.7"
+        FilenameTemplate = "googleearthprowin-{0}-x64.exe"
+        PackageType = "EXE"
+        InstallCommandTemplate = '"{0}" OMAHA=1'
+        UninstallCommandTemplate = '"C:\Program Files\Google\Google Earth Pro\uninstall.exe" /S'
+        DetectionType = "File"
+        DetectionPath = "C:\Program Files\Google\Google Earth Pro\client"
+        DetectionFile = "googleearth.exe"
+        DetectionOperator = "greaterThanOrEqual"
+        ExpectedPublisher = "Google LLC"
+        AutoUpdate = $true
+        # Note: OMAHA=1 enables Google's auto-update mechanism
+        # Installer has no version metadata; version scraped from release notes page
+    }
+    
+    GPG4Win = @{
+        Name = "Gpg4win"
+        DisplayNameTemplate = "Gpg4win {0}"
+        Publisher = "g10 Code GmbH"
+        Description = "Gpg4win - GNU Privacy Guard for Windows with Kleopatra, GpgOL, and GpgEX"
+        Folder = "gpg4win"
+        IconFile = "gpg4win-logo.png"
+        IntuneWinPattern = "gpg4win-*.intunewin"
+        DownloadUrl = "https://files.gpg4win.org/gpg4win-latest.exe"
+        FallbackVersion = "5.0.2"
+        FilenameTemplate = "gpg4win-{0}.exe"
+        PackageType = "EXE"
+        InstallCommandTemplate = '"{0}" /S'
+        UninstallCommandTemplate = '"C:\Program Files\Gpg4win\gpg4win-uninstall.exe" /S'
+        DetectionType = "File"
+        DetectionPath = "C:\Program Files\Gpg4win\bin"
+        DetectionFile = "kleopatra.exe"
+        DetectionOperator = "greaterThanOrEqual"
+        VersionExtraction = "AppLocker"
+        ExpectedPublisher = "g10 Code GmbH"
+        AutoUpdate = $false
     }
     
     KeePassXC = @{
@@ -389,6 +439,52 @@ $script:AppConfigurations = @{
         ExpectedPublisher = "Microsoft Corporation"
         HideFromPortal = $true
         AutoUpdate = $false
+    }
+    
+    NextExamStudent = @{
+        Name = "NextExamStudent"
+        DisplayNameTemplate = "Next-Exam Student {0}"
+        Publisher = "Bildungsportal"
+        Description = "Next-Exam Student - Secure exam environment for student devices (Austrian Ministry of Education)"
+        Folder = "nextexam-student"
+        IconFile = "nextexam-teacher-logo.png"
+        IntuneWinPattern = "Next-Exam-Student_*.intunewin"
+        GitHubRepo = "Bildungsportal/next-exam"
+        GitHubApiUrl = "https://api.github.com/repos/Bildungsportal/next-exam/releases/latest"
+        GitHubAssetPattern = "Next-Exam-Student_[\d\.]+_\d+_x64\.msi$"
+        FallbackUrl = "https://github.com/Bildungsportal/next-exam/releases/download/1.1.3/Next-Exam-Student_1.1.3.1_20260318_x64.msi"
+        FallbackVersion = "1.1.3.1"
+        FilenameTemplate = "Next-Exam-Student_{0}_x64.msi"
+        PackageType = "MSI"
+        InstallCommandTemplate = 'msiexec /i "{0}" /qn ALLUSERS=1'
+        UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
+        DetectionType = "MSI"
+        DetectionOperator = "ProductCodeOnly"
+        ExpectedPublisher = "thomas.weissel@bildung.gv.at"
+        AutoUpdate = $true
+    }
+    
+    NextExamTeacher = @{
+        Name = "NextExamTeacher"
+        DisplayNameTemplate = "Next-Exam Teacher {0}"
+        Publisher = "Bildungsportal"
+        Description = "Next-Exam Teacher - Exam dashboard and control panel for teachers (Austrian Ministry of Education)"
+        Folder = "nextexam-teacher"
+        IconFile = "nextexam-teacher-logo.png"
+        IntuneWinPattern = "Next-Exam-Teacher_*.intunewin"
+        GitHubRepo = "Bildungsportal/next-exam"
+        GitHubApiUrl = "https://api.github.com/repos/Bildungsportal/next-exam/releases/latest"
+        GitHubAssetPattern = "Next-Exam-Teacher_[\d\.]+_\d+_x64\.msi$"
+        FallbackUrl = "https://github.com/Bildungsportal/next-exam/releases/download/1.1.3/Next-Exam-Teacher_1.1.3.1_20260318_x64.msi"
+        FallbackVersion = "1.1.3.1"
+        FilenameTemplate = "Next-Exam-Teacher_{0}_x64.msi"
+        PackageType = "MSI"
+        InstallCommandTemplate = 'msiexec /i "{0}" /qn ALLUSERS=1'
+        UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
+        DetectionType = "MSI"
+        DetectionOperator = "ProductCodeOnly"
+        ExpectedPublisher = "thomas.weissel@bildung.gv.at"
+        AutoUpdate = $true
     }
 }
 

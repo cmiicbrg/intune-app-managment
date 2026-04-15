@@ -1,7 +1,6 @@
 # Complete Intune Win32 App Deployment Script
 # Uses IntuneWin32App module for proper deployment
-# Author: GitHub Copilot
-# Date: October 10, 2025
+
 
 <#
 .SYNOPSIS
@@ -615,25 +614,21 @@ if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientI
 
 Write-Host "Successfully connected to Microsoft Intune!" -ForegroundColor Green
 
-# Define apps to deploy
-$script:appsToDeploy = @(
-    @{Name = "Firefox"; Folder = "firefox"; Pattern = "Firefox-Setup-*-de.intunewin"; AppConfigName = "Firefox"; PackageType = "EXE" },
-    @{Name = "Chrome"; Folder = "chrome"; Pattern = "GoogleChrome-*-Enterprise-x64.intunewin"; AppConfigName = "Chrome"; PackageType = "MSI" },
-    @{Name = "7-Zip"; Folder = "7zip"; Pattern = "7z*-x64.intunewin"; AppConfigName = "SevenZip"; PackageType = "MSI" },
-    @{Name = "GIMP"; Folder = "gimp"; Pattern = "gimp-*-setup*.intunewin"; AppConfigName = "GIMP"; PackageType = "EXE" },
-    @{Name = "VLC"; Folder = "vlc"; Pattern = "vlc-*-win64.intunewin"; AppConfigName = "VLC"; PackageType = "EXE" },
-    @{Name = "Notepad++"; Folder = "npp"; Pattern = "npp.*Installer.x64.intunewin"; AppConfigName = "NotepadPlusPlus"; PackageType = "EXE" },
-    @{Name = "Affinity Studio"; Folder = "affinity"; Pattern = "Affinity*.intunewin"; AppConfigName = "AffinityStudio"; PackageType = "MSI" },
-    @{Name = "Inkscape"; Folder = "inkscape"; Pattern = "inkscape-*.intunewin"; AppConfigName = "Inkscape"; PackageType = "MSI" },
-    @{Name = "Audacity"; Folder = "audacity"; Pattern = "audacity-*.intunewin"; AppConfigName = "Audacity"; PackageType = "EXE" },
-    @{Name = "LibreOffice"; Folder = "libreoffice"; Pattern = "LibreOffice_*.intunewin"; AppConfigName = "LibreOffice"; PackageType = "MSI" },
-    @{Name = "OpenShot"; Folder = "openshot"; Pattern = "OpenShot-v*-x86_64.intunewin"; AppConfigName = "OpenShot"; PackageType = "EXE" },
-    @{Name = "GeoGebra"; Folder = "geogebra"; Pattern = "GeoGebra-Windows-Installer-6-*.intunewin"; AppConfigName = "GeoGebra"; PackageType = "MSI" },
-    @{Name = "Stellarium"; Folder = "stellarium"; Pattern = "stellarium-*.intunewin"; AppConfigName = "Stellarium"; PackageType = "EXE" },
-    @{Name = "Google Drive"; Folder = "googledrive"; Pattern = "GoogleDriveSetup-*.intunewin"; AppConfigName = "GoogleDrive"; PackageType = "EXE" },
-    @{Name = "KeePassXC"; Folder = "keepassxc"; Pattern = "KeePassXC-*-Win64.intunewin"; AppConfigName = "KeePassXC"; PackageType = "EXE" },
-    @{Name = "VCRedist"; Folder = "vcredist"; Pattern = "vc_redist*.intunewin"; AppConfigName = "VCRedist"; PackageType = "EXE" }
-)
+# Build apps to deploy dynamically from AppConfig.ps1 (single source of truth)
+$script:appsToDeploy = @()
+foreach ($appConfigName in (Get-AllAppNames)) {
+    $cfg = Get-AppConfiguration -AppName $appConfigName
+    if ($cfg -and $cfg.Folder -and $cfg.IntuneWinPattern) {
+        $displayName = $cfg.DisplayNameTemplate -replace '\s*\{0\}', ''
+        $script:appsToDeploy += @{
+            Name = $displayName.Trim()
+            Folder = $cfg.Folder
+            Pattern = $cfg.IntuneWinPattern
+            AppConfigName = $appConfigName
+            PackageType = $cfg.PackageType
+        }
+    }
+}
 
 # Filter apps if AppName parameter is specified
 $appsToProcess = $script:appsToDeploy
