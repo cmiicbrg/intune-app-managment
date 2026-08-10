@@ -19,6 +19,7 @@ BeforeAll {
     New-Item -ItemType Directory -Path (Join-Path $workDir 'packages\geogebra') -Force | Out-Null
     Copy-Item (Join-Path $repoRoot 'SharedFunctions.ps1') $workDir
     Copy-Item (Join-Path $repoRoot 'AppConfig.ps1') $workDir
+    Copy-Item (Join-Path $repoRoot 'IntuneInterop.ps1') $workDir
     Copy-Item (Join-Path $repoRoot 'packages\geogebra\Detect-GeoGebraVersion.ps1') (Join-Path $workDir 'packages\geogebra')
     . (Join-Path $workDir 'SharedFunctions.ps1')
 

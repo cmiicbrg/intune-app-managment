@@ -1,16 +1,17 @@
 #Requires -Version 7.4
 
 # Complete Intune Win32 App Deployment Script
-# Uses IntuneWin32App module for proper deployment
+# All Intune module interaction goes through the IntuneInterop.ps1 boundary
 
 
 <#
 .SYNOPSIS
-    Deploys Win32 applications to Microsoft Intune using IntuneWin32App module
+    Deploys Win32 applications to Microsoft Intune
 
 .DESCRIPTION
     This script automatically deploys all IntuneWin packages to Microsoft Intune.
-    It uses the IntuneWin32App PowerShell module for proper Win32 app management.
+    Intune API interaction goes through IntuneInterop.ps1 (currently backed by the
+    IntuneWin32App PowerShell module).
 
 .PARAMETER TenantName
     Name of pre-configured tenant from intune-tenants.json (see Add-IntuneTenant).
@@ -137,16 +138,20 @@ if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $ShowPlan) {
     Write-Host "Credentials loaded for tenant: $TenantName (TenantId: $TenantId)" -ForegroundColor Green
 }
 
-# Check and install IntuneWin32App module
+# Check and install required modules. The Intune module itself is owned by the
+# interop boundary; only the Microsoft.Graph modules are named here.
 function Install-RequiredModules {
     Write-Host "Checking required modules..." -ForegroundColor Cyan
-    
+
+    if (-not (Install-InteropModule -SkipInstallation:$SkipInstallation)) {
+        return $false
+    }
+
     $requiredModules = @(
-        "IntuneWin32App",
         "Microsoft.Graph.Authentication",
         "Microsoft.Graph.Groups"
     )
-    
+
     foreach ($moduleName in $requiredModules) {
         if (-not (Get-Module -ListAvailable -Name $moduleName)) {
             Write-Host "Module '$moduleName' not found. Installing..." -ForegroundColor Yellow
@@ -209,21 +214,9 @@ function Set-AppAssignment {
         return $assignmentIds
     }
 
-    # Which targets this app already has. On failure the list stays empty and each assignment is
-    # simply attempted, which is the previous behaviour.
-    $existingTargets = @()
-    try {
-        foreach ($existing in @(Get-IntuneWin32AppAssignment -ID $AppId -ErrorAction Stop)) {
-            switch -Wildcard ($existing.Type) {
-                '*allLicensedUsersAssignmentTarget' { $existingTargets += 'AllUsers' }
-                '*allDevicesAssignmentTarget'       { $existingTargets += 'AllDevices' }
-                '*groupAssignmentTarget'            { $existingTargets += "Group:$($existing.GroupID)" }
-            }
-        }
-    }
-    catch {
-        Write-Verbose "Could not read existing assignments for app '$AppId': $($_.Exception.Message)"
-    }
+    # Which targets this app already has (normalized by the interop layer). On failure the
+    # list stays empty and each assignment is simply attempted, which is the previous behaviour.
+    $existingTargets = @(Get-InteropAppAssignment -AppId $AppId)
 
     if ($AssignAllUsers) {
         if ($existingTargets -contains 'AllUsers') {
@@ -231,9 +224,7 @@ function Set-AppAssignment {
         }
         else {
             Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-            $allUsersParams = @{ ID = $AppId; Intent = "available"; Notification = "showAll" }
-            if ($AutoUpdateSuperseded) { $allUsersParams['AutoUpdateSupersededApps'] = 'enabled' }
-            $assignment = Add-IntuneWin32AppAssignmentAllUsers @allUsersParams
+            $assignment = Add-InteropAllUsersAssignment -AppId $AppId -Intent "available" -Notification "showAll" -AutoUpdateSuperseded $AutoUpdateSuperseded
             if ($assignment -and $assignment.id) {
                 $assignmentIds += $assignment.id
                 Write-Host "  Assigned to All Users" -ForegroundColor Green
@@ -250,7 +241,7 @@ function Set-AppAssignment {
         }
         else {
             Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
-            $deviceAssignment = Add-IntuneWin32AppAssignmentAllDevices -ID $AppId -Intent "required" -Notification "showAll"
+            $deviceAssignment = Add-InteropAllDevicesAssignment -AppId $AppId -Intent "required" -Notification "showAll"
             if ($deviceAssignment -and $deviceAssignment.id) {
                 Write-Host "  Assigned to All Devices" -ForegroundColor Green
             }
@@ -316,12 +307,7 @@ function Set-AppAssignment {
                 # matching existing behaviour, where auto-update supersedence is only enabled for
                 # All Users assignments.
                 $intent = $groupIntent.ToLower()
-                $groupParams = @{ Include = $true; ID = $AppId; GroupID = $group.Id; Intent = $intent; Notification = "showAll" }
-                # Only valid with intent 'available' - the module rejects it outright otherwise
-                if ($AutoUpdateSuperseded -and $intent -eq 'available') {
-                    $groupParams['AutoUpdateSupersededApps'] = 'enabled'
-                }
-                $groupResult = Add-IntuneWin32AppAssignmentGroup @groupParams
+                $groupResult = Add-InteropGroupAssignment -AppId $AppId -GroupId $group.Id -Intent $intent -Notification "showAll" -AutoUpdateSuperseded $AutoUpdateSuperseded
                 if ($groupResult -and $groupResult.id) {
                     Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
                 }
@@ -369,7 +355,7 @@ function Publish-App {
         
         # Search for all apps that start with the base display name (to find different versions)
         $searchPattern = $baseDisplayName  # Use base display name for searching
-        $allExistingApps = Get-IntuneWin32App | Where-Object { $_.displayName -like "$searchPattern*" }
+        $allExistingApps = Get-InteropWin32App | Where-Object { $_.displayName -like "$searchPattern*" }
         
         if ($allExistingApps) {
             Write-Host "  Found $($allExistingApps.Count) existing app(s) for '$AppName'" -ForegroundColor Yellow
@@ -482,7 +468,7 @@ function Publish-App {
         if ($IconPath -and (Test-Path $IconPath)) {
             Write-Host "  Adding app icon: $(Split-Path $IconPath -Leaf)" -ForegroundColor Gray
             try {
-                $iconFile = New-IntuneWin32AppIcon -FilePath $IconPath
+                $iconFile = New-InteropAppIcon -FilePath $IconPath
                 $appParams.Icon = $iconFile
             }
             catch {
@@ -493,7 +479,7 @@ function Publish-App {
         # Upload app to Intune with error handling for Azure Storage failures
         $Win32App = $null
         try {
-            $Win32App = Add-IntuneWin32App @appParams -ErrorAction Stop
+            $Win32App = Publish-InteropWin32App -AppParams $appParams
                 
             # Validate that the app was created successfully with a valid ID
             if (-not $Win32App -or -not $Win32App.id) {
@@ -510,7 +496,7 @@ function Publish-App {
             Write-Host "  Checking if app was created in Intune..." -ForegroundColor Gray
             Start-Sleep -Seconds 10
                 
-            $createdApp = Get-IntuneWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
+            $createdApp = Get-InteropWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
             if ($createdApp -and $createdApp.id) {
                 Write-Host "  Found created app in Intune (ID: $($createdApp.id))" -ForegroundColor Green
                 $Win32App = $createdApp
@@ -537,16 +523,10 @@ function Publish-App {
                     $supersedenceType = if ($AppConfig.SupersedenceType) { $AppConfig.SupersedenceType } else { "Update" }
                     Write-Host "      Supersedence type: $supersedenceType" -ForegroundColor Gray
                         
-                    # Step 1: Create supersedence object
-                    $supersedence = New-IntuneWin32AppSupersedence `
-                        -ID $oldApp.id `
+                    Add-InteropSupersedence `
+                        -AppId $Win32App.id `
+                        -SupersededAppId $oldApp.id `
                         -SupersedenceType $supersedenceType
-                        
-                    # Step 2: Add supersedence to the new app
-                    Add-IntuneWin32AppSupersedence `
-                        -ID $Win32App.id `
-                        -Supersedence $supersedence `
-                        -Verbose
                         
                     Write-Host "    [OK] Supersedence configured (Update): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
                 }
@@ -559,8 +539,8 @@ function Publish-App {
         # Set up dependencies
         if ($AppConfig.Dependencies -and $AppConfig.Dependencies.Count -gt 0) {
             Write-Host "  Setting up dependency relationships..." -ForegroundColor Cyan
-            $dependencyObjects = @()
-            $allIntuneApps = Get-IntuneWin32App
+            $dependencyAppIds = @()
+            $allIntuneApps = Get-InteropWin32App
             
             foreach ($depName in $AppConfig.Dependencies) {
                 try {
@@ -605,7 +585,7 @@ function Publish-App {
                             $depVersion = $matches[1].TrimEnd('.')
                         }
                         
-                        $depMetaData = Get-IntuneWin32AppMetaData -FilePath $depIntunewinFile.FullName
+                        $depMetaData = Get-InteropPackageMetadata -FilePath $depIntunewinFile.FullName
                         $depSetupFile = $depMetaData.ApplicationInfo.SetupFile
                         
                         # Build config for the dependency
@@ -636,20 +616,17 @@ function Publish-App {
                         $depIconPath = Join-Path $depFolder $depConfig.IconFile
                         if ($depConfig.IconFile -and (Test-Path $depIconPath)) {
                             try {
-                                $depAppParams.Icon = New-IntuneWin32AppIcon -FilePath $depIconPath
+                                $depAppParams.Icon = New-InteropAppIcon -FilePath $depIconPath
                             }
                             catch { }
                         }
                         
-                        $depIntuneApp = Add-IntuneWin32App @depAppParams -ErrorAction Stop
+                        $depIntuneApp = Publish-InteropWin32App -AppParams $depAppParams
                         Write-Host "    Auto-deployed '$depName' to Intune (ID: $($depIntuneApp.id))" -ForegroundColor Green
                     }
                     
-                    # Collect dependency object for batch linking
-                    $dependency = New-IntuneWin32AppDependency `
-                        -ID $depIntuneApp.id `
-                        -DependencyType "AutoInstall"
-                    $dependencyObjects += $dependency
+                    # Collect dependency app ID for batch linking
+                    $dependencyAppIds += $depIntuneApp.id
                     Write-Host "    [OK] Resolved: $($depIntuneApp.displayName)" -ForegroundColor Green
                 }
                 catch {
@@ -658,13 +635,12 @@ function Publish-App {
             }
             
             # Link all dependencies in a single call
-            if ($dependencyObjects.Count -gt 0) {
+            if ($dependencyAppIds.Count -gt 0) {
                 try {
-                    Add-IntuneWin32AppDependency `
-                        -ID $Win32App.id `
-                        -Dependency $dependencyObjects `
-                        -Verbose
-                    Write-Host "  Dependencies linked ($($dependencyObjects.Count))" -ForegroundColor Green
+                    Add-InteropDependency `
+                        -AppId $Win32App.id `
+                        -DependencyAppIds $dependencyAppIds
+                    Write-Host "  Dependencies linked ($($dependencyAppIds.Count))" -ForegroundColor Green
                 }
                 catch {
                     Write-Host "  [Err] Failed to link dependencies: $_" -ForegroundColor Red
@@ -900,7 +876,7 @@ foreach ($appItem in $appsToProcess) {
     
     # Get the original setup file name from .intunewin metadata (preserves .exe/.msi extension)
     Write-Host "  Reading package metadata..." -ForegroundColor Gray
-    $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $intunewinFile.FullName
+    $IntuneWinMetaData = Get-InteropPackageMetadata -FilePath $intunewinFile.FullName
     $setupFileName = $IntuneWinMetaData.ApplicationInfo.SetupFile
     Write-Host "  Setup file: $setupFileName" -ForegroundColor Gray
     

@@ -11,6 +11,7 @@ BeforeAll {
     New-Item -ItemType Directory -Path $workDir -Force | Out-Null
     Copy-Item (Join-Path $repoRoot 'SharedFunctions.ps1') $workDir
     Copy-Item (Join-Path $repoRoot 'AppConfig.ps1') $workDir
+    Copy-Item (Join-Path $repoRoot 'IntuneInterop.ps1') $workDir
     . (Join-Path $workDir 'SharedFunctions.ps1')
     $cachePath = Join-Path $workDir 'AppVersions.json'
 }

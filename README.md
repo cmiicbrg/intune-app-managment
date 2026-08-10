@@ -275,6 +275,7 @@ intune-app-management/
 ├── AppConfig.ps1                          # Application configuration
 ├── AppVersions.json                       # Version cache (machine-maintained)
 ├── SharedFunctions.ps1                    # Shared functions
+├── IntuneInterop.ps1                      # Boundary to the IntuneWin32App module
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
 ├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
