@@ -8,8 +8,13 @@
 # The plan lives in TenantDeployments.json (git-ignored, like intune-tenants.json, because it names
 # real tenants and Entra ID groups). TenantDeployments.example.json documents the schema.
 
-# Import configuration for app-name validation
-. (Join-Path $PSScriptRoot "AppConfig.ps1")
+# Import configuration for app-name validation, unless a caller already loaded it.
+# Deploy-ToIntune.ps1 dot-sources SharedFunctions.ps1, which dot-sources AppConfig.ps1, so an
+# unconditional import here would rebuild $script:AppConfigurations and re-run the version-cache
+# overlay a second time on every run for no benefit.
+if (-not (Get-Command Get-AllAppNames -ErrorAction SilentlyContinue)) {
+    . (Join-Path $PSScriptRoot "AppConfig.ps1")
+}
 
 $script:TenantDeploymentsPath = Join-Path $PSScriptRoot "TenantDeployments.json"
 

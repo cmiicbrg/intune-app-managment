@@ -251,19 +251,34 @@ function Set-AppAssignment {
         }
     }
 
-    foreach ($groupAssignment in @($AssignGroups)) {
-        $groupName = $groupAssignment.Name
-        $groupIntent = if ($groupAssignment.Intent) { $groupAssignment.Intent } else { 'Available' }
-        Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
-
+    # Resolve the Groups module once per app rather than once per group: Get-Module
+    # -ListAvailable scans the whole module path, and Install-Module can prompt. If it is
+    # unavailable, skip every group assignment but keep the All Users / All Devices
+    # assignments applied above.
+    $groupsModuleReady = $true
+    if (@($AssignGroups).Count -gt 0) {
         try {
-            # Ensure Microsoft.Graph.Groups module is available
             if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
                 Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
                 Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
             }
             Import-Module Microsoft.Graph.Groups -ErrorAction Stop
+        }
+        catch {
+            Write-Host "  Warning: Microsoft.Graph.Groups is unavailable, skipping all group assignments" -ForegroundColor Yellow
+            Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+            $groupsModuleReady = $false
+        }
+    }
 
+    foreach ($groupAssignment in @($AssignGroups)) {
+        if (-not $groupsModuleReady) { break }
+
+        $groupName = $groupAssignment.Name
+        $groupIntent = if ($groupAssignment.Intent) { $groupAssignment.Intent } else { 'Available' }
+        Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
+
+        try {
             # Ensure connection is still valid. Skips this group only - remaining groups
             # and the rest of the app's deployment are unaffected.
             if (-not (Test-IntuneConnection)) {
@@ -271,8 +286,11 @@ function Set-AppAssignment {
                 continue
             }
 
-            # Query Entra ID group by display name
-            $group = Get-MgGroup -Filter "displayName eq '$groupName'" -ErrorAction Stop
+            # Query Entra ID group by display name. Single quotes are doubled per the OData
+            # string-literal rules, so a name like "Teachers' Devices" resolves instead of
+            # producing an invalid filter.
+            $odataGroupName = $groupName -replace "'", "''"
+            $group = Get-MgGroup -Filter "displayName eq '$odataGroupName'" -ErrorAction Stop
 
             if ($group) {
                 if ($group -is [array] -and $group.Count -gt 1) {
