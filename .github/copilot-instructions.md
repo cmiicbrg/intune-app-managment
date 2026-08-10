@@ -2,9 +2,9 @@
 
 ## Language & Runtime
 
-- PowerShell 5.1 compatibility is required (ships with Windows 10/11)
-- Do not use PowerShell 7+ features (ternary operator, null-coalescing, `&&`, parallel foreach, etc.)
-- Use `[System.Security.Cryptography.*]` .NET classes available in .NET Framework 4.x
+- PowerShell 7.4+ (LTS) is required. Entry-point and dot-sourced scripts carry `#Requires -Version 7.4`; the only exception is `Setup-Prerequisites.ps1`, which must run on Windows PowerShell 5.1 so it can tell users how to install PowerShell 7.
+- Modern syntax (ternary operator, null-coalescing, `&&`/`||`, `clean` blocks) is allowed and preferred where it improves readability. Don't rewrite working code just to modernize it.
+- `[System.Security.Cryptography.*]` .NET 8 classes are available (including `AesGcm`).
 
 ## Architecture
 
@@ -15,15 +15,16 @@
 
 ## Cryptography Design Decisions
 
-- **AES-256-CBC without HMAC** is intentional. This is a PowerShell 5.1 compatibility choice — AES-GCM requires .NET Core / PowerShell 7+. The threat model is casual exposure (accidental commits, screen visibility), not active attackers with filesystem write access. Tampering with the ciphertext produces garbage that fails at the Graph API authentication step, not a security breach. Do not suggest adding HMAC or switching to AES-GCM.
-- **PBKDF2 with 100,000 iterations and SHA-256** for key derivation — meets OWASP recommendations.
-- `Unprotect-Secret` catches all exceptions and returns `$null` — no padding oracle is possible.
+- **AES-256-GCM** (AEAD) protects client secrets in `intune-tenants.json`. Blob layout (base64): salt (16 bytes) + nonce (12 bytes) + tag (16 bytes) + ciphertext. The GCM tag authenticates the ciphertext, so a wrong password or tampering is detected deterministically at decrypt time. The threat model remains casual exposure (accidental commits, screen visibility), not active attackers with filesystem write access.
+- **PBKDF2 with 600,000 iterations and SHA-256** for key derivation — meets current OWASP recommendations. Uses the static `[Rfc2898DeriveBytes]::Pbkdf2()` method.
+- **Config format version 3 is the only supported format.** `intune-tenants.json` carries a top-level `"version": 3`. Older (v2.x, AES-CBC) files are rejected with instructions to re-add tenants — there is intentionally no migration or legacy-decrypt path. Do not suggest adding backward compatibility for pre-3.0 configs.
+- `Unprotect-Secret` catches `CryptographicException` and `FormatException` (malformed base64) and returns `$null` on wrong password or tampered data; unexpected exceptions propagate.
 
 ## Code Patterns
 
 - `AutoUpdate` in `AppConfig.ps1` controls whether the Intune assignment setting "If superseded app(s) have been installed by the user from Company Portal, require superseding app to be installed" is enabled. It does **not** control `DetectionOperator` — those are independent properties. `DetectionOperator` determines version comparison logic (`greaterThanOrEqual`, `equal`, `ProductCodeOnly`, `ScriptOnly`) and is set explicitly per app.
 - Use `SecureString` + `SecureStringToBSTR` for user-facing password input; internal crypto helpers accept plain strings (suppressed via `PSScriptAnalyzer` attributes at file level).
-- Always dispose `IDisposable` crypto objects (`Rfc2898DeriveBytes`, `Aes`, `ICryptoTransform`, `RandomNumberGenerator`) in `try/finally` blocks.
+- Always dispose `IDisposable` crypto objects (`AesGcm`, `RandomNumberGenerator`) in `try/finally` blocks.
 - Always free BSTR pointers with `ZeroFreeBSTR` in `finally` blocks.
 - `Read-TenantConfig` throws on parse/schema errors rather than returning empty config (prevents silent data loss on corrupt JSON).
 

@@ -1,3 +1,5 @@
+#Requires -Version 7.4
+
 # Authentication Manager Module
 # Centralized authentication for Microsoft Intune operations
 

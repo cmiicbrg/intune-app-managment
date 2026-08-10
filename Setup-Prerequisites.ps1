@@ -6,13 +6,17 @@ Write-Host "Intune Deployment - Prerequisites Setup" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-# Check PowerShell version
+# Check PowerShell version. This script intentionally has no '#Requires -Version 7.4' gate
+# so it still runs on Windows PowerShell 5.1 and can explain how to install PowerShell 7.
 $psVersion = $PSVersionTable.PSVersion
 Write-Host "PowerShell Version: $($psVersion.Major).$($psVersion.Minor)" -ForegroundColor Cyan
 
-if ($psVersion.Major -lt 5) {
-    Write-Host "ERROR: PowerShell 5.1 or higher is required" -ForegroundColor Red
-    Write-Host "Please upgrade PowerShell and try again" -ForegroundColor Yellow
+if ($psVersion.Major -lt 7 -or ($psVersion.Major -eq 7 -and $psVersion.Minor -lt 4)) {
+    Write-Host "ERROR: PowerShell 7.4 or higher is required (you are running $psVersion)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Install the latest PowerShell 7 with:" -ForegroundColor Yellow
+    Write-Host "  winget install --id Microsoft.PowerShell --source winget" -ForegroundColor Gray
+    Write-Host "Then run this script again from a 'pwsh' terminal." -ForegroundColor Yellow
     exit 1
 }
 

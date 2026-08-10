@@ -68,7 +68,7 @@ intune-app-management/
 ### Required Software
 
 - Windows 10/11 or Windows Server 2016+
-- PowerShell 5.1 or later
+- PowerShell 7.4 or later (`winget install --id Microsoft.PowerShell --source winget`)
 - Internet connection
 
 ### Required PowerShell Modules
@@ -576,11 +576,22 @@ Remove-IntuneTenant -Name "OldTenant"
 Clear-IntuneTenantCache
 ```
 
+## Upgrading from 2.x
+
+Version 3.0.0 is a **breaking release**: the baseline moved from Windows PowerShell 5.1 to PowerShell 7.4+, and tenant secrets are now encrypted with AES-256-GCM. Old `intune-tenants.json` files (AES-CBC, no `version` field) are rejected — there is no migration path.
+
+To upgrade:
+
+1. Install PowerShell 7.4+ if needed: `winget install --id Microsoft.PowerShell --source winget`
+2. Open your old `intune-tenants.json` and copy each tenant's name, `tenantId`, and `clientId` (these are stored in plain text — only the secret is encrypted)
+3. Delete `intune-tenants.json`
+4. Re-add each tenant: `. .\TenantConfig.ps1` then `Add-IntuneTenant -Name "YourTenant" -TenantId "..." -ClientId "..."` — you'll need the client secret from the Azure portal (create a new one if you no longer have the value)
+
 ## Security Considerations
 
 - **Tenant Configuration File** (`intune-tenants.json`):
-  - Client secrets are AES-256 encrypted with PBKDF2 key derivation (100,000 iterations)
-  - Each secret has a unique random salt and IV
+  - Client secrets are AES-256-GCM encrypted (authenticated encryption) with PBKDF2 key derivation (600,000 iterations, SHA-256)
+  - Each secret has a unique random salt and nonce; tampering or a wrong password is detected via the GCM authentication tag
   - File is portable — can be copied to other machines
   - **Excluded from git** via `.gitignore`
   - Master password is cached in memory only (global PowerShell variable), never written to disk

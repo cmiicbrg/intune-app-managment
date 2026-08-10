@@ -1,3 +1,5 @@
+#Requires -Version 7.4
+
 # Script to download latest software versions and create IntuneWin packages
 
 
@@ -66,7 +68,7 @@ function Get-LatestVersionInfo {
         elseif ($AppConfig.DownloadPageUrl -and $AppConfig.DownloadUrlRegex) {
             # Web scraping (GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro)
             Write-Host "Fetching version from download page..." -ForegroundColor Gray
-            $page = Invoke-WebRequest -Uri $AppConfig.DownloadPageUrl -UseBasicParsing
+            $page = Invoke-WebRequest -Uri $AppConfig.DownloadPageUrl
 
             if ($page.Content -match $AppConfig.DownloadUrlRegex) {
                 if ($AppConfig.Name -eq "GIMP") {
@@ -92,7 +94,7 @@ function Get-LatestVersionInfo {
                     # Step 2: Get the platforms page to find the actual MSI download link
                     $platformsUrl = $AppConfig.PlatformsUrlTemplate -f $version
                     Write-Host "  Fetching download link from platforms page..." -ForegroundColor Gray
-                    $platformsPage = Invoke-WebRequest -Uri $platformsUrl -UseBasicParsing
+                    $platformsPage = Invoke-WebRequest -Uri $platformsUrl
                     
                     if ($platformsPage.Content -match $AppConfig.DownloadLinkRegex) {
                         $actualFilename = $matches[1]  # e.g., inkscape-1.4.2_2025-05-13_f4327f4-x64.msi

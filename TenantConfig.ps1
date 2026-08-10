@@ -1,6 +1,8 @@
+#Requires -Version 7.4
+
 # TenantConfig.ps1
 # Secure tenant configuration management with password-encrypted secrets
-# Secrets are stored AES-256 encrypted in a portable JSON file
+# Secrets are stored AES-256-GCM encrypted in a portable JSON file (format version 3)
 #
 # NOTE: Only one copy of this repository should be used per PowerShell session.
 # The credential cache is session-global, so loading multiple repo checkouts
@@ -15,6 +17,8 @@ param()
 
 $script:ConfigFileName = "intune-tenants.json"
 $script:ConfigFilePath = Join-Path $PSScriptRoot $script:ConfigFileName
+# Format 3 = AES-256-GCM secrets (v3.0.0). Older CBC-encrypted files are rejected on read.
+$script:ConfigFormatVersion = 3
 if ($null -eq $global:__IntuneCachedMasterKey) { $global:__IntuneCachedMasterKey = $null }
 if ($null -eq $global:__IntuneCachedTenantSecrets) { $global:__IntuneCachedTenantSecrets = @{} }
 
@@ -33,167 +37,130 @@ function Get-DerivedKey {
         [byte[]]$Salt
     )
     
-    $iterations = 100000  # OWASP recommended minimum for PBKDF2-SHA256
+    $iterations = 600000  # OWASP recommended minimum for PBKDF2-SHA256
     $keySize = 32  # 256 bits for AES-256
-    
-    $deriveBytes = $null
-    try {
-        $deriveBytes = New-Object System.Security.Cryptography.Rfc2898DeriveBytes(
-            $Password, 
-            $Salt, 
-            $iterations, 
-            [System.Security.Cryptography.HashAlgorithmName]::SHA256
-        )
-        
-        $keyBytes = $deriveBytes.GetBytes($keySize)
-    }
-    finally {
-        if ($null -ne $deriveBytes) {
-            $deriveBytes.Dispose()
-        }
-    }
-    
-    return $keyBytes
-}
 
-function Test-IntuneDecryptedSecret {
-    <#
-    .SYNOPSIS
-    Sanity-checks a decrypted client secret for plausibility
-    
-    .DESCRIPTION
-    AES-CBC decryption with a wrong password can occasionally produce non-$null
-    garbage (valid PKCS7 padding). This rejects secrets that are clearly invalid
-    so callers can fall back to the retry/re-prompt path.
-    #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Secret
+    return [System.Security.Cryptography.Rfc2898DeriveBytes]::Pbkdf2(
+        $Password,
+        $Salt,
+        $iterations,
+        [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+        $keySize
     )
-    
-    if ([string]::IsNullOrWhiteSpace($Secret)) { return $false }
-    if ($Secret.Length -lt 8 -or $Secret.Length -gt 256) { return $false }
-    foreach ($ch in $Secret.ToCharArray()) {
-        $code = [int][char]$ch
-        if ($code -lt 32 -or $code -gt 126) { return $false }
-    }
-    return $true
 }
 
 function Protect-Secret {
     <#
     .SYNOPSIS
-    Encrypts a secret string using AES-256 with a password-derived key
-    
+    Encrypts a secret string using AES-256-GCM with a password-derived key
+
     .DESCRIPTION
-    Uses PBKDF2 for key derivation with random salt and IV.
-    Returns a base64 string containing: salt (16 bytes) + IV (16 bytes) + ciphertext
-    
-    Note: Uses AES-CBC for PowerShell 5.1 compatibility. Integrity protection (MAC) is not 
-    included; tampering will result in authentication failures at the Graph API level rather 
-    than decryption errors. This is acceptable for this use case where the threat model is 
-    casual exposure (accidental commits, screen visibility), not active attackers with 
-    filesystem write access.
+    Uses PBKDF2 for key derivation with a random salt, and a random nonce per encryption.
+    Returns a base64 string containing: salt (16 bytes) + nonce (12 bytes) + tag (16 bytes) + ciphertext
+
+    GCM provides authenticated encryption: a wrong password or a tampered blob is
+    detected deterministically at decrypt time via the authentication tag.
     #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$PlainText,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$Password
     )
-    
-    # Generate random salt and IV
+
+    # Generate random salt and nonce
     $salt = New-Object byte[] 16
-    $iv = New-Object byte[] 16
+    $nonce = New-Object byte[] 12
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     try {
         $rng.GetBytes($salt)
-        $rng.GetBytes($iv)
+        $rng.GetBytes($nonce)
     }
     finally {
         $rng.Dispose()
     }
-    
+
     # Derive key from password
     $key = Get-DerivedKey -Password $Password -Salt $salt
-    
+
     # Encrypt
-    $aes = [System.Security.Cryptography.Aes]::Create()
-    $aes.Key = $key
-    $aes.IV = $iv
-    $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-    $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-    
-    $encryptor = $aes.CreateEncryptor()
+    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
+    $cipherBytes = New-Object byte[] $plainBytes.Length
+    $tag = New-Object byte[] 16
+
+    $gcm = [System.Security.Cryptography.AesGcm]::new($key, 16)
     try {
-        $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainText)
-        $cipherBytes = $encryptor.TransformFinalBlock($plainBytes, 0, $plainBytes.Length)
-    
-        # Combine salt + IV + ciphertext
-        $combined = New-Object byte[] ($salt.Length + $iv.Length + $cipherBytes.Length)
-        [System.Buffer]::BlockCopy($salt, 0, $combined, 0, $salt.Length)
-        [System.Buffer]::BlockCopy($iv, 0, $combined, $salt.Length, $iv.Length)
-        [System.Buffer]::BlockCopy($cipherBytes, 0, $combined, $salt.Length + $iv.Length, $cipherBytes.Length)
-    
-        return [System.Convert]::ToBase64String($combined)
+        $gcm.Encrypt($nonce, $plainBytes, $cipherBytes, $tag)
     }
     finally {
-        $encryptor.Dispose()
-        $aes.Dispose()
+        $gcm.Dispose()
     }
+
+    # Combine salt + nonce + tag + ciphertext
+    $combined = New-Object byte[] ($salt.Length + $nonce.Length + $tag.Length + $cipherBytes.Length)
+    [System.Buffer]::BlockCopy($salt, 0, $combined, 0, $salt.Length)
+    [System.Buffer]::BlockCopy($nonce, 0, $combined, $salt.Length, $nonce.Length)
+    [System.Buffer]::BlockCopy($tag, 0, $combined, $salt.Length + $nonce.Length, $tag.Length)
+    [System.Buffer]::BlockCopy($cipherBytes, 0, $combined, $salt.Length + $nonce.Length + $tag.Length, $cipherBytes.Length)
+
+    return [System.Convert]::ToBase64String($combined)
 }
 
 function Unprotect-Secret {
     <#
     .SYNOPSIS
     Decrypts a secret that was encrypted with Protect-Secret
-    
+
     .DESCRIPTION
-    Extracts salt and IV from the encrypted blob, derives the key, and decrypts.
-    Returns $null if decryption fails (wrong password or corrupted data).
+    Extracts salt, nonce, and authentication tag from the encrypted blob, derives the
+    key, and decrypts. Returns $null if decryption fails — the GCM tag makes wrong
+    password and tampered/corrupted data detection deterministic.
     #>
     param(
         [Parameter(Mandatory = $true)]
         [string]$EncryptedBase64,
-        
+
         [Parameter(Mandatory = $true)]
         [string]$Password
     )
-    
+
     try {
         $combined = [System.Convert]::FromBase64String($EncryptedBase64)
-        
-        # Extract salt (16 bytes), IV (16 bytes), and ciphertext
+
+        # salt (16) + nonce (12) + tag (16) + at least 1 byte of ciphertext
+        if ($combined.Length -lt 45) {
+            return $null
+        }
+
         $salt = New-Object byte[] 16
-        $iv = New-Object byte[] 16
-        $cipherBytes = New-Object byte[] ($combined.Length - 32)
-        
+        $nonce = New-Object byte[] 12
+        $tag = New-Object byte[] 16
+        $cipherBytes = New-Object byte[] ($combined.Length - 44)
+
         [System.Buffer]::BlockCopy($combined, 0, $salt, 0, 16)
-        [System.Buffer]::BlockCopy($combined, 16, $iv, 0, 16)
-        [System.Buffer]::BlockCopy($combined, 32, $cipherBytes, 0, $cipherBytes.Length)
-        
+        [System.Buffer]::BlockCopy($combined, 16, $nonce, 0, 12)
+        [System.Buffer]::BlockCopy($combined, 28, $tag, 0, 16)
+        [System.Buffer]::BlockCopy($combined, 44, $cipherBytes, 0, $cipherBytes.Length)
+
         # Derive key from password
         $key = Get-DerivedKey -Password $Password -Salt $salt
-        
-        # Decrypt
-        $aes = [System.Security.Cryptography.Aes]::Create()
-        $aes.Key = $key
-        $aes.IV = $iv
-        $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-        $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-        
-        $decryptor = $aes.CreateDecryptor()
+
+        # Decrypt; a wrong password or tampered blob throws on tag mismatch
+        $plainBytes = New-Object byte[] $cipherBytes.Length
+        $gcm = [System.Security.Cryptography.AesGcm]::new($key, 16)
         try {
-            $plainBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
-            return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+            $gcm.Decrypt($nonce, $cipherBytes, $tag, $plainBytes)
         }
         finally {
-            $decryptor.Dispose()
-            $aes.Dispose()
+            $gcm.Dispose()
         }
+
+        return [System.Text.Encoding]::UTF8.GetString($plainBytes)
     }
-    catch {
+    catch [System.FormatException], [System.Security.Cryptography.CryptographicException] {
+        # Malformed base64, wrong password, or tampered blob. Anything else is a
+        # programmer error and propagates.
         return $null
     }
 }
@@ -223,11 +190,21 @@ function Read-TenantConfig {
         if ($null -eq $config -or -not ($config.PSObject.Properties.Name -contains 'tenants')) {
             throw "Tenant configuration file '$script:ConfigFilePath' is missing required 'tenants' field. Fix or delete the file before retrying."
         }
-        
+
+        $fileVersion = if ($config.PSObject.Properties.Name -contains 'version') { [int]$config.version } else { 1 }
+        if ($fileVersion -lt $script:ConfigFormatVersion) {
+            throw ("Tenant configuration file '$script:ConfigFilePath' was created by v2.x and uses the old encryption format, which v3.0.0 no longer supports. " +
+                "Your tenant names, tenant IDs and client IDs are stored in plain text in that file - copy them, delete the file, then re-add each tenant with Add-IntuneTenant. " +
+                "Only the client secret is lost; retrieve a current one from the Azure portal or create a new one there.")
+        }
+        if ($fileVersion -gt $script:ConfigFormatVersion) {
+            throw "Tenant configuration file '$script:ConfigFilePath' has format version $fileVersion, which is newer than this tool supports (version $script:ConfigFormatVersion). Update the tool."
+        }
+
         return $config
     }
     else {
-        return [PSCustomObject]@{ tenants = [PSCustomObject]@{} }
+        return [PSCustomObject]@{ version = $script:ConfigFormatVersion; tenants = [PSCustomObject]@{} }
     }
 }
 
@@ -240,7 +217,15 @@ function Write-TenantConfig {
         [Parameter(Mandatory = $true)]
         [PSCustomObject]$Config
     )
-    
+
+    # Stamp the format version so pre-3.0 files are cleanly rejected on read
+    if ($Config.PSObject.Properties.Name -contains 'version') {
+        $Config.version = $script:ConfigFormatVersion
+    }
+    else {
+        $Config | Add-Member -MemberType NoteProperty -Name 'version' -Value $script:ConfigFormatVersion
+    }
+
     $json = $Config | ConvertTo-Json -Depth 10
     $json | Out-File -FilePath $script:ConfigFilePath -Encoding UTF8 -Force
 }
@@ -380,7 +365,7 @@ function Add-IntuneTenant {
     
     .DESCRIPTION
     Guides you through Azure AD app registration setup, then stores the tenant
-    configuration with an AES-256 encrypted client secret.
+    configuration with an AES-256-GCM encrypted client secret.
     
     .PARAMETER Name
     A friendly name for the tenant (e.g., "School", "District")
@@ -591,7 +576,7 @@ function Add-IntuneTenant {
                 $testTenant = $config.tenants.$testTenantName
                 $testDecrypt = Unprotect-Secret -EncryptedBase64 $testTenant.encryptedSecret -Password $masterKey
                 
-                if ($null -eq $testDecrypt -or -not (Test-IntuneDecryptedSecret -Secret $testDecrypt)) {
+                if ($null -eq $testDecrypt) {
                     Write-Host "Incorrect encryption password (could not decrypt existing tenant '$testTenantName')." -ForegroundColor Red
                     Write-Host "Aborting to prevent mixing passwords in the config file." -ForegroundColor Yellow
                     return
@@ -726,7 +711,7 @@ function Get-IntuneTenant {
         # Decrypt the secret
         $clientSecret = Unprotect-Secret -EncryptedBase64 $tenant.encryptedSecret -Password $masterKey
         
-        if ($null -ne $clientSecret -and (Test-IntuneDecryptedSecret -Secret $clientSecret)) {
+        if ($null -ne $clientSecret) {
             # Cache for this session
             Set-CachedMasterKey -Password $masterKey
             Set-CachedTenantSecret -TenantName $Name -Secret $clientSecret

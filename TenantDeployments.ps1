@@ -1,3 +1,5 @@
+#Requires -Version 7.4
+
 # TenantDeployments.ps1
 # Per-tenant deployment plans: which apps a tenant gets, and how each one is assigned.
 #
