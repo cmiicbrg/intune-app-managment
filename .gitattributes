@@ -1,0 +1,14 @@
+# AppVersions.json is machine-maintained and contains only regenerable data: every run of
+# Download-And-Package-Software.ps1 re-derives it from the vendors' live release feeds.
+# Marking it merge=ours means a pull keeps your locally refreshed versions instead of
+# conflicting - which is safe precisely because nothing hand-written lives in that file.
+#
+# Requires a one-time, per-clone:
+#     git config merge.ours.driver true
+# Setup-Prerequisites.ps1 configures this for you. Without it you simply get an ordinary
+# conflict in this one file, which you can resolve either way: the next download run
+# re-syncs it to whatever the vendors are actually shipping.
+#
+# Deliberately NOT applied to AppConfig.ps1 - there it would silently discard upstream
+# changes such as newly added applications.
+AppVersions.json merge=ours

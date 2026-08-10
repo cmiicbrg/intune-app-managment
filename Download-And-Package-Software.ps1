@@ -3,7 +3,11 @@
 
 param(
     [Parameter(Mandatory=$false)]
-    [string]$AppName
+    [string]$AppName,
+
+    # Skip writing successfully downloaded versions back to AppVersions.json
+    [Parameter(Mandatory=$false)]
+    [switch]$NoVersionCacheUpdate
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,6 +15,25 @@ $BaseDir = $PSScriptRoot
 
 # Import shared functions and configuration
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
+
+# Build the fallback result for an app whose live version lookup failed.
+# Prefers the filename recorded in AppVersions.json, because FilenameTemplate cannot always
+# reproduce the real asset name that FallbackUrl serves.
+function Get-FallbackVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig
+    )
+
+    $filename = if ($AppConfig.FallbackFilename) {
+        $AppConfig.FallbackFilename
+    }
+    else {
+        $AppConfig.FilenameTemplate -f $AppConfig.FallbackVersion
+    }
+
+    return @{Url = $AppConfig.FallbackUrl; Version = $AppConfig.FallbackVersion; Filename = $filename}
+}
 
 # Generic function to get latest version info for an app
 function Get-LatestVersionInfo {
@@ -30,29 +53,23 @@ function Get-LatestVersionInfo {
             return @{Url = $AppConfig.DownloadUrl; Version = $version; Filename = $filename}
         }
         elseif ($AppConfig.GitHubApiUrl) {
-            # GitHub releases (Notepad++)
+            # GitHub releases (7-Zip, Notepad++, Audacity, OpenShot, KeePassXC, Stellarium, Next-Exam)
             Write-Host "Fetching version from GitHub..." -ForegroundColor Gray
             $release = Invoke-RestMethod -Uri $AppConfig.GitHubApiUrl
             $asset = $release.assets | Where-Object { $_.name -match $AppConfig.GitHubAssetPattern } | Select-Object -First 1
             if ($asset) {
-                $version = $release.tag_name -replace '^v', ''
+                # Strip any leading non-digits, so "v8.9.7" and "Audacity-3.7.8" both yield a bare version
+                $version = $release.tag_name -replace '^\D*', ''
                 return @{Url = $asset.browser_download_url; Version = $version; Filename = $asset.name}
             }
         }
         elseif ($AppConfig.DownloadPageUrl -and $AppConfig.DownloadUrlRegex) {
-            # Web scraping (7-Zip, GIMP, VLC)
+            # Web scraping (GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro)
             Write-Host "Fetching version from download page..." -ForegroundColor Gray
             $page = Invoke-WebRequest -Uri $AppConfig.DownloadPageUrl -UseBasicParsing
-            
+
             if ($page.Content -match $AppConfig.DownloadUrlRegex) {
-                if ($AppConfig.Name -eq "7-Zip") {
-                    # 7-Zip special handling
-                    $url = $AppConfig.DownloadUrlTemplate -f $matches[1]
-                    $version = $matches[2]
-                    $filename = $AppConfig.FilenameTemplate -f $version
-                    return @{Url = $url; Version = $version; Filename = $filename}
-                }
-                elseif ($AppConfig.Name -eq "GIMP") {
+                if ($AppConfig.Name -eq "GIMP") {
                     # GIMP special handling
                     $version = $matches[1]
                     $majorMinor = $version.Substring(0, $version.LastIndexOf('.'))
@@ -130,13 +147,13 @@ function Get-LatestVersionInfo {
         
         # If no method worked, use fallback
         Write-Host "Using fallback URL" -ForegroundColor Yellow
-        return @{Url = $AppConfig.FallbackUrl; Version = $AppConfig.FallbackVersion; Filename = ($AppConfig.FilenameTemplate -f $AppConfig.FallbackVersion)}
+        return (Get-FallbackVersionInfo -AppConfig $AppConfig)
     }
     catch {
         Write-Host "Error fetching version info: $_" -ForegroundColor Yellow
         if ($AppConfig.FallbackUrl) {
             Write-Host "Using fallback URL" -ForegroundColor Yellow
-            return @{Url = $AppConfig.FallbackUrl; Version = $AppConfig.FallbackVersion; Filename = ($AppConfig.FilenameTemplate -f $AppConfig.FallbackVersion)}
+            return (Get-FallbackVersionInfo -AppConfig $AppConfig)
         }
         return $null
     }
@@ -288,7 +305,12 @@ foreach ($appName in $allAppNames) {
                 Remove-OldAppFiles -AppFolder $appFolder -KeepFileName (Split-Path $installerTemp -Leaf)
                 
                 Write-Host "  Creating IntuneWin package..." -ForegroundColor Cyan
-                New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installerTemp -Leaf) -OutputFolder $appFolder
+                $packaged = New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installerTemp -Leaf) -OutputFolder $appFolder
+                if ($packaged -and -not $NoVersionCacheUpdate) {
+                    # No filename recorded: this app's URL serves an EXE that we extract an MSI from,
+                    # so the packaged filename is not what the URL would hand back on a fallback
+                    Save-AppVersionCache -AppName $appName -Version $version -Url $versionInfo.Url | Out-Null
+                }
                 continue
             }
             
@@ -316,45 +338,32 @@ foreach ($appName in $allAppNames) {
                 Remove-OldAppFiles -AppFolder $appFolder -KeepFileName (Split-Path $installer -Leaf)
                 
                 Write-Host "  Creating IntuneWin package..." -ForegroundColor Cyan
-                New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installer -Leaf) -OutputFolder $appFolder
+                $packaged = New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installer -Leaf) -OutputFolder $appFolder
+                if ($packaged -and -not $NoVersionCacheUpdate) {
+                    # No filename recorded: we renamed the download to FilenameTemplate ourselves,
+                    # so it is not the name the URL serves
+                    Save-AppVersionCache -AppName $appName -Version $version -Url $versionInfo.Url | Out-Null
+                }
             }
             catch {
                 Write-Host "  Error extracting version: $_" -ForegroundColor Yellow
                 Write-Host "  Creating package with default filename..." -ForegroundColor Yellow
-                
+
                 # Clean up old files before packaging
                 Remove-OldAppFiles -AppFolder $appFolder -KeepFileName (Split-Path $installerTemp -Leaf)
-                
-                New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installerTemp -Leaf) -OutputFolder $appFolder
+
+                # No cache write here: the version is unknown, which is why we landed in this catch
+                New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installerTemp -Leaf) -OutputFolder $appFolder | Out-Null
             }
         }
         continue
     }
     
-    # Special handling for 7-Zip (version format without dots)
-    if ($appConfig.VersionFormat -eq "NoPrefix") {
-        $existingPackages = Get-ChildItem -Path $appFolder -Filter $appConfig.IntuneWinPattern -ErrorAction SilentlyContinue
-        $versionExists = $false
-        foreach ($package in $existingPackages) {
-            if ($package.BaseName -match '7z(\d+)') {
-                $existingVersion = $matches[1]
-                if ($existingVersion -eq $versionInfo.Version.Replace('7z', '')) {
-                    Write-Host "  Skipping - version $($versionInfo.Version) already packaged" -ForegroundColor Yellow
-                    $versionExists = $true
-                    break
-                }
-            }
-        }
-        if ($versionExists) {
-            continue
-        }
-    }
-    else {
-        # Standard version checking
-        if (Test-VersionExists -AppFolder $appFolder -NewVersion $versionInfo.Version -Pattern $appConfig.IntuneWinPattern) {
-            Write-Host "  Skipping - already up to date" -ForegroundColor Yellow
-            continue
-        }
+    # Version checking. Apps whose filenames carry no dotted version (e.g. 7-Zip's
+    # 7z2602-x64.msi) fall through here and are caught by the installer-exists check below.
+    if (Test-VersionExists -AppFolder $appFolder -NewVersion $versionInfo.Version -Pattern $appConfig.IntuneWinPattern) {
+        Write-Host "  Skipping - already up to date" -ForegroundColor Yellow
+        continue
     }
     
     # Download and package
@@ -385,9 +394,12 @@ foreach ($appName in $allAppNames) {
         -ExpectedPublisher $appConfig.ExpectedPublisher) {
         # Clean up old files before packaging
         Remove-OldAppFiles -AppFolder $appFolder -KeepFileName (Split-Path $installer -Leaf)
-        
+
         Write-Host "  Creating IntuneWin package..." -ForegroundColor Cyan
-        New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installer -Leaf) -OutputFolder $appFolder
+        $packaged = New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installer -Leaf) -OutputFolder $appFolder
+        if ($packaged -and -not $NoVersionCacheUpdate) {
+            Save-AppVersionCache -AppName $appName -Version $versionInfo.Version -Url $versionInfo.Url -Filename $versionInfo.Filename | Out-Null
+        }
     }
 }
 

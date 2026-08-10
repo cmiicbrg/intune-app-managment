@@ -69,6 +69,83 @@ function Get-InstallerVersion {
     return $null
 }
 
+# Function to record a successfully downloaded version in AppVersions.json.
+# AppConfig.ps1 overlays these values onto FallbackVersion/FallbackUrl/FallbackFilename at load
+# time, which keeps the offline fallbacks from going stale. Never throws: a cache write failing
+# must not fail an otherwise successful packaging run.
+function Save-AppVersionCache {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$AppName,
+
+        [Parameter(Mandatory=$true)]
+        [string]$Version,
+
+        [string]$Url,
+
+        [string]$Filename
+    )
+
+    # "Latest" is a placeholder for apps whose version is only known after download - nothing to record
+    if ([string]::IsNullOrWhiteSpace($Version) -or $Version -eq 'Latest') {
+        return $false
+    }
+
+    try {
+        $cachePath = $script:AppVersionCachePath
+        if (-not $cachePath) {
+            $cachePath = Join-Path $PSScriptRoot "AppVersions.json"
+        }
+
+        # Preserve the file header and every other app's entry
+        $comment = $null
+        $apps = @{}
+        if (Test-Path $cachePath) {
+            $existing = Get-Content -Path $cachePath -Raw | ConvertFrom-Json
+            $comment = $existing._comment
+            if ($existing.Apps) {
+                foreach ($entry in $existing.Apps.PSObject.Properties) {
+                    $apps[$entry.Name] = $entry.Value
+                }
+            }
+        }
+
+        # Skip the write when nothing changed, so repeat runs leave the working tree clean
+        $current = $apps[$AppName]
+        if ($current -and $current.Version -eq $Version -and $current.Url -eq $Url -and $current.Filename -eq $Filename) {
+            return $false
+        }
+
+        $apps[$AppName] = [PSCustomObject]@{
+            Version    = $Version
+            Url        = $Url
+            Filename   = $Filename
+            UpdatedUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        }
+
+        # Sorted keys keep diffs minimal and merge noise low
+        $orderedApps = [ordered]@{}
+        foreach ($key in ($apps.Keys | Sort-Object)) {
+            $orderedApps[$key] = $apps[$key]
+        }
+
+        $document = [ordered]@{}
+        if ($comment) { $document['_comment'] = $comment }
+        $document['Apps'] = $orderedApps
+
+        # WriteAllText rather than Out-File: PowerShell 5.1 would prepend a UTF-8 BOM
+        $json = ($document | ConvertTo-Json -Depth 5) + "`n"
+        [System.IO.File]::WriteAllText($cachePath, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+        Write-Host "  Recorded version $Version in $(Split-Path $cachePath -Leaf)" -ForegroundColor Gray
+        return $true
+    }
+    catch {
+        Write-Warning "Could not update version cache for '$AppName': $($_.Exception.Message)"
+        return $false
+    }
+}
+
 # Function to check if version already exists
 function Test-VersionExists {
     param(
@@ -262,8 +339,9 @@ function New-IntuneWinPackage {
         "-q"
     )
     
-    & $IntuneWinUtil $arguments
-    
+    # Out-Host keeps the tool's output visible without letting it contaminate the return value
+    & $IntuneWinUtil $arguments | Out-Host
+
     if ($LASTEXITCODE -eq 0) {
         Write-Host "IntuneWin package created successfully!" -ForegroundColor Green
         return $true

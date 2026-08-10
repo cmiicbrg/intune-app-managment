@@ -32,6 +32,32 @@ else {
     Write-Host ""
 }
 
+# Configure the git merge driver used by .gitattributes for AppVersions.json.
+# Without it, a pull can raise an ordinary (harmless) conflict in that file; with it,
+# your locally refreshed versions always win and pulls stay clean.
+Write-Host "Configuring git merge driver for AppVersions.json..." -ForegroundColor Cyan
+try {
+    $gitCommand = Get-Command git -ErrorAction Stop
+    $null = & $gitCommand.Source -C $PSScriptRoot rev-parse --is-inside-work-tree 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        & $gitCommand.Source -C $PSScriptRoot config merge.ours.driver true
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[OK] Merge driver configured" -ForegroundColor Green
+        }
+        else {
+            Write-Host "[SKIP] Could not set merge driver (non-fatal)" -ForegroundColor Yellow
+        }
+    }
+    else {
+        Write-Host "[SKIP] Not a git repository" -ForegroundColor Gray
+    }
+}
+catch {
+    Write-Host "[SKIP] git not available" -ForegroundColor Gray
+}
+
+Write-Host ""
+
 # Install NuGet provider if needed
 Write-Host "Checking NuGet provider..." -ForegroundColor Cyan
 $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
