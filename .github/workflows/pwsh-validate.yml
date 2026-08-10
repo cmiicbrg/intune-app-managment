@@ -2,10 +2,8 @@ name: PowerShell Validation
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
-  merge_group:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
