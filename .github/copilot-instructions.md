@@ -31,4 +31,6 @@
 ## Build & Test
 
 - Syntax validation: `[System.Management.Automation.Language.Parser]::ParseFile()` — used in CI via `.github/workflows/pwsh-validate.yml`
-- No Pester test suite currently
+- Pester test suite in `tests/` (Pester v5+ syntax; run: `Invoke-Pester -Path tests`). CI runs it on `windows-latest` with pinned module versions (Pester 6.0.1, IntuneWin32App 1.5.0 — bump the pins in `pwsh-validate.yml` deliberately), excluding tag `LocalOnly` (tests that need real installer binaries from `packages/`, which are not in git).
+- Test files copy the scripts under test to `$TestDrive` before dot-sourcing, so `$PSScriptRoot`-derived paths (`intune-tenants.json`, `AppVersions.json`, detection scripts) stay sandboxed — keep that pattern when adding tests.
+- `tests/AppConfig.Tests.ps1` is the golden guard for app-config generation: it pins the detection/requirement rule shapes and command lines that refactors (issue #8 interop isolation, #9 native Graph migration) must preserve. If it fails after an intentional contract change, update the assertions deliberately.

@@ -45,3 +45,30 @@ jobs:
           if ($hadErrors) {
             throw "PowerShell syntax validation failed."
           }
+
+  pester:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Versions are pinned so the golden-config tests (which execute the real
+      # IntuneWin32App rule builders) stay deterministic. Bump them deliberately.
+      - name: Install test dependencies
+        shell: pwsh
+        run: |
+          Install-Module -Name Pester -RequiredVersion 6.0.1 -Force -SkipPublisherCheck -Scope CurrentUser
+          Install-Module -Name IntuneWin32App -RequiredVersion 1.5.0 -Force -Scope CurrentUser
+
+      - name: Run Pester tests
+        shell: pwsh
+        run: |
+          Import-Module Pester -RequiredVersion 6.0.1
+          $config = New-PesterConfiguration
+          $config.Run.Path = 'tests'
+          $config.Run.Exit = $true
+          $config.Filter.ExcludeTag = 'LocalOnly'
+          $config.Output.Verbosity = 'Detailed'
+          Invoke-Pester -Configuration $config
