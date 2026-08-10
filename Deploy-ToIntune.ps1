@@ -171,6 +171,98 @@ function Install-RequiredModules {
     return $true
 }
 
+# Applies an assignment spec to an app already present in Intune and returns the IDs of the
+# assignments that were created (used to enable auto-update on supersedence).
+#
+# Safe to call against an app that is already assigned: the IntuneWin32App module checks for an
+# existing assignment of the same target - matching groups on groupId - and skips it with a
+# warning rather than creating a duplicate. That is what lets the "version already exists" path
+# reconcile assignments instead of leaving them stale.
+function Set-AppAssignment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AppConfig,
+
+        [bool]$AssignAllUsers,
+        [bool]$AssignAllDevices,
+        [array]$AssignGroups = @()
+    )
+
+    $assignmentIds = @()
+
+    # Skip assignments for apps marked as hidden (dependency-only apps)
+    if ($AppConfig.HideFromPortal -eq $true) {
+        Write-Host "  Skipping assignments (HideFromPortal = true)" -ForegroundColor Gray
+        return $assignmentIds
+    }
+
+    if ($AssignAllUsers) {
+        Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
+        $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $AppId -Intent "available" -Notification "showAll"
+        if ($assignment -and $assignment.id) {
+            $assignmentIds += $assignment.id
+        }
+        Write-Host "  Assigned to All Users" -ForegroundColor Green
+    }
+
+    if ($AssignAllDevices) {
+        Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
+        Add-IntuneWin32AppAssignmentAllDevices -ID $AppId -Intent "required" -Notification "showAll" | Out-Null
+        Write-Host "  Assigned to All Devices" -ForegroundColor Green
+    }
+
+    foreach ($groupAssignment in @($AssignGroups)) {
+        $groupName = $groupAssignment.Name
+        $groupIntent = if ($groupAssignment.Intent) { $groupAssignment.Intent } else { 'Available' }
+        Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
+
+        try {
+            # Ensure Microsoft.Graph.Groups module is available
+            if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
+                Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
+                Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
+            }
+            Import-Module Microsoft.Graph.Groups -ErrorAction Stop
+
+            # Ensure connection is still valid. Skips this group only - remaining groups
+            # and the rest of the app's deployment are unaffected.
+            if (-not (Test-IntuneConnection)) {
+                Write-Warning "  Connection lost, assignment to group '$groupName' will be skipped"
+                continue
+            }
+
+            # Query Entra ID group by display name
+            $group = Get-MgGroup -Filter "displayName eq '$groupName'" -ErrorAction Stop
+
+            if ($group) {
+                if ($group -is [array] -and $group.Count -gt 1) {
+                    Write-Host "  Warning: Multiple groups found with name '$groupName', using first match" -ForegroundColor Yellow
+                    $group = $group[0]
+                }
+
+                # Note: group assignment IDs are deliberately not collected into $assignmentIds -
+                # matching existing behaviour, where auto-update supersedence is only enabled for
+                # All Users assignments.
+                $intent = $groupIntent.ToLower()
+                Add-IntuneWin32AppAssignmentGroup -Include -ID $AppId -GroupID $group.Id -Intent $intent -Notification "showAll" | Out-Null
+                Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  Warning: Group '$groupName' not found" -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Host "  Warning: Failed to assign to group '$groupName': $_" -ForegroundColor Yellow
+            Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    return $assignmentIds
+}
+
 # Create app configuration and upload
 function Publish-App {
     param(
@@ -206,6 +298,7 @@ function Publish-App {
             # Analyze all existing apps to find versions (always check all, don't rely on exact match)
             $oldVersionApps = @()
             $sameVersionExists = $false
+            $sameVersionApp = $null
             $newestOlderApp = $null
             $newestOlderVersion = $null
             
@@ -247,6 +340,7 @@ function Publish-App {
                         Write-Host "      -> Same version ($existingVersion = $NewVersion)" -ForegroundColor Yellow
                         if (-not $ForceUpdate) {
                             $sameVersionExists = $true
+                            $sameVersionApp = $existingApp
                         }
                     }
                     else {
@@ -264,11 +358,17 @@ function Publish-App {
                 $oldVersionApps = @($newestOlderApp)
             }
             
-            # Skip if same version already exists (unless ForceUpdate)
+            # Same version already in Intune (unless ForceUpdate): skip the upload, but still
+            # reconcile assignments. Adopting or changing a deployment plan for apps that are
+            # already deployed would otherwise silently do nothing, even though -ShowPlan
+            # reports the new assignments. Add-IntuneWin32AppAssignment* skips targets that
+            # are already assigned, so this only fills in what is missing.
             if ($sameVersionExists) {
-                Write-Host "  Skipping: Version $NewVersion already exists in Intune (use -ForceUpdate to recreate)" -ForegroundColor Yellow
-                $deployedApps += $AppName
-                continue
+                Write-Host "  Version $NewVersion already exists in Intune (use -ForceUpdate to recreate the package)" -ForegroundColor Yellow
+                Write-Host "  Reconciling assignments on the existing app..." -ForegroundColor Cyan
+                $null = Set-AppAssignment -AppId $sameVersionApp.id -AppConfig $AppConfig `
+                    -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups
+                return $sameVersionApp
             }
             
             if ($oldVersionApps.Count -gt 0) {
@@ -493,74 +593,8 @@ function Publish-App {
         }
         
         # Assign if requested and collect assignment IDs for auto-update
-        $assignmentIds = @()
-        
-        # Skip assignments for apps marked as hidden (dependency-only apps)
-        if ($AppConfig.HideFromPortal -eq $true) {
-            Write-Host "  Skipping assignments (HideFromPortal = true)" -ForegroundColor Gray
-        }
-        else {
-            if ($AssignAllUsers) {
-                Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-                $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent "available" -Notification "showAll"
-                if ($assignment -and $assignment.id) {
-                    $assignmentIds += $assignment.id
-                }
-                Write-Host "  Assigned to All Users" -ForegroundColor Green
-            }
-
-            if ($AssignAllDevices) {
-                Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
-                Add-IntuneWin32AppAssignmentAllDevices -ID $Win32App.id -Intent "required" -Notification "showAll"
-                Write-Host "  Assigned to All Devices" -ForegroundColor Green
-            }
-
-            foreach ($groupAssignment in @($AssignGroups)) {
-                $groupName = $groupAssignment.Name
-                $groupIntent = if ($groupAssignment.Intent) { $groupAssignment.Intent } else { 'Available' }
-                Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
-
-                try {
-                    # Ensure Microsoft.Graph.Groups module is available
-                    if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
-                        Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
-                        Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
-                    }
-                    Import-Module Microsoft.Graph.Groups -ErrorAction Stop
-
-                    # Ensure connection is still valid. Skips this group only - remaining groups
-                    # and the rest of the app's deployment are unaffected.
-                    if (-not (Test-IntuneConnection)) {
-                        Write-Warning "  Connection lost, assignment to group '$groupName' will be skipped"
-                        continue
-                    }
-
-                    # Query Entra ID group by display name
-                    $group = Get-MgGroup -Filter "displayName eq '$groupName'" -ErrorAction Stop
-
-                    if ($group) {
-                        if ($group -is [array] -and $group.Count -gt 1) {
-                            Write-Host "  Warning: Multiple groups found with name '$groupName', using first match" -ForegroundColor Yellow
-                            $group = $group[0]
-                        }
-
-                        # Note: group assignment IDs are deliberately not collected into
-                        # $assignmentIds - matching existing behaviour, where auto-update
-                        # supersedence is only enabled for All Users assignments.
-                        $intent = $groupIntent.ToLower()
-                        Add-IntuneWin32AppAssignmentGroup -Include -ID $Win32App.id -GroupID $group.Id -Intent $intent -Notification "showAll"
-                        Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host "  Warning: Group '$groupName' not found" -ForegroundColor Yellow
-                    }
-                }
-                catch {
-                    Write-Host "  Warning: Failed to assign to group '$groupName': $_" -ForegroundColor Yellow
-                    Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
-                }
-            }
-        }  # end else (not HideFromPortal)
+        $assignmentIds = Set-AppAssignment -AppId $Win32App.id -AppConfig $AppConfig `
+            -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups
         
         # Enable auto-update for assignments if supersedence was configured and AutoUpdate is enabled
         if ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0 -and $AppConfig.AutoUpdate -eq $true) {
@@ -641,13 +675,16 @@ $explicitAssignment = $AssignToAllUsers -or $AssignToAllDevices -or [bool]$Assig
 # Load the tenant's deployment plan (TenantDeployments.json). Absent file or tenant -> $null,
 # and the script falls back to its previous behaviour.
 $deploymentPlan = $null
-if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $explicitAssignment) {
-    $deploymentPlan = Get-TenantDeploymentPlan -TenantName $TenantName
-}
-elseif ($PSCmdlet.ParameterSetName -eq 'TenantName' -and $explicitAssignment) {
-    $existingPlan = Get-TenantDeploymentPlan -TenantName $TenantName
-    if ($existingPlan) {
-        Write-Host "Assignment switches supplied - ignoring the deployment plan for '$TenantName'." -ForegroundColor Yellow
+if ($PSCmdlet.ParameterSetName -eq 'TenantName') {
+    if ($explicitAssignment) {
+        # Note only - the plan is never parsed in override mode, so a malformed file or a stale
+        # app name cannot break a command that was not going to use the plan anyway.
+        if (Test-TenantDeploymentPlanFile) {
+            Write-Host "Assignment switches supplied - ignoring TenantDeployments.json." -ForegroundColor Yellow
+        }
+    }
+    else {
+        $deploymentPlan = Get-TenantDeploymentPlan -TenantName $TenantName
     }
 }
 

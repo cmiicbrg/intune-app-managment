@@ -383,6 +383,12 @@ Notes:
 - Precedence: passing `-AssignToAllUsers`, `-AssignToAllDevices` or `-AssignToGroupName` ignores the
   plan entirely and behaves exactly as before, so existing command lines keep working. `-AppName`
   narrows a plan run to one app while keeping that app's assignments from the plan.
+- Assignments are reconciled even when the app version is already in Intune. Adopting a plan for
+  apps you have already deployed therefore applies the new assignments instead of skipping them;
+  targets that are already assigned are left alone rather than duplicated.
+- `AllUsers` and `AllDevices` must be JSON booleans. `"AllUsers": "false"` is rejected rather than
+  coerced — PowerShell treats every non-empty string as true, so guessing here would assign an app
+  to the whole tenant.
 - With no plan file, or no entry for the tenant, the script behaves exactly as it did before.
 - Dependencies still resolve against the full app list, so a tenant that lists `KeePassXC` without
   `VCRedist` still gets VCRedist auto-deployed.

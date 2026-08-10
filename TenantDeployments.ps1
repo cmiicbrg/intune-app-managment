@@ -13,6 +13,13 @@
 
 $script:TenantDeploymentsPath = Join-Path $PSScriptRoot "TenantDeployments.json"
 
+# True when a plan file is present. Deliberately does not parse it: callers that are about to
+# ignore the plan (because explicit assignment switches were supplied) must not be blocked by a
+# malformed file or a stale app name in a tenant they are not even deploying.
+function Test-TenantDeploymentPlanFile {
+    return (Test-Path $script:TenantDeploymentsPath)
+}
+
 # Reads the deployment plan for a tenant.
 #
 # Returns an ordered hashtable of canonical app name -> assignment spec:
@@ -96,10 +103,40 @@ function ConvertTo-AssignmentSpec {
     }
 
     return @{
-        AllUsers   = [bool]($Spec.AllUsers)
-        AllDevices = [bool]($Spec.AllDevices)
+        AllUsers   = Get-StrictBoolean -Spec $Spec -Name 'AllUsers' -Context $Context
+        AllDevices = Get-StrictBoolean -Spec $Spec -Name 'AllDevices' -Context $Context
         Groups     = $groups
     }
+}
+
+# Reads a boolean flag from a plan entry, rejecting anything that is not a real JSON boolean.
+#
+# A plain [bool] cast would be actively dangerous here: PowerShell casts every non-empty string
+# to $true, so "AllUsers": "false" would assign the app to every user in the tenant - the exact
+# opposite of what was written. Assignment mistakes are hard to notice and wide-reaching, so a
+# wrong type has to fail rather than be guessed at.
+function Get-StrictBoolean {
+    param(
+        $Spec,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    if ($null -eq $Spec -or $Spec.PSObject.Properties.Name -notcontains $Name) {
+        return $false
+    }
+
+    $value = $Spec.$Name
+    if ($value -isnot [bool]) {
+        $shown = if ($value -is [string]) { "`"$value`"" } else { "$value" }
+        throw "'$Name' for '$Context' must be true or false, got $shown. Use JSON booleans, not strings or numbers."
+    }
+
+    return $value
 }
 
 # One-line human summary of an assignment spec, for -ShowPlan and deployment logs.
