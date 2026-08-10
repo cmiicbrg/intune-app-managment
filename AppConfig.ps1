@@ -57,18 +57,17 @@ $script:AppConfigurations = @{
         Folder = "7zip"
         IconFile = "7zip-logo.png"
         IntuneWinPattern = "7z*-x64.intunewin"
-        DownloadPageUrl = "https://www.7-zip.org/download.html"
-        DownloadUrlRegex = 'href="([^"]*(7z\d+)-x64\.msi)"'
-        DownloadUrlTemplate = "https://www.7-zip.org/{0}"
-        FallbackUrl = "https://www.7-zip.org/a/7z2408-x64.msi"
-        FallbackVersion = "7z2408"
-        FilenameTemplate = "{0}-x64.msi"
+        GitHubRepo = "ip7z/7zip"
+        GitHubApiUrl = "https://api.github.com/repos/ip7z/7zip/releases/latest"
+        GitHubAssetPattern = "^7z\d+-x64\.msi$"  # Excludes the EXE, ARM and x86 (7z####.msi) assets
+        FallbackUrl = "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi"
+        FallbackVersion = "26.02"
+        FilenameTemplate = "7z{0}-x64.msi"
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"  # Simple product code detection, no version operator needed
-        VersionFormat = "NoPrefix"  # Version like "7z2501" needs special handling
         AllowUnsignedInstaller = $true  # 7-Zip MSI is not Authenticode-signed
         AutoUpdate = $true
     }
@@ -487,6 +486,69 @@ $script:AppConfigurations = @{
         AutoUpdate = $true
     }
 }
+
+# Path to the machine-maintained version cache written by Download-And-Package-Software.ps1.
+# Also consumed by Save-AppVersionCache in SharedFunctions.ps1.
+$script:AppVersionCachePath = Join-Path $PSScriptRoot "AppVersions.json"
+
+# Overlay the last successfully downloaded version/URL/filename onto the seed fallbacks defined
+# above, so FallbackVersion and FallbackUrl stay current without anyone editing this file.
+#
+# The cache only ever records installers that downloaded *and* passed integrity verification, so
+# it is normally ahead of the seeds. Where both sides parse as [version] the higher one wins,
+# which means a stale cache can never drag a freshly pulled AppConfig.ps1 backwards - that is what
+# makes it safe to auto-resolve AppVersions.json merges in favour of the local copy (.gitattributes).
+function Import-AppVersionCache {
+    if (-not (Test-Path $script:AppVersionCachePath)) {
+        return
+    }
+
+    try {
+        $cache = Get-Content -Path $script:AppVersionCachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Ignoring unreadable version cache '$script:AppVersionCachePath': $($_.Exception.Message)"
+        return
+    }
+
+    if (-not $cache.Apps) {
+        return
+    }
+
+    foreach ($entry in $cache.Apps.PSObject.Properties) {
+        # Silently ignore apps the cache knows about but this config no longer defines
+        if (-not $script:AppConfigurations.ContainsKey($entry.Name)) {
+            continue
+        }
+
+        $appConfig = $script:AppConfigurations[$entry.Name]
+        $cached = $entry.Value
+
+        if ([string]::IsNullOrWhiteSpace($cached.Version)) {
+            continue
+        }
+
+        # Keep the seed when it is demonstrably newer than the cache
+        $seedVersion = $appConfig.FallbackVersion
+        if ($seedVersion) {
+            $seedParsed = $null
+            $cachedParsed = $null
+            if ([version]::TryParse($seedVersion, [ref]$seedParsed) -and
+                [version]::TryParse($cached.Version, [ref]$cachedParsed) -and
+                $seedParsed -gt $cachedParsed) {
+                continue
+            }
+        }
+
+        $appConfig.FallbackVersion = $cached.Version
+        if ($cached.Url) { $appConfig.FallbackUrl = $cached.Url }
+        # Recorded alongside the URL because FilenameTemplate cannot always reproduce the real
+        # asset name (7-Zip's 7z2602-x64.msi, Inkscape's dated builds, Next-Exam's build stamps)
+        if ($cached.Filename) { $appConfig.FallbackFilename = $cached.Filename }
+    }
+}
+
+Import-AppVersionCache
 
 # Common settings
 $script:CommonSettings = @{

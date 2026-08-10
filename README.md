@@ -44,7 +44,7 @@ intune-app-management/
 | --- | --- | --- |
 | Mozilla Firefox (German) | EXE | Mozilla Product Details API |
 | Google Chrome Enterprise | MSI | Web scraping (AppLocker XML) |
-| 7-Zip | EXE | Web scraping |
+| 7-Zip | MSI | GitHub Releases |
 | GIMP | EXE | Web scraping |
 | VLC Media Player | EXE | Web scraping |
 | Notepad++ | EXE | GitHub Releases |
@@ -267,6 +267,7 @@ Get-AllIntuneTenants
 ```pre
 intune-app-management/
 ├── AppConfig.ps1                          # Application configuration
+├── AppVersions.json                       # Version cache (machine-maintained)
 ├── SharedFunctions.ps1                    # Shared functions
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── AuthenticationManager.ps1              # Microsoft Graph authentication
@@ -324,6 +325,45 @@ Edit `AppConfig.ps1` to modify:
 - Version formats
 - Auto-update behavior
 
+### Version Cache
+
+Every app config carries a `FallbackVersion` / `FallbackUrl` pair, used only when live version
+detection fails (vendor site down, API rate-limited, download page restructured). Left alone these
+go stale, so the safety net degrades exactly when you need it — which is what happened when 7-Zip
+moved to GitHub Releases and the fallback was still pointing at a 2024 build.
+
+`Download-And-Package-Software.ps1` therefore records the version, URL and filename of every
+installer it successfully downloads **and verifies** into `AppVersions.json`. `AppConfig.ps1`
+overlays those onto the fallbacks at load time, so they track reality on their own.
+
+```powershell
+# Opt out for a run (e.g. in CI) and leave AppVersions.json untouched
+.\Download-And-Package-Software.ps1 -NoVersionCacheUpdate
+```
+
+Notes:
+
+- `AppVersions.json` is machine-maintained — edit the seed values in `AppConfig.ps1` instead.
+- Where both parse as version numbers, the **higher** of seed and cache wins, so a stale cache can
+  never drag a freshly pulled `AppConfig.ps1` backwards.
+- Deleting the file is safe; it regenerates on the next run.
+
+#### Keeping pulls conflict-free
+
+Because the file changes on every machine that runs a download, two clones will diverge. It holds
+nothing but regenerable data, so `.gitattributes` marks it `merge=ours` — your local values win on
+a pull rather than conflicting. This needs a one-time setting per clone, which
+`Setup-Prerequisites.ps1` applies for you:
+
+```powershell
+git config merge.ours.driver true
+```
+
+Without it you get an ordinary conflict confined to `AppVersions.json`, safe to resolve either way:
+the next download run re-syncs it to whatever the vendors are actually shipping. This is
+deliberately **not** applied to `AppConfig.ps1`, where it would silently discard upstream changes
+such as newly added applications.
+
 ## Features in Detail
 
 ### Version Detection Methods
@@ -331,8 +371,8 @@ Edit `AppConfig.ps1` to modify:
 | Method | Applications |
 | --- | --- |
 | **Mozilla API** | Firefox |
-| **GitHub Releases** | Notepad++, Audacity, OpenShot, KeePassXC, Stellarium |
-| **Web Scraping** | 7-Zip, GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro, Visual C++ Redist |
+| **GitHub Releases** | 7-Zip, Notepad++, Audacity, OpenShot, KeePassXC, Stellarium |
+| **Web Scraping** | GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro, Visual C++ Redist |
 | **AppLocker XML** | Chrome, Google Drive, Affinity Studio |
 | **Direct Download** | GeoGebra, GPG4Win |
 | **Manual Update** | NextExam Teacher, NextExam Student |

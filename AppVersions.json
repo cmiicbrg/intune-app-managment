@@ -1,0 +1,17 @@
+{
+  "_comment": "Machine-maintained version cache. Download-And-Package-Software.ps1 records the version, URL and filename of every installer it successfully downloads and verifies; AppConfig.ps1 overlays these onto FallbackVersion/FallbackUrl at load time so the offline fallbacks never go stale. Do not hand-edit - edit the seed values in AppConfig.ps1 instead. Deleting this file is safe; it regenerates on the next download run. See README.md 'Version cache' for the one-time git merge-driver setup that keeps this file from ever conflicting on a pull.",
+  "Apps": {
+    "NotepadPlusPlus": {
+      "Version": "8.9.7",
+      "Url": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.7/npp.8.9.7.Installer.x64.exe",
+      "Filename": "npp.8.9.7.Installer.x64.exe",
+      "UpdatedUtc": "2026-08-10T17:39:36Z"
+    },
+    "SevenZip": {
+      "Version": "26.02",
+      "Url": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi",
+      "Filename": "7z2602-x64.msi",
+      "UpdatedUtc": "2026-08-10T00:00:00Z"
+    }
+  }
+}
