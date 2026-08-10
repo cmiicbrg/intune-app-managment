@@ -94,7 +94,6 @@ TenantDeployments.json
 
 Download-AppLogos.ps1
 
-/tests/*
 packages/Lehrerkopierer/*
 packages/Schuelerkopierer/*
 
