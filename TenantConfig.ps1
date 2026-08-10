@@ -158,7 +158,9 @@ function Unprotect-Secret {
 
         return [System.Text.Encoding]::UTF8.GetString($plainBytes)
     }
-    catch {
+    catch [System.FormatException], [System.Security.Cryptography.CryptographicException] {
+        # Malformed base64, wrong password, or tampered blob. Anything else is a
+        # programmer error and propagates.
         return $null
     }
 }

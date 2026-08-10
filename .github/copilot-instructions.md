@@ -18,7 +18,7 @@
 - **AES-256-GCM** (AEAD) protects client secrets in `intune-tenants.json`. Blob layout (base64): salt (16 bytes) + nonce (12 bytes) + tag (16 bytes) + ciphertext. The GCM tag authenticates the ciphertext, so a wrong password or tampering is detected deterministically at decrypt time. The threat model remains casual exposure (accidental commits, screen visibility), not active attackers with filesystem write access.
 - **PBKDF2 with 600,000 iterations and SHA-256** for key derivation — meets current OWASP recommendations. Uses the static `[Rfc2898DeriveBytes]::Pbkdf2()` method.
 - **Config format version 3 is the only supported format.** `intune-tenants.json` carries a top-level `"version": 3`. Older (v2.x, AES-CBC) files are rejected with instructions to re-add tenants — there is intentionally no migration or legacy-decrypt path. Do not suggest adding backward compatibility for pre-3.0 configs.
-- `Unprotect-Secret` catches `CryptographicException` and returns `$null` on wrong password or tampered data.
+- `Unprotect-Secret` catches `CryptographicException` and `FormatException` (malformed base64) and returns `$null` on wrong password or tampered data; unexpected exceptions propagate.
 
 ## Code Patterns
 

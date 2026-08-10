@@ -293,7 +293,7 @@ function Invoke-FileDownload {
     try {
         # Download with progress
         $ProgressPreference = 'SilentlyContinue'  # Speeds up download
-        Invoke-WebRequest -Uri $Url -OutFile $OutputPath -UseBasicParsing -ErrorAction Stop
+        Invoke-WebRequest -Uri $Url -OutFile $OutputPath -ErrorAction Stop
         $ProgressPreference = 'Continue'
 
         # Verify integrity before declaring success
