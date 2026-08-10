@@ -32,6 +32,18 @@
 .PARAMETER ForceUpdate
     If specified, creates new versions even if apps already exist (for updates/supersedence)
 
+.PARAMETER ShowPlan
+    Prints the apps and assignments that would be deployed for this tenant, then exits without
+    connecting to Intune. Requires no credentials.
+
+.EXAMPLE
+    .\Deploy-ToIntune.ps1 -TenantName "School"
+    Deploys the tenant's apps from TenantDeployments.json with their configured assignments.
+
+.EXAMPLE
+    .\Deploy-ToIntune.ps1 -TenantName "School" -ShowPlan
+    Shows what the above would do, without connecting or changing anything.
+
 .EXAMPLE
     .\Deploy-ToIntune.ps1 -TenantName "School" -AssignToAllUsers
 
@@ -84,9 +96,12 @@ param(
     
     [Parameter(Mandatory = $false)]
     [switch]$SkipInstallation,
-    
+
     [Parameter(Mandatory = $false)]
-    [switch]$ForceUpdate
+    [switch]$ForceUpdate,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$ShowPlan
 )
 
 $ErrorActionPreference = "Stop"
@@ -96,9 +111,11 @@ $BaseDir = $PSScriptRoot
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
 . (Join-Path $PSScriptRoot "AuthenticationManager.ps1")
 . (Join-Path $PSScriptRoot "TenantConfig.ps1")
+. (Join-Path $PSScriptRoot "TenantDeployments.ps1")
 
-# Resolve TenantName to credentials if using that parameter set
-if ($PSCmdlet.ParameterSetName -eq 'TenantName') {
+# Resolve TenantName to credentials if using that parameter set.
+# Skipped for -ShowPlan, which never connects and so must not prompt for the master password.
+if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $ShowPlan) {
     Write-Host "Loading credentials for tenant '$TenantName'..." -ForegroundColor Cyan
     $tenantCreds = Get-IntuneTenant -Name $TenantName
     
@@ -154,6 +171,175 @@ function Install-RequiredModules {
     return $true
 }
 
+# Applies an assignment spec to an app already present in Intune and returns the IDs of the
+# assignments that were created (used to enable auto-update on supersedence).
+#
+# Targets that are already assigned are skipped, so this is safe to call repeatedly - which is
+# what lets the "version already exists" path reconcile assignments instead of leaving them
+# stale. The check is done here rather than relying on the IntuneWin32App module's own
+# Test-IntuneWin32AppAssignment: in practice that misses existing All Users / All Devices
+# assignments, POSTs anyway, and the service rejects it with a BadRequest "The MobileApp
+# Assignment already exists". Nothing is duplicated either way, but the run is quieter and the
+# reported outcome is accurate.
+function Set-AppAssignment {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$AppConfig,
+
+        [bool]$AssignAllUsers,
+        [bool]$AssignAllDevices,
+        [array]$AssignGroups = @(),
+
+        # Request "auto update superseded apps" on assignments created here. The module only
+        # writes the setting when the intent is 'available' and the app actually supersedes
+        # something, so it is safe to ask for it whenever the app config enables AutoUpdate.
+        [bool]$AutoUpdateSuperseded
+    )
+
+    $assignmentIds = @()
+
+    # Skip assignments for apps marked as hidden (dependency-only apps)
+    if ($AppConfig.HideFromPortal -eq $true) {
+        Write-Host "  Skipping assignments (HideFromPortal = true)" -ForegroundColor Gray
+        return $assignmentIds
+    }
+
+    # Which targets this app already has. On failure the list stays empty and each assignment is
+    # simply attempted, which is the previous behaviour.
+    $existingTargets = @()
+    try {
+        foreach ($existing in @(Get-IntuneWin32AppAssignment -ID $AppId -ErrorAction Stop)) {
+            switch -Wildcard ($existing.Type) {
+                '*allLicensedUsersAssignmentTarget' { $existingTargets += 'AllUsers' }
+                '*allDevicesAssignmentTarget'       { $existingTargets += 'AllDevices' }
+                '*groupAssignmentTarget'            { $existingTargets += "Group:$($existing.GroupID)" }
+            }
+        }
+    }
+    catch {
+        Write-Verbose "Could not read existing assignments for app '$AppId': $($_.Exception.Message)"
+    }
+
+    if ($AssignAllUsers) {
+        if ($existingTargets -contains 'AllUsers') {
+            Write-Host "  All Users: already assigned" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
+            $allUsersParams = @{ ID = $AppId; Intent = "available"; Notification = "showAll" }
+            if ($AutoUpdateSuperseded) { $allUsersParams['AutoUpdateSupersededApps'] = 'enabled' }
+            $assignment = Add-IntuneWin32AppAssignmentAllUsers @allUsersParams
+            if ($assignment -and $assignment.id) {
+                $assignmentIds += $assignment.id
+                Write-Host "  Assigned to All Users" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  All Users assignment was NOT created (see warning above)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    if ($AssignAllDevices) {
+        if ($existingTargets -contains 'AllDevices') {
+            Write-Host "  All Devices: already assigned" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
+            $deviceAssignment = Add-IntuneWin32AppAssignmentAllDevices -ID $AppId -Intent "required" -Notification "showAll"
+            if ($deviceAssignment -and $deviceAssignment.id) {
+                Write-Host "  Assigned to All Devices" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  All Devices assignment was NOT created (see warning above)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    # Resolve the Groups module once per app rather than once per group: Get-Module
+    # -ListAvailable scans the whole module path, and Install-Module can prompt. If it is
+    # unavailable, skip every group assignment but keep the All Users / All Devices
+    # assignments applied above.
+    $groupsModuleReady = $true
+    if (@($AssignGroups).Count -gt 0) {
+        try {
+            if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
+                Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
+                Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
+            }
+            Import-Module Microsoft.Graph.Groups -ErrorAction Stop
+        }
+        catch {
+            Write-Host "  Warning: Microsoft.Graph.Groups is unavailable, skipping all group assignments" -ForegroundColor Yellow
+            Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+            $groupsModuleReady = $false
+        }
+    }
+
+    foreach ($groupAssignment in @($AssignGroups)) {
+        if (-not $groupsModuleReady) { break }
+
+        $groupName = $groupAssignment.Name
+        $groupIntent = if ($groupAssignment.Intent) { $groupAssignment.Intent } else { 'Available' }
+        Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
+
+        try {
+            # Ensure connection is still valid. Skips this group only - remaining groups
+            # and the rest of the app's deployment are unaffected.
+            if (-not (Test-IntuneConnection)) {
+                Write-Warning "  Connection lost, assignment to group '$groupName' will be skipped"
+                continue
+            }
+
+            # Query Entra ID group by display name. Single quotes are doubled per the OData
+            # string-literal rules, so a name like "Teachers' Devices" resolves instead of
+            # producing an invalid filter.
+            $odataGroupName = $groupName -replace "'", "''"
+            $group = Get-MgGroup -Filter "displayName eq '$odataGroupName'" -ErrorAction Stop
+
+            if ($group) {
+                if ($group -is [array] -and $group.Count -gt 1) {
+                    Write-Host "  Warning: Multiple groups found with name '$groupName', using first match" -ForegroundColor Yellow
+                    $group = $group[0]
+                }
+
+                if ($existingTargets -contains "Group:$($group.Id)") {
+                    Write-Host "  Group '$groupName': already assigned" -ForegroundColor Gray
+                    continue
+                }
+
+                # Note: group assignment IDs are deliberately not collected into $assignmentIds -
+                # matching existing behaviour, where auto-update supersedence is only enabled for
+                # All Users assignments.
+                $intent = $groupIntent.ToLower()
+                $groupParams = @{ Include = $true; ID = $AppId; GroupID = $group.Id; Intent = $intent; Notification = "showAll" }
+                # Only valid with intent 'available' - the module rejects it outright otherwise
+                if ($AutoUpdateSuperseded -and $intent -eq 'available') {
+                    $groupParams['AutoUpdateSupersededApps'] = 'enabled'
+                }
+                $groupResult = Add-IntuneWin32AppAssignmentGroup @groupParams
+                if ($groupResult -and $groupResult.id) {
+                    Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  Group '$groupName' assignment was NOT created (see warning above)" -ForegroundColor Yellow
+                }
+            }
+            else {
+                Write-Host "  Warning: Group '$groupName' not found" -ForegroundColor Yellow
+            }
+        }
+        catch {
+            Write-Host "  Warning: Failed to assign to group '$groupName': $_" -ForegroundColor Yellow
+            Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    return $assignmentIds
+}
+
 # Create app configuration and upload
 function Publish-App {
     param(
@@ -163,7 +349,13 @@ function Publish-App {
         [hashtable]$AppConfig,
         [string]$NewVersion,
         [string]$IconPath,
-        [switch]$ForceUpdate
+        [switch]$ForceUpdate,
+
+        # Assignment spec for this app. Built either from the tenant's deployment plan or from
+        # the script-level -AssignTo* switches, so both modes share one assignment code path.
+        [bool]$AssignAllUsers,
+        [bool]$AssignAllDevices,
+        [array]$AssignGroups = @()
     )
     
     Write-Host "`n  Checking for existing apps..." -ForegroundColor Cyan
@@ -183,6 +375,7 @@ function Publish-App {
             # Analyze all existing apps to find versions (always check all, don't rely on exact match)
             $oldVersionApps = @()
             $sameVersionExists = $false
+            $sameVersionApp = $null
             $newestOlderApp = $null
             $newestOlderVersion = $null
             
@@ -224,6 +417,7 @@ function Publish-App {
                         Write-Host "      -> Same version ($existingVersion = $NewVersion)" -ForegroundColor Yellow
                         if (-not $ForceUpdate) {
                             $sameVersionExists = $true
+                            $sameVersionApp = $existingApp
                         }
                     }
                     else {
@@ -241,11 +435,18 @@ function Publish-App {
                 $oldVersionApps = @($newestOlderApp)
             }
             
-            # Skip if same version already exists (unless ForceUpdate)
+            # Same version already in Intune (unless ForceUpdate): skip the upload, but still
+            # reconcile assignments. Adopting or changing a deployment plan for apps that are
+            # already deployed would otherwise silently do nothing, even though -ShowPlan
+            # reports the new assignments. Add-IntuneWin32AppAssignment* skips targets that
+            # are already assigned, so this only fills in what is missing.
             if ($sameVersionExists) {
-                Write-Host "  Skipping: Version $NewVersion already exists in Intune (use -ForceUpdate to recreate)" -ForegroundColor Yellow
-                $deployedApps += $AppName
-                continue
+                Write-Host "  Version $NewVersion already exists in Intune (use -ForceUpdate to recreate the package)" -ForegroundColor Yellow
+                Write-Host "  Reconciling assignments on the existing app..." -ForegroundColor Cyan
+                $null = Set-AppAssignment -AppId $sameVersionApp.id -AppConfig $AppConfig `
+                    -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
+                    -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
+                return $sameVersionApp
             }
             
             if ($oldVersionApps.Count -gt 0) {
@@ -469,100 +670,11 @@ function Publish-App {
             }
         }
         
-        # Assign if requested and collect assignment IDs for auto-update
-        $assignmentIds = @()
-        
-        # Skip assignments for apps marked as hidden (dependency-only apps)
-        if ($AppConfig.HideFromPortal -eq $true) {
-            Write-Host "  Skipping assignments (HideFromPortal = true)" -ForegroundColor Gray
-        }
-        else {
-            if ($AssignToAllUsers) {
-                Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-                $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $Win32App.id -Intent "available" -Notification "showAll"
-                if ($assignment -and $assignment.id) {
-                    $assignmentIds += $assignment.id
-                }
-                Write-Host "  Assigned to All Users" -ForegroundColor Green
-            }
-            
-            if ($AssignToAllDevices) {
-                Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
-                Add-IntuneWin32AppAssignmentAllDevices -ID $Win32App.id -Intent "required" -Notification "showAll"
-                Write-Host "  Assigned to All Devices" -ForegroundColor Green
-            }
-            
-            if ($AssignToGroupName) {
-            Write-Host "  Assigning to group: $AssignToGroupName..." -ForegroundColor Cyan
-            
-            try {
-                # Ensure Microsoft.Graph.Groups module is available
-                if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
-                    Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
-                    Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
-                }
-                Import-Module Microsoft.Graph.Groups -ErrorAction Stop
-                
-                # Ensure connection is still valid
-                if (-not (Test-IntuneConnection)) {
-                    Write-Warning "  Connection lost, group assignment will be skipped"
-                    continue
-                }
-                
-                # Query Azure AD group by display name
-                $group = Get-MgGroup -Filter "displayName eq '$AssignToGroupName'" -ErrorAction Stop
-                
-                if ($group) {
-                    if ($group -is [array] -and $group.Count -gt 1) {
-                        Write-Host "  Warning: Multiple groups found with name '$AssignToGroupName', using first match" -ForegroundColor Yellow
-                        $group = $group[0]
-                    }
-                    
-                    $intent = $GroupAssignmentIntent.ToLower()
-                    Add-IntuneWin32AppAssignmentGroup -Include -ID $Win32App.id -GroupID $group.Id -Intent $intent -Notification "showAll"
-                    Write-Host "  Assigned to group '$AssignToGroupName' (ID: $($group.Id)) as $GroupAssignmentIntent" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "  Warning: Group '$AssignToGroupName' not found" -ForegroundColor Yellow
-                }
-            }
-            catch {
-                Write-Host "  Warning: Failed to assign to group '$AssignToGroupName': $_" -ForegroundColor Yellow
-                Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
-            }
-        }
-        }  # end else (not HideFromPortal)
-        
-        # Enable auto-update for assignments if supersedence was configured and AutoUpdate is enabled
-        if ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0 -and $AppConfig.AutoUpdate -eq $true) {
-            Write-Host "  Enabling auto-update for app assignments..." -ForegroundColor Cyan
-            try {
-                # Ensure connection is still valid
-                if (-not (Test-IntuneConnection)) {
-                    Write-Warning "  Connection lost, auto-update will be skipped"
-                }
-                else {
-                    $updatedCount = 0
-                    foreach ($assignmentId in $assignmentIds) {
-                        $result = Enable-IntuneAppAutoUpdate -AppId $Win32App.id -AssignmentId $assignmentId
-                        $updatedCount += [int]$result
-                    }
-                    
-                    if ($updatedCount -gt 0) {
-                        Write-Host "  Auto-update enabled for $updatedCount assignment(s)" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host "  No assignments were updated with auto-update" -ForegroundColor Yellow
-                    }
-                }
-            }
-            catch {
-                Write-Host "  Warning: Failed to enable auto-update: $_" -ForegroundColor Yellow
-            }
-        }
-        elseif ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0) {
-            Write-Host "  Skipping auto-update for assignments (AutoUpdate is disabled for this app)" -ForegroundColor Gray
-        }
+        # Assign if requested. Auto-update for superseded apps is requested as part of creating
+        # the assignment (see Set-AppAssignment) rather than patched in afterwards.
+        $null = Set-AppAssignment -AppId $Win32App.id -AppConfig $AppConfig `
+            -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
+            -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
         
         return $Win32App
     }
@@ -587,6 +699,125 @@ else {
     Write-Host "Tip: Use -ForceUpdate to create new versions for updates" -ForegroundColor Gray
 }
 Write-Host ""
+
+# Build apps to deploy dynamically from AppConfig.ps1 (single source of truth).
+# Resolved before authentication because it needs no connection - which is what lets
+# -ShowPlan report the plan without credentials.
+$script:appsToDeploy = @()
+foreach ($appConfigName in (Get-AllAppNames)) {
+    $cfg = Get-AppConfiguration -AppName $appConfigName
+    if ($cfg -and $cfg.Folder -and $cfg.IntuneWinPattern) {
+        $displayName = $cfg.DisplayNameTemplate -replace '\s*\{0\}', ''
+        $script:appsToDeploy += @{
+            Name = $displayName.Trim()
+            Folder = $cfg.Folder
+            Pattern = $cfg.IntuneWinPattern
+            AppConfigName = $appConfigName
+            PackageType = $cfg.PackageType
+        }
+    }
+}
+
+# Explicit assignment switches always win, so every existing command line keeps working unchanged
+$explicitAssignment = $AssignToAllUsers -or $AssignToAllDevices -or [bool]$AssignToGroupName
+
+# Load the tenant's deployment plan (TenantDeployments.json). Absent file or tenant -> $null,
+# and the script falls back to its previous behaviour.
+$deploymentPlan = $null
+if ($PSCmdlet.ParameterSetName -eq 'TenantName') {
+    if ($explicitAssignment) {
+        # Note only - the plan is never parsed in override mode, so a malformed file or a stale
+        # app name cannot break a command that was not going to use the plan anyway.
+        if (Test-TenantDeploymentPlanFile) {
+            Write-Host "Assignment switches supplied - ignoring TenantDeployments.json." -ForegroundColor Yellow
+        }
+    }
+    else {
+        $deploymentPlan = Get-TenantDeploymentPlan -TenantName $TenantName
+    }
+}
+
+# Determine which apps to process, and the assignment spec for each
+if ($deploymentPlan) {
+    Write-Host "Using deployment plan for tenant '$TenantName' ($($deploymentPlan.Keys.Count) app(s))" -ForegroundColor Cyan
+
+    $plannedNames = @($deploymentPlan.Keys)
+    if ($AppName) {
+        $matchedName = $plannedNames | Where-Object { $_ -eq $AppName } | Select-Object -First 1
+        if (-not $matchedName) {
+            Write-Host "Error: App '$AppName' is not in the deployment plan for '$TenantName'" -ForegroundColor Red
+            Write-Host "Planned apps: $($plannedNames -join ', ')" -ForegroundColor Yellow
+            exit 1
+        }
+        $plannedNames = @($matchedName)
+        Write-Host "Processing single app: $matchedName" -ForegroundColor Yellow
+    }
+
+    $appsToProcess = @()
+    foreach ($plannedName in $plannedNames) {
+        $entry = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $plannedName } | Select-Object -First 1
+        if (-not $entry) {
+            Write-Host "  Skipping '$plannedName' - no package folder/pattern configured in AppConfig.ps1" -ForegroundColor Yellow
+            continue
+        }
+        $appsToProcess += ,@($entry, $deploymentPlan[$plannedName])
+    }
+    Write-Host ""
+}
+else {
+    # Previous behaviour: all apps (or one via -AppName), assignments from the script switches
+    $legacySpec = @{
+        AllUsers   = [bool]$AssignToAllUsers
+        AllDevices = [bool]$AssignToAllDevices
+        Groups     = if ($AssignToGroupName) { @(@{ Name = $AssignToGroupName; Intent = $GroupAssignmentIntent }) } else { @() }
+    }
+
+    $selected = $script:appsToDeploy
+    if ($AppName) {
+        $filteredApp = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $AppName }
+        if (-not $filteredApp) {
+            Write-Host "Error: App '$AppName' not found in deployment configuration" -ForegroundColor Red
+            Write-Host "Available apps: $($script:appsToDeploy.AppConfigName -join ', ')" -ForegroundColor Yellow
+            exit 1
+        }
+        $selected = @($filteredApp)
+        Write-Host "Processing single app: $AppName" -ForegroundColor Yellow
+        Write-Host ""
+    }
+
+    $appsToProcess = @()
+    foreach ($entry in $selected) {
+        $appsToProcess += ,@($entry, $legacySpec)
+    }
+}
+
+# -ShowPlan: report what would happen and stop, without connecting or needing credentials
+if ($ShowPlan) {
+    Write-Host "========================================" -ForegroundColor Cyan
+    if ($deploymentPlan) {
+        Write-Host "Deployment plan for tenant '$TenantName'" -ForegroundColor Cyan
+    }
+    else {
+        Write-Host "No deployment plan - showing default selection" -ForegroundColor Cyan
+    }
+    Write-Host "========================================" -ForegroundColor Cyan
+
+    foreach ($item in $appsToProcess) {
+        $entry = $item[0]
+        $spec = $item[1]
+        $suffix = if ((Get-AppConfiguration -AppName $entry.AppConfigName).HideFromPortal -eq $true) {
+            'no assignments (HideFromPortal)'
+        }
+        else {
+            Format-AssignmentSpec -Spec $spec
+        }
+        Write-Host ("  {0,-18} {1}" -f $entry.AppConfigName, $suffix) -ForegroundColor White
+    }
+
+    Write-Host ""
+    Write-Host "$($appsToProcess.Count) app(s). Nothing was deployed (-ShowPlan)." -ForegroundColor Yellow
+    exit 0
+}
 
 # Check and install modules
 if (-not (Install-RequiredModules)) {
@@ -614,40 +845,12 @@ if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientI
 
 Write-Host "Successfully connected to Microsoft Intune!" -ForegroundColor Green
 
-# Build apps to deploy dynamically from AppConfig.ps1 (single source of truth)
-$script:appsToDeploy = @()
-foreach ($appConfigName in (Get-AllAppNames)) {
-    $cfg = Get-AppConfiguration -AppName $appConfigName
-    if ($cfg -and $cfg.Folder -and $cfg.IntuneWinPattern) {
-        $displayName = $cfg.DisplayNameTemplate -replace '\s*\{0\}', ''
-        $script:appsToDeploy += @{
-            Name = $displayName.Trim()
-            Folder = $cfg.Folder
-            Pattern = $cfg.IntuneWinPattern
-            AppConfigName = $appConfigName
-            PackageType = $cfg.PackageType
-        }
-    }
-}
-
-# Filter apps if AppName parameter is specified
-$appsToProcess = $script:appsToDeploy
-if ($AppName) {
-    $filteredApp = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $AppName }
-    if (-not $filteredApp) {
-        Write-Host "Error: App '$AppName' not found in deployment configuration" -ForegroundColor Red
-        Write-Host "Available apps: $($script:appsToDeploy.AppConfigName -join ', ')" -ForegroundColor Yellow
-        exit 1
-    }
-    $appsToProcess = @($filteredApp)
-    Write-Host "Processing single app: $AppName" -ForegroundColor Yellow
-    Write-Host ""
-}
-
 $deployedApps = @()
 $failedApps = @()
 
-foreach ($app in $appsToProcess) {
+foreach ($appItem in $appsToProcess) {
+    $app = $appItem[0]
+    $assignmentSpec = $appItem[1]
     # Validate connection before each app deployment
     if (-not (Test-IntuneConnection)) {
         Write-Host "`n  Connection lost, attempting to reconnect..." -ForegroundColor Yellow
@@ -765,7 +968,23 @@ foreach ($app in $appsToProcess) {
     if ($appConfigFromFile.HideFromPortal -eq $true) {
         $appConfig.HideFromPortal = $true
     }
-    
+
+    # Fall back to the version read out of the package when the filename has no dotted version
+    # to parse. 7-Zip ships as 7z2602-x64.msi, so $version stayed "Latest", every comparison in
+    # Publish-App threw, no existing version ever matched, and each run created another duplicate
+    # app in Intune. $appConfig.AppVersion holds the real version (MSI ProductVersion, or the
+    # file version) by this point.
+    $parsedVersion = $null
+    if (-not [version]::TryParse($version, [ref]$parsedVersion) -and $appConfig.AppVersion) {
+        $fallbackVersion = $null
+        if ([version]::TryParse($appConfig.AppVersion, [ref]$fallbackVersion)) {
+            Write-Host "  Version '$version' is not comparable - using package version $($appConfig.AppVersion)" -ForegroundColor Gray
+            $version = $appConfig.AppVersion
+        }
+    }
+
+    Write-Host "  Assignments: $(Format-AssignmentSpec -Spec $assignmentSpec)" -ForegroundColor Gray
+
     # Deploy the app with version info for supersedence
     $result = Publish-App `
         -AppName $app.Name `
@@ -774,7 +993,10 @@ foreach ($app in $appsToProcess) {
         -AppConfig $appConfig `
         -NewVersion $version `
         -IconPath $iconPath `
-        -ForceUpdate:$ForceUpdate
+        -ForceUpdate:$ForceUpdate `
+        -AssignAllUsers $assignmentSpec.AllUsers `
+        -AssignAllDevices $assignmentSpec.AllDevices `
+        -AssignGroups $assignmentSpec.Groups
     
     if ($result) {
         $deployedApps += $app.Name

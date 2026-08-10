@@ -3,6 +3,10 @@
 # Tenant configuration with encrypted secrets (portable but sensitive)
 intune-tenants.json
 
+# Per-tenant deployment plans - names real tenants and Entra ID groups.
+# TenantDeployments.example.json is committed as the schema reference.
+TenantDeployments.json
+
 # Executables & binaries
 *.exe
 *.dll
