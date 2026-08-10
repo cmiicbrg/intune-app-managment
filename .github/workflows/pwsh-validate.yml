@@ -11,6 +11,7 @@ permissions:
 jobs:
   pwsh-validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
