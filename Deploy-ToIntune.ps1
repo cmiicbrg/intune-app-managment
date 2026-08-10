@@ -174,10 +174,13 @@ function Install-RequiredModules {
 # Applies an assignment spec to an app already present in Intune and returns the IDs of the
 # assignments that were created (used to enable auto-update on supersedence).
 #
-# Safe to call against an app that is already assigned: the IntuneWin32App module checks for an
-# existing assignment of the same target - matching groups on groupId - and skips it with a
-# warning rather than creating a duplicate. That is what lets the "version already exists" path
-# reconcile assignments instead of leaving them stale.
+# Targets that are already assigned are skipped, so this is safe to call repeatedly - which is
+# what lets the "version already exists" path reconcile assignments instead of leaving them
+# stale. The check is done here rather than relying on the IntuneWin32App module's own
+# Test-IntuneWin32AppAssignment: in practice that misses existing All Users / All Devices
+# assignments, POSTs anyway, and the service rejects it with a BadRequest "The MobileApp
+# Assignment already exists". Nothing is duplicated either way, but the run is quieter and the
+# reported outcome is accurate.
 function Set-AppAssignment {
     param(
         [Parameter(Mandatory = $true)]
@@ -199,19 +202,53 @@ function Set-AppAssignment {
         return $assignmentIds
     }
 
-    if ($AssignAllUsers) {
-        Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-        $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $AppId -Intent "available" -Notification "showAll"
-        if ($assignment -and $assignment.id) {
-            $assignmentIds += $assignment.id
+    # Which targets this app already has. On failure the list stays empty and each assignment is
+    # simply attempted, which is the previous behaviour.
+    $existingTargets = @()
+    try {
+        foreach ($existing in @(Get-IntuneWin32AppAssignment -ID $AppId -ErrorAction Stop)) {
+            switch -Wildcard ($existing.Type) {
+                '*allLicensedUsersAssignmentTarget' { $existingTargets += 'AllUsers' }
+                '*allDevicesAssignmentTarget'       { $existingTargets += 'AllDevices' }
+                '*groupAssignmentTarget'            { $existingTargets += "Group:$($existing.GroupID)" }
+            }
         }
-        Write-Host "  Assigned to All Users" -ForegroundColor Green
+    }
+    catch {
+        Write-Verbose "Could not read existing assignments for app '$AppId': $($_.Exception.Message)"
+    }
+
+    if ($AssignAllUsers) {
+        if ($existingTargets -contains 'AllUsers') {
+            Write-Host "  All Users: already assigned" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
+            $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $AppId -Intent "available" -Notification "showAll"
+            if ($assignment -and $assignment.id) {
+                $assignmentIds += $assignment.id
+                Write-Host "  Assigned to All Users" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  All Users assignment was NOT created (see warning above)" -ForegroundColor Yellow
+            }
+        }
     }
 
     if ($AssignAllDevices) {
-        Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
-        Add-IntuneWin32AppAssignmentAllDevices -ID $AppId -Intent "required" -Notification "showAll" | Out-Null
-        Write-Host "  Assigned to All Devices" -ForegroundColor Green
+        if ($existingTargets -contains 'AllDevices') {
+            Write-Host "  All Devices: already assigned" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
+            $deviceAssignment = Add-IntuneWin32AppAssignmentAllDevices -ID $AppId -Intent "required" -Notification "showAll"
+            if ($deviceAssignment -and $deviceAssignment.id) {
+                Write-Host "  Assigned to All Devices" -ForegroundColor Green
+            }
+            else {
+                Write-Host "  All Devices assignment was NOT created (see warning above)" -ForegroundColor Yellow
+            }
+        }
     }
 
     foreach ($groupAssignment in @($AssignGroups)) {
@@ -243,12 +280,22 @@ function Set-AppAssignment {
                     $group = $group[0]
                 }
 
+                if ($existingTargets -contains "Group:$($group.Id)") {
+                    Write-Host "  Group '$groupName': already assigned" -ForegroundColor Gray
+                    continue
+                }
+
                 # Note: group assignment IDs are deliberately not collected into $assignmentIds -
                 # matching existing behaviour, where auto-update supersedence is only enabled for
                 # All Users assignments.
                 $intent = $groupIntent.ToLower()
-                Add-IntuneWin32AppAssignmentGroup -Include -ID $AppId -GroupID $group.Id -Intent $intent -Notification "showAll" | Out-Null
-                Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
+                $groupResult = Add-IntuneWin32AppAssignmentGroup -Include -ID $AppId -GroupID $group.Id -Intent $intent -Notification "showAll"
+                if ($groupResult -and $groupResult.id) {
+                    Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "  Group '$groupName' assignment was NOT created (see warning above)" -ForegroundColor Yellow
+                }
             }
             else {
                 Write-Host "  Warning: Group '$groupName' not found" -ForegroundColor Yellow
@@ -919,7 +966,21 @@ foreach ($appItem in $appsToProcess) {
     if ($appConfigFromFile.HideFromPortal -eq $true) {
         $appConfig.HideFromPortal = $true
     }
-    
+
+    # Fall back to the version read out of the package when the filename has no dotted version
+    # to parse. 7-Zip ships as 7z2602-x64.msi, so $version stayed "Latest", every comparison in
+    # Publish-App threw, no existing version ever matched, and each run created another duplicate
+    # app in Intune. $appConfig.AppVersion holds the real version (MSI ProductVersion, or the
+    # file version) by this point.
+    $parsedVersion = $null
+    if (-not [version]::TryParse($version, [ref]$parsedVersion) -and $appConfig.AppVersion) {
+        $fallbackVersion = $null
+        if ([version]::TryParse($appConfig.AppVersion, [ref]$fallbackVersion)) {
+            Write-Host "  Version '$version' is not comparable - using package version $($appConfig.AppVersion)" -ForegroundColor Gray
+            $version = $appConfig.AppVersion
+        }
+    }
+
     Write-Host "  Assignments: $(Format-AssignmentSpec -Spec $assignmentSpec)" -ForegroundColor Gray
 
     # Deploy the app with version info for supersedence
