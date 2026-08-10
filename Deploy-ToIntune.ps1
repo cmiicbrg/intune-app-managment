@@ -191,7 +191,12 @@ function Set-AppAssignment {
 
         [bool]$AssignAllUsers,
         [bool]$AssignAllDevices,
-        [array]$AssignGroups = @()
+        [array]$AssignGroups = @(),
+
+        # Request "auto update superseded apps" on assignments created here. The module only
+        # writes the setting when the intent is 'available' and the app actually supersedes
+        # something, so it is safe to ask for it whenever the app config enables AutoUpdate.
+        [bool]$AutoUpdateSuperseded
     )
 
     $assignmentIds = @()
@@ -224,7 +229,9 @@ function Set-AppAssignment {
         }
         else {
             Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-            $assignment = Add-IntuneWin32AppAssignmentAllUsers -ID $AppId -Intent "available" -Notification "showAll"
+            $allUsersParams = @{ ID = $AppId; Intent = "available"; Notification = "showAll" }
+            if ($AutoUpdateSuperseded) { $allUsersParams['AutoUpdateSupersededApps'] = 'enabled' }
+            $assignment = Add-IntuneWin32AppAssignmentAllUsers @allUsersParams
             if ($assignment -and $assignment.id) {
                 $assignmentIds += $assignment.id
                 Write-Host "  Assigned to All Users" -ForegroundColor Green
@@ -307,7 +314,12 @@ function Set-AppAssignment {
                 # matching existing behaviour, where auto-update supersedence is only enabled for
                 # All Users assignments.
                 $intent = $groupIntent.ToLower()
-                $groupResult = Add-IntuneWin32AppAssignmentGroup -Include -ID $AppId -GroupID $group.Id -Intent $intent -Notification "showAll"
+                $groupParams = @{ Include = $true; ID = $AppId; GroupID = $group.Id; Intent = $intent; Notification = "showAll" }
+                # Only valid with intent 'available' - the module rejects it outright otherwise
+                if ($AutoUpdateSuperseded -and $intent -eq 'available') {
+                    $groupParams['AutoUpdateSupersededApps'] = 'enabled'
+                }
+                $groupResult = Add-IntuneWin32AppAssignmentGroup @groupParams
                 if ($groupResult -and $groupResult.id) {
                     Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
                 }
@@ -432,7 +444,8 @@ function Publish-App {
                 Write-Host "  Version $NewVersion already exists in Intune (use -ForceUpdate to recreate the package)" -ForegroundColor Yellow
                 Write-Host "  Reconciling assignments on the existing app..." -ForegroundColor Cyan
                 $null = Set-AppAssignment -AppId $sameVersionApp.id -AppConfig $AppConfig `
-                    -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups
+                    -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
+                    -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
                 return $sameVersionApp
             }
             
@@ -657,40 +670,11 @@ function Publish-App {
             }
         }
         
-        # Assign if requested and collect assignment IDs for auto-update
-        $assignmentIds = Set-AppAssignment -AppId $Win32App.id -AppConfig $AppConfig `
-            -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups
-        
-        # Enable auto-update for assignments if supersedence was configured and AutoUpdate is enabled
-        if ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0 -and $AppConfig.AutoUpdate -eq $true) {
-            Write-Host "  Enabling auto-update for app assignments..." -ForegroundColor Cyan
-            try {
-                # Ensure connection is still valid
-                if (-not (Test-IntuneConnection)) {
-                    Write-Warning "  Connection lost, auto-update will be skipped"
-                }
-                else {
-                    $updatedCount = 0
-                    foreach ($assignmentId in $assignmentIds) {
-                        $result = Enable-IntuneAppAutoUpdate -AppId $Win32App.id -AssignmentId $assignmentId
-                        $updatedCount += [int]$result
-                    }
-                    
-                    if ($updatedCount -gt 0) {
-                        Write-Host "  Auto-update enabled for $updatedCount assignment(s)" -ForegroundColor Green
-                    }
-                    else {
-                        Write-Host "  No assignments were updated with auto-update" -ForegroundColor Yellow
-                    }
-                }
-            }
-            catch {
-                Write-Host "  Warning: Failed to enable auto-update: $_" -ForegroundColor Yellow
-            }
-        }
-        elseif ($oldVersionApps.Count -gt 0 -and $assignmentIds.Count -gt 0) {
-            Write-Host "  Skipping auto-update for assignments (AutoUpdate is disabled for this app)" -ForegroundColor Gray
-        }
+        # Assign if requested. Auto-update for superseded apps is requested as part of creating
+        # the assignment (see Set-AppAssignment) rather than patched in afterwards.
+        $null = Set-AppAssignment -AppId $Win32App.id -AppConfig $AppConfig `
+            -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
+            -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
         
         return $Win32App
     }
