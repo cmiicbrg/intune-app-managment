@@ -1,6 +1,42 @@
 {
   "_comment": "Machine-maintained version cache. Download-And-Package-Software.ps1 records the version, URL and filename of every installer it successfully downloads and verifies; AppConfig.ps1 overlays these onto FallbackVersion/FallbackUrl at load time so the offline fallbacks never go stale. Do not hand-edit - edit the seed values in AppConfig.ps1 instead. Deleting this file is safe; it regenerates on the next download run. See README.md 'Version cache' for the one-time git merge-driver setup that keeps this file from ever conflicting on a pull.",
   "Apps": {
+    "AffinityStudio": {
+      "Version": "3.2.3.4646",
+      "Url": "https://downloads.affinity.studio/Affinity%20x64.exe",
+      "Filename": "",
+      "UpdatedUtc": "2026-08-10T18:11:33Z"
+    },
+    "Audacity": {
+      "Version": "3.7.8",
+      "Url": "https://github.com/audacity/audacity/releases/download/Audacity-3.7.8/audacity-win-3.7.8-64bit.exe",
+      "Filename": "audacity-win-3.7.8-64bit.exe",
+      "UpdatedUtc": "2026-08-10T18:11:36Z"
+    },
+    "GeoGebra": {
+      "Version": "6.0.927.1",
+      "Url": "https://download.geogebra.org/package/win-msi6",
+      "Filename": "",
+      "UpdatedUtc": "2026-08-10T18:11:52Z"
+    },
+    "GoogleDrive": {
+      "Version": "129.0.1.0",
+      "Url": "https://dl.google.com/drive-file-stream/GoogleDriveSetup.exe",
+      "Filename": "",
+      "UpdatedUtc": "2026-08-10T18:12:14Z"
+    },
+    "GPG4Win": {
+      "Version": "5.1.0.47893",
+      "Url": "https://files.gpg4win.org/gpg4win-latest.exe",
+      "Filename": "",
+      "UpdatedUtc": "2026-08-10T18:12:19Z"
+    },
+    "LibreOffice": {
+      "Version": "25.8.7",
+      "Url": "https://download.documentfoundation.org/libreoffice/stable/25.8.7/win/x86_64/LibreOffice_25.8.7_Win_x86-64.msi",
+      "Filename": "LibreOffice_25.8.7_Win_x86-64.msi",
+      "UpdatedUtc": "2026-08-10T18:13:04Z"
+    },
     "NotepadPlusPlus": {
       "Version": "8.9.7",
       "Url": "https://github.com/notepad-plus-plus/notepad-plus-plus/releases/download/v8.9.7/npp.8.9.7.Installer.x64.exe",
@@ -12,6 +48,12 @@
       "Url": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi",
       "Filename": "7z2602-x64.msi",
       "UpdatedUtc": "2026-08-10T00:00:00Z"
+    },
+    "Stellarium": {
+      "Version": "26.2",
+      "Url": "https://github.com/Stellarium/stellarium/releases/download/v26.2/stellarium-26.2-qt6-win64.exe",
+      "Filename": "stellarium-26.2-qt6-win64.exe",
+      "UpdatedUtc": "2026-08-10T18:13:48Z"
     }
   }
 }
