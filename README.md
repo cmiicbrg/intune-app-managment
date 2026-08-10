@@ -202,7 +202,13 @@ Download latest versions and create IntuneWin packages:
 Upload packages to Intune with automatic configuration:
 
 ```powershell
-# Deploy all applications (prompts for encryption password once per session)
+# Deploy the tenant's apps from its deployment plan (see "Per-Tenant Deployment Plans")
+.\Deploy-ToIntune.ps1 -TenantName "School"
+
+# Preview first - shows apps and assignments, connects to nothing, needs no password
+.\Deploy-ToIntune.ps1 -TenantName "School" -ShowPlan
+
+# Deploy all applications with one assignment for every app (ignores the plan)
 .\Deploy-ToIntune.ps1 -TenantName "School" -AssignToAllUsers
 
 # Deploy single application
@@ -270,6 +276,9 @@ intune-app-management/
 ├── AppVersions.json                       # Version cache (machine-maintained)
 ├── SharedFunctions.ps1                    # Shared functions
 ├── TenantConfig.ps1                       # Secure tenant credential management
+├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
+├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
+├── TenantDeployments.example.json         # Deployment plan schema reference
 ├── AuthenticationManager.ps1              # Microsoft Graph authentication
 ├── Download-And-Package-Software.ps1      # Download & packaging script
 ├── Deploy-ToIntune.ps1                    # Deployment script
@@ -324,6 +333,59 @@ Edit `AppConfig.ps1` to modify:
 - Detection rules
 - Version formats
 - Auto-update behavior
+
+### Per-Tenant Deployment Plans
+
+`Deploy-ToIntune.ps1`'s assignment switches apply to **every app in a run**, so a tenant where Chrome
+needs All Users + All Devices, KeePassXC needs All Users, and an exam tool needs a group assignment
+cannot be deployed in one command — it takes one hand-run command line per app.
+
+A deployment plan makes that declarative. Copy `TenantDeployments.example.json` to
+`TenantDeployments.json` (git-ignored, because it names real tenants and Entra ID groups) and list
+each tenant's apps:
+
+```json
+{
+  "Tenants": {
+    "School": {
+      "Apps": {
+        "Chrome":          { "AllUsers": true, "AllDevices": true },
+        "KeePassXC":       { "AllUsers": true },
+        "VCRedist":        { },
+        "NextExamTeacher": { "Groups": [{ "Name": "Teachers", "Intent": "Required" }] }
+      }
+    }
+  }
+}
+```
+
+Then the whole tenant deploys with one command:
+
+```powershell
+.\Deploy-ToIntune.ps1 -TenantName "School" -ShowPlan   # preview, no credentials needed
+.\Deploy-ToIntune.ps1 -TenantName "School"             # deploy
+```
+
+Schema:
+
+| Key | Meaning |
+| --- | --- |
+| `AllUsers` | Assign to All Users with intent `available` |
+| `AllDevices` | Assign to All Devices with intent `required` |
+| `Groups` | Array of `{ "Name": ..., "Intent": "Available" \| "Required" }`. `Intent` defaults to `Available` |
+| `{ }` | Deploy with no assignment — for dependency-only apps such as `VCRedist` |
+
+Notes:
+
+- App names must match the keys in `AppConfig.ps1` and are matched case-insensitively, but an
+  unknown name is a **hard error** naming the tenant and the bad key. A silently skipped app is
+  the failure mode this replaces.
+- Precedence: passing `-AssignToAllUsers`, `-AssignToAllDevices` or `-AssignToGroupName` ignores the
+  plan entirely and behaves exactly as before, so existing command lines keep working. `-AppName`
+  narrows a plan run to one app while keeping that app's assignments from the plan.
+- With no plan file, or no entry for the tenant, the script behaves exactly as it did before.
+- Dependencies still resolve against the full app list, so a tenant that lists `KeePassXC` without
+  `VCRedist` still gets VCRedist auto-deployed.
 
 ### Version Cache
 

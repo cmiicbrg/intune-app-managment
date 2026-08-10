@@ -1,0 +1,28 @@
+{
+  "_comment": "Per-tenant deployment plans. Copy to TenantDeployments.json (git-ignored) and edit. Deploy-ToIntune.ps1 uses a tenant's plan automatically, so '.\\Deploy-ToIntune.ps1 -TenantName \"Contoso\"' deploys exactly these apps with these assignments. Passing -AssignToAllUsers/-AssignToAllDevices/-AssignToGroupName ignores the plan. Preview with -ShowPlan, which needs no credentials. App names must match the keys in AppConfig.ps1 (case-insensitive).",
+  "Tenants": {
+    "Contoso": {
+      "Apps": {
+        "Chrome": { "AllUsers": true, "AllDevices": true },
+        "Firefox": { "AllUsers": true, "AllDevices": true },
+        "SevenZip": { "AllUsers": true },
+        "NotepadPlusPlus": { "AllUsers": true },
+        "KeePassXC": { "AllUsers": true },
+        "VCRedist": {}
+      }
+    },
+    "Fabrikam": {
+      "_comment": "AllUsers is assigned with intent 'available', AllDevices with 'required'. Groups take an optional Intent of 'Available' (default) or 'Required'. An empty {} deploys the app with no assignment - used for dependency-only apps such as VCRedist, which KeePassXC also pulls in automatically when it is missing.",
+      "Apps": {
+        "GIMP": { "AllUsers": true },
+        "VLC": { "AllUsers": true },
+        "NextExamTeacher": {
+          "Groups": [
+            { "Name": "Teachers", "Intent": "Available" },
+            { "Name": "IT-Staff", "Intent": "Required" }
+          ]
+        }
+      }
+    }
+  }
+}
