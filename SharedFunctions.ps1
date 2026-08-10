@@ -1,3 +1,5 @@
+#Requires -Version 7.4
+
 # Shared Functions Module
 # Common functions used by both Download-And-Package-Software.ps1 and Deploy-ToIntune.ps1
 
@@ -6,9 +8,9 @@
 . (Join-Path $PSScriptRoot "AppConfig.ps1")
 
 # Function to extract version from an installer file
-# Works on both PowerShell 5.1 and 7+. For MSI files, queries the MSI database
-# directly via the WindowsInstaller COM object. For EXE files, falls back to
-# Get-AppLockerFileInformation (structured object on PS 5.1, parsed string on PS 7).
+# For MSI files, queries the MSI database directly via the WindowsInstaller COM object.
+# For EXE files, falls back to Get-AppLockerFileInformation, which PS 7 loads through
+# the Windows compatibility session.
 function Get-InstallerVersion {
     param(
         [Parameter(Mandatory=$true)]
@@ -48,7 +50,8 @@ function Get-InstallerVersion {
         $info = Get-AppLockerFileInformation -Path $FilePath -ErrorAction Stop
         $pub = $info.Publisher
 
-        # PS 5.1 returns a structured object with BinaryVersion; PS 7+ returns a string
+        # The compat session usually returns Publisher as a string on PS 7, but the
+        # shape isn't guaranteed across Windows builds - handle both.
         if ($null -ne $pub -and $pub -is [string]) {
             # Format: "PUBLISHER\PRODUCT\BINARY,VERSION"
             if ($pub -match ',(\d+[\d\.]+)') {
@@ -133,7 +136,7 @@ function Save-AppVersionCache {
         if ($comment) { $document['_comment'] = $comment }
         $document['Apps'] = $orderedApps
 
-        # WriteAllText rather than Out-File: PowerShell 5.1 would prepend a UTF-8 BOM
+        # WriteAllText writes BOM-less UTF-8 explicitly, independent of shell encoding defaults
         $json = ($document | ConvertTo-Json -Depth 5) + "`n"
         [System.IO.File]::WriteAllText($cachePath, $json, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -288,10 +291,6 @@ function Invoke-FileDownload {
     Write-Host "To: $(Split-Path $OutputPath)" -ForegroundColor Cyan
     
     try {
-        # Use Invoke-WebRequest for better compatibility with modern websites
-        # Set TLS version for secure connections
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
-        
         # Download with progress
         $ProgressPreference = 'SilentlyContinue'  # Speeds up download
         Invoke-WebRequest -Uri $Url -OutFile $OutputPath -UseBasicParsing -ErrorAction Stop

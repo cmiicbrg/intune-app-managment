@@ -1,3 +1,5 @@
+#Requires -Version 7.4
+
 # Complete Intune Win32 App Deployment Script
 # Uses IntuneWin32App module for proper deployment
 
