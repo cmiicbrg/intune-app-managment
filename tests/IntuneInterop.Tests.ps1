@@ -17,7 +17,7 @@ BeforeAll {
     # wrappers pass (-ErrorAction).
     function Invoke-MgGraphRequest {
         [CmdletBinding()]
-        param($Method, $Uri, $OutputType)
+        param($Method, $Uri, $OutputType, $Body, $ContentType)
         throw 'stub was not mocked'
     }
 
@@ -190,5 +190,155 @@ Describe 'Get-InteropAppAssignment (native Graph read + normalization)' {
     It 'returns an empty array when the request fails' {
         Mock Invoke-MgGraphRequest { throw 'Graph unavailable' }
         @(Get-InteropAppAssignment -AppId 'app-1').Count | Should -Be 0
+    }
+}
+
+Describe 'Add-Interop*Assignment (native Graph writes)' {
+    BeforeAll {
+        # GET returns the app (supersededAppCount drives autoUpdateSettings);
+        # POST returns the created assignment
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') {
+                [PSCustomObject]@{ id = 'app-1'; supersededAppCount = 1 }
+            }
+            else {
+                [PSCustomObject]@{ id = 'assignment-1' }
+            }
+        }
+    }
+
+    It 'posts an All Users assignment with the win32LobApp settings shape' {
+        $result = Add-InteropAllUsersAssignment -AppId 'app-1' -Intent 'available' -Notification 'showAll'
+        $result.id | Should -Be 'assignment-1'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ($Method -ne 'POST') { return $false }
+            $parsed = $Body | ConvertFrom-Json
+            $parsed.'@odata.type' -eq '#microsoft.graph.mobileAppAssignment' -and
+            $parsed.intent -eq 'available' -and
+            $parsed.source -eq 'direct' -and
+            $parsed.target.'@odata.type' -eq '#microsoft.graph.allLicensedUsersAssignmentTarget' -and
+            $parsed.settings.'@odata.type' -eq '#microsoft.graph.win32LobAppAssignmentSettings' -and
+            $parsed.settings.notifications -eq 'showAll'
+        } -Times 1 -Exactly
+    }
+
+    It 'writes autoUpdateSettings enabled for available intent on a superseding app' {
+        $null = Add-InteropAllUsersAssignment -AppId 'app-1' -Intent 'available' -AutoUpdateSuperseded $true
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            $Method -eq 'POST' -and
+            ($Body | ConvertFrom-Json).settings.autoUpdateSettings.autoUpdateSupersededAppsState -eq 'enabled'
+        } -Times 1 -Exactly
+    }
+
+    It 'omits autoUpdateSettings when the app supersedes nothing' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { [PSCustomObject]@{ id = 'app-2'; supersededAppCount = 0 } }
+            else { [PSCustomObject]@{ id = 'assignment-2' } }
+        }
+        $null = Add-InteropAllUsersAssignment -AppId 'app-2' -Intent 'available' -AutoUpdateSuperseded $true
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            $Method -eq 'POST' -and $null -eq ($Body | ConvertFrom-Json).settings.autoUpdateSettings
+        } -Times 1 -Exactly
+    }
+
+    It 'targets All Devices with the required intent and no autoUpdateSettings' {
+        $null = Add-InteropAllDevicesAssignment -AppId 'app-1' -Intent 'required'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ($Method -ne 'POST') { return $false }
+            $parsed = $Body | ConvertFrom-Json
+            $parsed.target.'@odata.type' -eq '#microsoft.graph.allDevicesAssignmentTarget' -and
+            $parsed.intent -eq 'required' -and
+            $null -eq $parsed.settings.autoUpdateSettings
+        } -Times 1 -Exactly
+    }
+
+    It 'targets the group and carries the groupId' {
+        $null = Add-InteropGroupAssignment -AppId 'app-1' -GroupId 'g-9' -Intent 'available'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ($Method -ne 'POST') { return $false }
+            $parsed = $Body | ConvertFrom-Json
+            $parsed.target.'@odata.type' -eq '#microsoft.graph.groupAssignmentTarget' -and
+            $parsed.target.groupId -eq 'g-9'
+        } -Times 1 -Exactly
+    }
+
+    It 'warns and returns $null when the POST fails' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { [PSCustomObject]@{ id = 'app-1'; supersededAppCount = 0 } }
+            else { throw 'BadRequest: The MobileApp Assignment already exists' }
+        }
+        Add-InteropAllUsersAssignment -AppId 'app-1' -Intent 'available' -WarningAction SilentlyContinue |
+            Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Add-InteropSupersedence (native updateRelationships)' {
+    It 'merges the new supersedence with existing dependencies, replacing old supersedence' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') {
+                [PSCustomObject]@{
+                    value = @(
+                        [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.mobileAppDependency'; dependencyType = 'autoInstall'; targetId = 'dep-1' },
+                        [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.mobileAppSupersedence'; supersedenceType = 'update'; targetId = 'ancient-app' }
+                    )
+                }
+            }
+        }
+
+        Add-InteropSupersedence -AppId 'new-app' -SupersededAppId 'old-app' -SupersedenceType 'Replace'
+
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ($Method -ne 'POST') { return $false }
+            $rels = @(($Body | ConvertFrom-Json).relationships)
+            $supersedences = @($rels | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.mobileAppSupersedence' })
+            $dependencies = @($rels | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.mobileAppDependency' })
+            $rels.Count -eq 2 -and
+            $supersedences.Count -eq 1 -and
+            $supersedences[0].targetId -eq 'old-app' -and
+            $supersedences[0].supersedenceType -eq 'replace' -and
+            $dependencies[0].targetId -eq 'dep-1'
+        } -Times 1 -Exactly
+    }
+
+    It 'refuses self-supersedence without calling Graph' {
+        Mock Invoke-MgGraphRequest { }
+        Add-InteropSupersedence -AppId 'a' -SupersededAppId 'a' -WarningAction SilentlyContinue
+        Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
+    }
+}
+
+Describe 'Add-InteropDependency (native updateRelationships)' {
+    It 'merges new dependencies with existing supersedence, replacing old dependencies' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') {
+                [PSCustomObject]@{
+                    value = @(
+                        [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.mobileAppSupersedence'; supersedenceType = 'update'; targetId = 'old-version' },
+                        [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.mobileAppDependency'; dependencyType = 'autoInstall'; targetId = 'stale-dep' }
+                    )
+                }
+            }
+        }
+
+        Add-InteropDependency -AppId 'app' -DependencyAppIds @('dep-a', 'dep-b')
+
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ($Method -ne 'POST') { return $false }
+            $rels = @(($Body | ConvertFrom-Json).relationships)
+            $dependencies = @($rels | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.mobileAppDependency' })
+            $supersedences = @($rels | Where-Object { $_.'@odata.type' -eq '#microsoft.graph.mobileAppSupersedence' })
+            $rels.Count -eq 3 -and
+            $dependencies.Count -eq 2 -and
+            ($dependencies.targetId -contains 'dep-a') -and
+            ($dependencies.targetId -contains 'dep-b') -and
+            ($dependencies.targetId -notcontains 'stale-dep') -and
+            $supersedences[0].targetId -eq 'old-version'
+        } -Times 1 -Exactly
+    }
+
+    It 'refuses self-dependency without calling Graph' {
+        Mock Invoke-MgGraphRequest { }
+        Add-InteropDependency -AppId 'a' -DependencyAppIds @('b', 'a') -WarningAction SilentlyContinue
+        Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
     }
 }
