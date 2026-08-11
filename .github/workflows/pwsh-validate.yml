@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   pwsh-validate:
+    name: Syntax & interop boundary check
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -94,6 +95,7 @@ jobs:
           }
 
   pester:
+    name: Pester tests (Windows)
     runs-on: windows-latest
     timeout-minutes: 30
 
