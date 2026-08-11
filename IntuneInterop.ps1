@@ -10,8 +10,8 @@
 # Graph calls without changing any caller.
 #
 # Migration state (#9): package metadata, detection/requirement rule builders, icons,
-# and read-only Graph queries are native. App creation/upload, assignments, and
-# relationship writes are still backed by the IntuneWin32App module.
+# read-only Graph queries, assignments, and relationship writes are native. Only app
+# creation/upload (Publish-InteropWin32App) is still backed by the IntuneWin32App module.
 
 $script:InteropModuleName = 'IntuneWin32App'
 
@@ -488,6 +488,87 @@ function Publish-InteropWin32App {
 
 #endregion
 
+#region Native Graph helpers (internal)
+
+function New-InteropAssignmentBody {
+    <#
+    .SYNOPSIS
+    Internal: builds the mobileAppAssignment body shared by the three assignment wrappers
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Intent,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Notification,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Target,
+
+        # The app object (needed for supersededAppCount)
+        [Parameter(Mandatory = $true)]
+        $App,
+
+        [bool]$AutoUpdateSuperseded = $false
+    )
+
+    $body = [ordered]@{
+        '@odata.type' = '#microsoft.graph.mobileAppAssignment'
+        'intent'      = $Intent
+        'source'      = 'direct'
+        'target'      = $Target
+        'settings'    = @{
+            '@odata.type'                  = '#microsoft.graph.win32LobAppAssignmentSettings'
+            'notifications'                = $Notification
+            'restartSettings'              = $null
+            'deliveryOptimizationPriority' = 'notConfigured'
+            'installTimeSettings'          = $null
+        }
+    }
+
+    # The service only accepts autoUpdateSettings when the intent is 'available' and
+    # the app actually supersedes something (matching the module's conditional)
+    if ($Intent -eq 'available' -and $App.supersededAppCount -gt 0) {
+        $body.settings.autoUpdateSettings = @{
+            'autoUpdateSupersededAppsState' = $AutoUpdateSuperseded ? 'enabled' : 'notConfigured'
+        }
+    }
+
+    return $body
+}
+
+function Get-InteropAppRelationship {
+    <#
+    .SYNOPSIS
+    Internal: returns an app's relationship objects, optionally filtered by @odata.type
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId,
+
+        [string]$ODataType
+    )
+
+    $relationships = [System.Collections.Generic.List[object]]::new()
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/relationships"
+    while ($uri) {
+        $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
+        foreach ($relationship in @($response.value)) {
+            $relationships.Add($relationship)
+        }
+        $uri = $response.'@odata.nextLink'
+    }
+
+    if ($ODataType) {
+        return @($relationships | Where-Object { $_.'@odata.type' -eq $ODataType })
+    }
+    return $relationships
+}
+
+#endregion
+
 #region Assignments
 
 function Get-InteropAppAssignment {
@@ -544,16 +625,29 @@ function Add-InteropAllUsersAssignment {
 
         [string]$Notification = 'showAll',
 
-        # Request "auto update superseded apps" on this assignment. The module only
-        # writes the setting when the intent is 'available'.
+        # Request "auto update superseded apps" on this assignment. Only written when
+        # the intent is 'available' and the app supersedes something.
         [bool]$AutoUpdateSuperseded = $false
     )
 
-    $params = @{ ID = $AppId; Intent = $Intent; Notification = $Notification }
-    if ($AutoUpdateSuperseded) {
-        $params['AutoUpdateSupersededApps'] = 'enabled'
+    try {
+        $app = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -OutputType PSObject -ErrorAction Stop
+
+        $target = @{
+            '@odata.type'                                = '#microsoft.graph.allLicensedUsersAssignmentTarget'
+            'deviceAndAppManagementAssignmentFilterId'   = $null
+            'deviceAndAppManagementAssignmentFilterType' = 'none'
+        }
+        $body = New-InteropAssignmentBody -Intent $Intent -Notification $Notification -Target $target -App $app -AutoUpdateSuperseded $AutoUpdateSuperseded
+
+        return Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
     }
-    return Add-IntuneWin32AppAssignmentAllUsers @params
+    catch {
+        # Warn-and-return-$null matches the module: callers report "assignment was
+        # NOT created" and continue with the rest of the deployment
+        Write-Warning "An error occurred while creating the All Users assignment for app '$AppId': $($_.Exception.Message)"
+        return $null
+    }
 }
 
 function Add-InteropAllDevicesAssignment {
@@ -571,7 +665,22 @@ function Add-InteropAllDevicesAssignment {
         [string]$Notification = 'showAll'
     )
 
-    return Add-IntuneWin32AppAssignmentAllDevices -ID $AppId -Intent $Intent -Notification $Notification
+    try {
+        $app = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -OutputType PSObject -ErrorAction Stop
+
+        $target = @{
+            '@odata.type'                                = '#microsoft.graph.allDevicesAssignmentTarget'
+            'deviceAndAppManagementAssignmentFilterId'   = $null
+            'deviceAndAppManagementAssignmentFilterType' = 'none'
+        }
+        $body = New-InteropAssignmentBody -Intent $Intent -Notification $Notification -Target $target -App $app
+
+        return Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "An error occurred while creating the All Devices assignment for app '$AppId': $($_.Exception.Message)"
+        return $null
+    }
 }
 
 function Add-InteropGroupAssignment {
@@ -591,15 +700,27 @@ function Add-InteropGroupAssignment {
 
         [string]$Notification = 'showAll',
 
-        # Only valid with intent 'available' - the module rejects it outright otherwise
+        # Only written when the intent is 'available' and the app supersedes something
         [bool]$AutoUpdateSuperseded = $false
     )
 
-    $params = @{ Include = $true; ID = $AppId; GroupID = $GroupId; Intent = $Intent; Notification = $Notification }
-    if ($AutoUpdateSuperseded -and $Intent -eq 'available') {
-        $params['AutoUpdateSupersededApps'] = 'enabled'
+    try {
+        $app = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -OutputType PSObject -ErrorAction Stop
+
+        $target = @{
+            '@odata.type'                                = '#microsoft.graph.groupAssignmentTarget'
+            'deviceAndAppManagementAssignmentFilterId'   = $null
+            'deviceAndAppManagementAssignmentFilterType' = 'none'
+            'groupId'                                    = $GroupId
+        }
+        $body = New-InteropAssignmentBody -Intent $Intent -Notification $Notification -Target $target -App $app -AutoUpdateSuperseded $AutoUpdateSuperseded
+
+        return Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
     }
-    return Add-IntuneWin32AppAssignmentGroup @params
+    catch {
+        Write-Warning "An error occurred while creating the group assignment for app '$AppId': $($_.Exception.Message)"
+        return $null
+    }
 }
 
 #endregion
@@ -623,8 +744,25 @@ function Add-InteropSupersedence {
         [string]$SupersedenceType = 'Update'
     )
 
-    $supersedence = New-IntuneWin32AppSupersedence -ID $SupersededAppId -SupersedenceType $SupersedenceType
-    Add-IntuneWin32AppSupersedence -ID $AppId -Supersedence $supersedence -Verbose
+    if ($AppId -eq $SupersededAppId) {
+        Write-Warning "A Win32 app cannot supersede itself (app ID '$AppId')"
+        return
+    }
+
+    $supersedence = [ordered]@{
+        '@odata.type'      = '#microsoft.graph.mobileAppSupersedence'
+        'supersedenceType' = $SupersedenceType.ToLowerInvariant()
+        'targetId'         = $SupersededAppId
+    }
+
+    # updateRelationships REPLACES the app's entire relationship set, so existing
+    # dependency relationships must be read and re-submitted alongside the new
+    # supersedence (which itself replaces any previous supersedence - matching the
+    # module's behavior)
+    $dependencies = @(Get-InteropAppRelationship -AppId $AppId -ODataType '#microsoft.graph.mobileAppDependency')
+
+    $body = [ordered]@{ 'relationships' = @(@($supersedence) + $dependencies) }
+    $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
 }
 
 function Add-InteropDependency {
@@ -643,10 +781,27 @@ function Add-InteropDependency {
         [string]$DependencyType = 'AutoInstall'
     )
 
-    $dependencies = foreach ($dependencyAppId in $DependencyAppIds) {
-        New-IntuneWin32AppDependency -ID $dependencyAppId -DependencyType $DependencyType
+    if ($AppId -in $DependencyAppIds) {
+        Write-Warning "A Win32 app cannot depend on itself (app ID '$AppId')"
+        return
     }
-    Add-IntuneWin32AppDependency -ID $AppId -Dependency @($dependencies) -Verbose
+
+    $dependencies = foreach ($dependencyAppId in $DependencyAppIds) {
+        [ordered]@{
+            '@odata.type'    = '#microsoft.graph.mobileAppDependency'
+            'dependencyType' = $DependencyType
+            'targetId'       = $dependencyAppId
+        }
+    }
+
+    # updateRelationships REPLACES the app's entire relationship set, so existing
+    # supersedence relationships must be read and re-submitted alongside the new
+    # dependencies (which themselves replace any previous dependencies - matching
+    # the module's behavior)
+    $supersedences = @(Get-InteropAppRelationship -AppId $AppId -ODataType '#microsoft.graph.mobileAppSupersedence')
+
+    $body = [ordered]@{ 'relationships' = @(@($dependencies) + $supersedences) }
+    $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
 }
 
 #endregion
