@@ -5,9 +5,13 @@
 #
 # No other script may call IntuneWin32App cmdlets or touch the module's internals -
 # CI enforces this (see the boundary check in pwsh-validate.yml). Wrapper functions
-# accept plain domain values (strings, bools, hashtables) and return the Graph-schema
-# shaped hashtables the module builders produce, so issue #9 can swap each
-# implementation for native Microsoft Graph calls without changing any caller.
+# accept plain domain values (strings, bools, hashtables) and return Graph-schema
+# shaped hashtables, so issue #9 can swap each implementation for native Microsoft
+# Graph calls without changing any caller.
+#
+# Migration state (#9): package metadata, detection/requirement rule builders, icons,
+# and read-only Graph queries are native. App creation/upload, assignments, and
+# relationship writes are still backed by the IntuneWin32App module.
 
 $script:InteropModuleName = 'IntuneWin32App'
 
@@ -144,6 +148,10 @@ function Get-InteropPackageMetadata {
     <#
     .SYNOPSIS
     Reads the metadata (Detection.xml) embedded in an .intunewin package
+
+    .DESCRIPTION
+    Native implementation: opens the .intunewin zip and parses the Detection.xml
+    entry. Matching the previous module behavior, failures warn and return $null.
     #>
     [CmdletBinding()]
     param(
@@ -151,7 +159,31 @@ function Get-InteropPackageMetadata {
         [string]$FilePath
     )
 
-    return Get-IntuneWin32AppMetaData -FilePath $FilePath
+    try {
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($FilePath)
+        try {
+            $entry = $archive.Entries | Where-Object { $_.Name -like 'detection.xml' } | Select-Object -First 1
+            if ($null -eq $entry) {
+                Write-Warning "No detection.xml entry found inside '$FilePath'"
+                return $null
+            }
+
+            $reader = [System.IO.StreamReader]::new($entry.Open())
+            try {
+                return [xml]$reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+        finally {
+            $archive.Dispose()
+        }
+    }
+    catch {
+        Write-Warning "Could not read metadata from '$FilePath': $($_.Exception.Message)"
+        return $null
+    }
 }
 
 #endregion
@@ -180,13 +212,15 @@ function New-InteropFileDetectionRule {
         [bool]$Check32BitOn64System = $false
     )
 
-    return New-IntuneWin32AppDetectionRuleFile `
-        -Version `
-        -Path $Path `
-        -FileOrFolder $FileOrFolder `
-        -Check32BitOn64System $Check32BitOn64System `
-        -Operator $Operator `
-        -VersionValue $VersionValue
+    return [ordered]@{
+        '@odata.type'          = '#microsoft.graph.win32LobAppFileSystemDetection'
+        'operator'             = $Operator
+        'detectionValue'       = $VersionValue
+        'path'                 = $Path
+        'fileOrFolderName'     = $FileOrFolder
+        'check32BitOn64System' = $Check32BitOn64System
+        'detectionType'        = 'version'
+    }
 }
 
 function New-InteropMsiDetectionRule {
@@ -200,7 +234,12 @@ function New-InteropMsiDetectionRule {
         [string]$ProductCode
     )
 
-    return New-IntuneWin32AppDetectionRuleMSI -ProductCode $ProductCode
+    return [ordered]@{
+        '@odata.type'            = '#microsoft.graph.win32LobAppProductCodeDetection'
+        'productCode'            = $ProductCode
+        'productVersionOperator' = 'notConfigured'
+        'productVersion'         = ''
+    }
 }
 
 function New-InteropRegistryExistenceDetectionRule {
@@ -220,22 +259,24 @@ function New-InteropRegistryExistenceDetectionRule {
         [ValidateSet('exists', 'doesNotExist')]
         [string]$DetectionType,
 
-        [string]$ValueName,
+        # Defaults to '' explicitly: the output shape always carries valueName, as an
+        # empty string for key-only existence checks (matching the module's output)
+        [string]$ValueName = '',
 
         [bool]$Check32BitOn64System = $false
     )
 
-    $params = @{
-        Existence            = $true
-        KeyPath              = $KeyPath
-        DetectionType        = $DetectionType
-        Check32BitOn64System = $Check32BitOn64System
+    # valueName is always present (empty string when not provided), matching the
+    # module's output shape.
+    return [ordered]@{
+        '@odata.type'          = '#microsoft.graph.win32LobAppRegistryDetection'
+        'operator'             = 'notConfigured'
+        'detectionValue'       = $null
+        'check32BitOn64System' = $Check32BitOn64System
+        'keyPath'              = $KeyPath
+        'valueName'            = $ValueName
+        'detectionType'        = $DetectionType
     }
-    if ($ValueName) {
-        $params['ValueName'] = $ValueName
-    }
-
-    return New-IntuneWin32AppDetectionRuleRegistry @params
 }
 
 function New-InteropRegistryVersionDetectionRule {
@@ -260,13 +301,15 @@ function New-InteropRegistryVersionDetectionRule {
         [bool]$Check32BitOn64System = $false
     )
 
-    return New-IntuneWin32AppDetectionRuleRegistry `
-        -VersionComparison `
-        -KeyPath $KeyPath `
-        -ValueName $ValueName `
-        -VersionComparisonOperator $Operator `
-        -VersionComparisonValue $VersionValue `
-        -Check32BitOn64System $Check32BitOn64System
+    return [ordered]@{
+        '@odata.type'          = '#microsoft.graph.win32LobAppRegistryDetection'
+        'operator'             = $Operator
+        'detectionValue'       = $VersionValue
+        'check32BitOn64System' = $Check32BitOn64System
+        'keyPath'              = $KeyPath
+        'valueName'            = $ValueName
+        'detectionType'        = 'version'
+    }
 }
 
 function New-InteropScriptDetectionRule {
@@ -275,8 +318,8 @@ function New-InteropScriptDetectionRule {
     Builds a PowerShell script detection rule (win32LobAppPowerShellScriptDetection)
 
     .DESCRIPTION
-    Takes the script CONTENT rather than a file path; the temp file the backing module
-    requires is created and cleaned up here, inside the boundary.
+    Takes the script CONTENT rather than a file path; the content is base64-encoded
+    directly into the rule, no temp file involved.
     #>
     [CmdletBinding()]
     param(
@@ -288,16 +331,11 @@ function New-InteropScriptDetectionRule {
         [bool]$RunAs32Bit = $false
     )
 
-    $tempScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) ("InteropDetect-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-    try {
-        $ScriptContent | Out-File -FilePath $tempScriptPath -Encoding UTF8 -Force
-        return New-IntuneWin32AppDetectionRuleScript `
-            -ScriptFile $tempScriptPath `
-            -EnforceSignatureCheck $EnforceSignatureCheck `
-            -RunAs32Bit $RunAs32Bit
-    }
-    finally {
-        Remove-Item $tempScriptPath -Force -ErrorAction SilentlyContinue
+    return [ordered]@{
+        '@odata.type'           = '#microsoft.graph.win32LobAppPowerShellScriptDetection'
+        'enforceSignatureCheck' = $EnforceSignatureCheck
+        'runAs32Bit'            = $RunAs32Bit
+        'scriptContent'         = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($ScriptContent))
     }
 }
 
@@ -309,15 +347,46 @@ function New-InteropRequirementRule {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
+        [ValidateSet('x64', 'x86', 'arm64', 'x64x86', 'AllWithARM64')]
         [string]$Architecture,
 
         [Parameter(Mandatory = $true)]
+        [ValidateSet('W10_1607', 'W10_1703', 'W10_1709', 'W10_1803', 'W10_1809', 'W10_1903', 'W10_1909', 'W10_2004', 'W10_20H2', 'W10_21H1', 'W10_21H2', 'W10_22H2', 'W11_21H2', 'W11_22H2')]
         [string]$MinimumSupportedOperatingSystem
     )
 
-    return New-IntuneWin32AppRequirementRule `
-        -Architecture $Architecture `
-        -MinimumSupportedOperatingSystem $MinimumSupportedOperatingSystem
+    $architectureTable = @{
+        'x64'          = 'x64'
+        'x86'          = 'x86'
+        'arm64'        = 'arm64'
+        'x64x86'       = 'x64,x86'
+        'AllWithARM64' = 'x64,x86,arm64'
+    }
+
+    # Service enum values ("2H20" for 20H2 is not a typo - it is what the Graph
+    # service expects for that release)
+    $operatingSystemTable = @{
+        'W10_1607' = '1607'
+        'W10_1703' = '1703'
+        'W10_1709' = '1709'
+        'W10_1803' = '1803'
+        'W10_1809' = '1809'
+        'W10_1903' = '1903'
+        'W10_1909' = '1909'
+        'W10_2004' = '2004'
+        'W10_20H2' = '2H20'
+        'W10_21H1' = '21H1'
+        'W10_21H2' = 'Windows10_21H2'
+        'W10_22H2' = 'Windows10_22H2'
+        'W11_21H2' = 'Windows11_21H2'
+        'W11_22H2' = 'Windows11_22H2'
+    }
+
+    return [ordered]@{
+        'allowedArchitectures'           = $architectureTable[$Architecture]
+        'applicableArchitectures'        = 'none'
+        'minimumSupportedWindowsRelease' = $operatingSystemTable[$MinimumSupportedOperatingSystem]
+    }
 }
 
 #endregion
@@ -327,7 +396,7 @@ function New-InteropRequirementRule {
 function New-InteropAppIcon {
     <#
     .SYNOPSIS
-    Converts an image file into the icon object expected on app creation
+    Converts an image file into the base64 string expected on app creation
     #>
     [CmdletBinding()]
     param(
@@ -335,7 +404,7 @@ function New-InteropAppIcon {
         [string]$FilePath
     )
 
-    return New-IntuneWin32AppIcon -FilePath $FilePath
+    return [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($FilePath))
 }
 
 #endregion
@@ -345,25 +414,57 @@ function New-InteropAppIcon {
 function Get-InteropWin32App {
     <#
     .SYNOPSIS
-    Retrieves Win32 apps from Intune, optionally filtered by exact display name
+    Retrieves Win32 apps from Intune, optionally filtered by display name (contains match)
+
+    .DESCRIPTION
+    Native Graph implementation, mirroring the module's proven two-step pattern:
+    a paged isof-filtered list, then a per-ID GET for each app. The per-ID GETs are
+    required because the list endpoint validates $select against the base
+    microsoft.graph.mobileApp type - derived win32LobApp properties (displayVersion)
+    cannot be $select-ed there and list items are not guaranteed to carry them.
+    -DisplayName keeps the module's contains-match semantics (filtered before the
+    per-ID fetches).
     #>
     [CmdletBinding()]
     param(
         [string]$DisplayName
     )
 
-    # Forward an explicitly passed -ErrorAction to the module call: preference-variable
-    # propagation does not reliably cross script-module boundaries, so relying on it
-    # would change behavior vs the previous direct calls.
+    # Forward an explicitly passed -ErrorAction (e.g. SilentlyContinue from the
+    # post-upload retry lookup) to the Graph calls.
     $forward = @{}
     if ($PSBoundParameters.ContainsKey('ErrorAction')) {
         $forward['ErrorAction'] = $PSBoundParameters['ErrorAction']
     }
 
-    if ($DisplayName) {
-        return Get-IntuneWin32App -DisplayName $DisplayName @forward
+    $summaries = [System.Collections.Generic.List[object]]::new()
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=isof('microsoft.graph.win32LobApp')"
+    while ($uri) {
+        $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject @forward
+        if ($null -eq $response) {
+            # Request failed under a suppressed error action - return what we have
+            break
+        }
+        foreach ($item in @($response.value)) {
+            $summaries.Add($item)
+        }
+        $uri = $response.'@odata.nextLink'
     }
-    return Get-IntuneWin32App @forward
+
+    if ($DisplayName) {
+        # Literal case-insensitive contains rather than -like: app names with wildcard
+        # metacharacters (e.g. '[') would otherwise fail to match themselves
+        $summaries = @($summaries | Where-Object { $_.displayName -and $_.displayName.Contains($DisplayName, [System.StringComparison]::OrdinalIgnoreCase) })
+    }
+
+    $apps = [System.Collections.Generic.List[object]]::new()
+    foreach ($summary in $summaries) {
+        $app = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($summary.id)" -OutputType PSObject @forward
+        if ($null -ne $app) {
+            $apps.Add($app)
+        }
+    }
+    return $apps
 }
 
 function Publish-InteropWin32App {
@@ -407,12 +508,17 @@ function Get-InteropAppAssignment {
 
     $targets = @()
     try {
-        foreach ($existing in @(Get-IntuneWin32AppAssignment -ID $AppId -ErrorAction Stop)) {
-            switch -Wildcard ($existing.Type) {
-                '*allLicensedUsersAssignmentTarget' { $targets += 'AllUsers' }
-                '*allDevicesAssignmentTarget'       { $targets += 'AllDevices' }
-                '*groupAssignmentTarget'            { $targets += "Group:$($existing.GroupID)" }
+        $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+        while ($uri) {
+            $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
+            foreach ($assignment in @($response.value)) {
+                switch -Wildcard ($assignment.target.'@odata.type') {
+                    '*allLicensedUsersAssignmentTarget' { $targets += 'AllUsers' }
+                    '*allDevicesAssignmentTarget'       { $targets += 'AllDevices' }
+                    '*groupAssignmentTarget'            { $targets += "Group:$($assignment.target.groupId)" }
+                }
             }
+            $uri = $response.'@odata.nextLink'
         }
     }
     catch {

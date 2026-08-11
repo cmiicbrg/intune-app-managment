@@ -13,6 +13,12 @@
       "Filename": "audacity-win-3.7.8-64bit.exe",
       "UpdatedUtc": "2026-08-10T18:11:36Z"
     },
+    "Firefox": {
+      "Version": "153.0.4",
+      "Url": "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=de",
+      "Filename": "Firefox-Setup-153.0.4-de.exe",
+      "UpdatedUtc": "2026-08-11T14:32:57Z"
+    },
     "GeoGebra": {
       "Version": "6.0.927.1",
       "Url": "https://download.geogebra.org/package/win-msi6",

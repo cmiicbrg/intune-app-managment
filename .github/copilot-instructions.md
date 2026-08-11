@@ -13,6 +13,7 @@
 - `TenantConfig.ps1` is dot-sourced by `Deploy-ToIntune.ps1` — `$script:` scoped variables would not persist across runs, which is why `$global:` is used for caching.
 - `AppConfig.ps1` defines all application metadata as a hashtable. New apps are added there.
 - **`IntuneInterop.ps1` is the only file allowed to call `IntuneWin32App` cmdlets** or set the module's global auth state (`$Global:AuthenticationHeader`, `$Global:AccessToken`, `$Global:AccessTokenTenantID`). Everything else uses the `*-Interop*` wrapper functions, which take plain domain values and return Graph-schema shaped hashtables. CI enforces this with an AST-based boundary check in `pwsh-validate.yml`. The boundary exists so the native Graph migration (issue #9) can swap implementations without touching callers — do not add direct module calls outside the boundary.
+- **#9 migration state**: package metadata, detection/requirement rule builders, icons, and the read-only Graph queries (`Get-InteropWin32App`, `Get-InteropAppAssignment`) are native (`Invoke-MgGraphRequest` against `beta`, `-OutputType PSObject`). App creation/upload, assignments, and relationship writes are still module-backed until the later #9 phases land.
 
 ## Cryptography Design Decisions
 
@@ -32,6 +33,6 @@
 ## Build & Test
 
 - Syntax validation: `[System.Management.Automation.Language.Parser]::ParseFile()` — used in CI via `.github/workflows/pwsh-validate.yml`
-- Pester test suite in `tests/` (Pester v5+ syntax; run: `Invoke-Pester -Path tests`). CI runs it on `windows-latest` with pinned module versions (Pester 6.0.1, IntuneWin32App 1.5.0 — bump the pins in `pwsh-validate.yml` deliberately), excluding tag `LocalOnly` (tests that need real installer binaries from `packages/`, which are not in git).
+- Pester test suite in `tests/` (Pester v5+ syntax; run: `Invoke-Pester -Path tests`). Fully offline — no Graph connection or IntuneWin32App module needed. CI runs it on `windows-latest` with Pester pinned (6.0.1 — bump the pin in `pwsh-validate.yml` deliberately), excluding tag `LocalOnly` (tests that need real installer binaries from `packages/`, which are not in git).
 - Test files copy the scripts under test to `$TestDrive` before dot-sourcing, so `$PSScriptRoot`-derived paths (`intune-tenants.json`, `AppVersions.json`, detection scripts) stay sandboxed — keep that pattern when adding tests.
 - `tests/AppConfig.Tests.ps1` is the golden guard for app-config generation: it pins the detection/requirement rule shapes and command lines that refactors (issue #8 interop isolation, #9 native Graph migration) must preserve. If it fails after an intentional contract change, update the assertions deliberately.
