@@ -49,9 +49,11 @@ jobs:
       - name: Enforce the IntuneInterop boundary
         shell: pwsh
         run: |
-          # Only IntuneInterop.ps1 may call IntuneWin32App cmdlets. AST-based, so
-          # comments and doc prose mentioning the module do not trip the check.
+          # Only IntuneInterop.ps1 may call IntuneWin32App cmdlets or assign the module's
+          # global auth state. AST-based, so comments and doc prose mentioning the module
+          # do not trip the check, and reads of the globals are not flagged.
           $violationCount = 0
+          $authGlobals = @('Global:AuthenticationHeader', 'Global:AccessToken', 'Global:AccessTokenTenantID')
 
           Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Extension -in '.ps1', '.psm1' -and $_.Name -ne 'IntuneInterop.ps1' -and $_.FullName -notmatch '[\\/]\.git[\\/]' } | ForEach-Object {
             $tokens = $null
@@ -70,6 +72,20 @@ jobs:
             foreach ($call in $calls) {
               $violationCount++
               Write-Host "::error file=$($_.FullName),line=$($call.Extent.StartLineNumber)::IntuneWin32App cmdlet called outside IntuneInterop.ps1: $($call.GetCommandName())"
+            }
+
+            $authAssignments = $ast.FindAll({ param($node)
+              $node -is [System.Management.Automation.Language.AssignmentStatementAst]
+            }, $true) | Where-Object {
+              $_.Left.FindAll({ param($n)
+                $n -is [System.Management.Automation.Language.VariableExpressionAst] -and
+                $n.VariablePath.UserPath -in $authGlobals
+              }, $true).Count -gt 0
+            }
+
+            foreach ($assignment in $authAssignments) {
+              $violationCount++
+              Write-Host "::error file=$($_.FullName),line=$($assignment.Extent.StartLineNumber)::Module auth global assigned outside IntuneInterop.ps1: $($assignment.Left.Extent.Text)"
             }
           }
 
