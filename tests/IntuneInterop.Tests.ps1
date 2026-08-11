@@ -391,6 +391,8 @@ Describe 'Publish-InteropWin32App (native create + upload)' {
 
     BeforeEach {
         $script:filesGetCount = 0
+        # Keep the suite fast: skip the real SAS-propagation and backoff sleeps
+        Mock Start-Sleep { }
         Mock Invoke-WebRequest { [PSCustomObject]@{ StatusCode = 201 } }
         Mock Invoke-RestMethod { }
         Mock Invoke-MgGraphRequest {
@@ -503,6 +505,7 @@ Describe 'Invoke-InteropAzureBlobUpload (chunking)' {
         $chunkFile = Join-Path $TestDrive 'chunky.bin'
         [System.IO.File]::WriteAllBytes($chunkFile, [byte[]](1..25))
         $script:blockIds = @()
+        Mock Start-Sleep { }
         Mock Invoke-WebRequest {
             if ($Uri -match 'blockid=([^&]+)') { $script:blockIds += $Matches[1] }
             [PSCustomObject]@{ StatusCode = 201 }
@@ -515,5 +518,37 @@ Describe 'Invoke-InteropAzureBlobUpload (chunking)' {
         $script:blockIds[0] | Should -Be ([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('0000')))
         $script:blockIds[2] | Should -Be ([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('0002')))
         Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*comp=blocklist*' -and $Body -like '*<Latest>*' } -Times 1 -Exactly
+    }
+}
+
+Describe 'Wait-InteropFileProcessing (bounded polling)' {
+    BeforeEach {
+        Mock Start-Sleep { }
+    }
+
+    It 'returns immediately on the success state' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'commitFileSuccess' } }
+        (Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1').uploadState |
+            Should -Be 'commitFileSuccess'
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
+    }
+
+    It 'polls through an unknown state until the stage succeeds' {
+        $script:waitPollCount = 0
+        Mock Invoke-MgGraphRequest {
+            $script:waitPollCount++
+            if ($script:waitPollCount -lt 3) {
+                return [PSCustomObject]@{ uploadState = 'azureStorageUriRequestSuccess' }
+            }
+            [PSCustomObject]@{ uploadState = 'azureStorageUriRenewalSuccess' }
+        }
+        (Wait-InteropFileProcessing -Stage 'AzureStorageUriRenewal' -Uri 'https://graph.test/files/1').uploadState |
+            Should -Be 'azureStorageUriRenewalSuccess'
+    }
+
+    It 'gives up after bounded polling when the state never resolves' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'somethingUnexpected' } }
+        { Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' } |
+            Should -Throw '*somethingUnexpected*'
     }
 }

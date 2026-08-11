@@ -594,7 +594,9 @@ function Publish-InteropWin32App {
         $payloadPath = Join-Path $extractDir $appInfo.FileName
         $archive = [System.IO.Compression.ZipFile]::OpenRead($AppParams.FilePath)
         try {
-            $payloadEntry = $archive.Entries | Where-Object { $_.Name -like $appInfo.FileName } | Select-Object -First 1
+            # Exact match, not -like: the filename comes from Detection.xml data and
+            # must never be interpreted as a wildcard pattern
+            $payloadEntry = $archive.Entries | Where-Object { $_.Name -eq "$($appInfo.FileName)" } | Select-Object -First 1
             if ($null -eq $payloadEntry) {
                 throw "Could not find the encrypted payload '$($appInfo.FileName)' inside the .intunewin package"
             }
@@ -636,7 +638,9 @@ function Publish-InteropWin32App {
                 'macKey'               = $appInfo.EncryptionInfo.MacKey
                 'initializationVector' = $appInfo.EncryptionInfo.InitializationVector
                 'mac'                  = $appInfo.EncryptionInfo.Mac
-                'profileIdentifier'    = 'ProfileVersion1'
+                # Prefer what the packaging tool recorded; 'ProfileVersion1' is the
+                # only known value and doubles as the fallback (module parity)
+                'profileIdentifier'    = [string]::IsNullOrEmpty($appInfo.EncryptionInfo.ProfileIdentifier) ? 'ProfileVersion1' : $appInfo.EncryptionInfo.ProfileIdentifier
                 'fileDigest'           = $appInfo.EncryptionInfo.FileDigest
                 'fileDigestAlgorithm'  = $appInfo.EncryptionInfo.FileDigestAlgorithm
             }
@@ -782,6 +786,21 @@ function Wait-InteropFileProcessing {
             "$($Stage)TimedOut" {
                 Write-Warning "Intune service request for operation '$Stage' timed out"
                 return $request
+            }
+            "$($Stage)Success" {
+                # Handled by the until condition below
+            }
+            default {
+                # Unknown or stale state (e.g. the previous stage's state briefly
+                # lingering right after a renewal request): keep polling with backoff,
+                # but bounded so an unexpected state can never spin forever
+                $pollCount++
+                if ($pollCount -gt 60) {
+                    throw "Gave up waiting for operation '$Stage' - last uploadState: '$($request.uploadState)'"
+                }
+                $waitSeconds = if ($pollCount -le 5) { 1 } elseif ($pollCount -le 15) { 3 } else { 5 }
+                Write-Verbose "Unexpected uploadState '$($request.uploadState)' while waiting for '$Stage' (attempt $pollCount), waiting $waitSeconds second(s)"
+                Start-Sleep -Seconds $waitSeconds
             }
         }
     }
