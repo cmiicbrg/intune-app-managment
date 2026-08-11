@@ -498,13 +498,16 @@ function Get-InteropAppAssignment {
     $targets = @()
     try {
         $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
-        $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
-        foreach ($assignment in @($response.value)) {
-            switch -Wildcard ($assignment.target.'@odata.type') {
-                '*allLicensedUsersAssignmentTarget' { $targets += 'AllUsers' }
-                '*allDevicesAssignmentTarget'       { $targets += 'AllDevices' }
-                '*groupAssignmentTarget'            { $targets += "Group:$($assignment.target.groupId)" }
+        while ($uri) {
+            $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
+            foreach ($assignment in @($response.value)) {
+                switch -Wildcard ($assignment.target.'@odata.type') {
+                    '*allLicensedUsersAssignmentTarget' { $targets += 'AllUsers' }
+                    '*allDevicesAssignmentTarget'       { $targets += 'AllDevices' }
+                    '*groupAssignmentTarget'            { $targets += "Group:$($assignment.target.groupId)" }
+                }
             }
+            $uri = $response.'@odata.nextLink'
         }
     }
     catch {

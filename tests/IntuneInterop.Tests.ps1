@@ -147,6 +147,29 @@ Describe 'Get-InteropAppAssignment (native Graph read + normalization)' {
         $targets | Should -Be @('AllUsers', 'AllDevices', 'Group:g-123')
     }
 
+    It 'follows @odata.nextLink paging across assignment pages' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -like '*next-assignments*') {
+                [PSCustomObject]@{
+                    value = @(
+                        [PSCustomObject]@{ id = 'a2'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g-2' } }
+                    )
+                }
+            }
+            else {
+                [PSCustomObject]@{
+                    value             = @(
+                        [PSCustomObject]@{ id = 'a1'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' } }
+                    )
+                    '@odata.nextLink' = 'https://graph.microsoft.com/beta/next-assignments'
+                }
+            }
+        }
+
+        @(Get-InteropAppAssignment -AppId 'app-1') | Should -Be @('AllUsers', 'Group:g-2')
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    }
+
     It 'returns an empty array when the app has no assignments' {
         Mock Invoke-MgGraphRequest { [PSCustomObject]@{ value = @() } }
         @(Get-InteropAppAssignment -AppId 'app-1').Count | Should -Be 0
