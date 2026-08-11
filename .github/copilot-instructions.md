@@ -12,6 +12,7 @@
 - **Cache invalidation is by design minimal**: The cached master key and tenant secrets are not revalidated against `intune-tenants.json` on each use. Out-of-band config changes (manual file edits, git pulls) require `Clear-IntuneTenantCache` or a new PowerShell session. Client-secret rotation uses the documented remove+re-add flow (`Remove-IntuneTenant` then `Add-IntuneTenant`), which clears the relevant cache entries. Do not suggest adding cache-invalidation logic or config-file change detection.
 - `TenantConfig.ps1` is dot-sourced by `Deploy-ToIntune.ps1` — `$script:` scoped variables would not persist across runs, which is why `$global:` is used for caching.
 - `AppConfig.ps1` defines all application metadata as a hashtable. New apps are added there.
+- **`IntuneInterop.ps1` is the only file allowed to call `IntuneWin32App` cmdlets** or set the module's global auth state (`$Global:AuthenticationHeader`, `$Global:AccessToken`, `$Global:AccessTokenTenantID`). Everything else uses the `*-Interop*` wrapper functions, which take plain domain values and return Graph-schema shaped hashtables. CI enforces this with an AST-based boundary check in `pwsh-validate.yml`. The boundary exists so the native Graph migration (issue #9) can swap implementations without touching callers — do not add direct module calls outside the boundary.
 
 ## Cryptography Design Decisions
 

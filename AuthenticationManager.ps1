@@ -3,15 +3,17 @@
 # Authentication Manager Module
 # Centralized authentication for Microsoft Intune operations
 
+# The Intune module's auth shim lives behind the interop boundary
+. (Join-Path $PSScriptRoot "IntuneInterop.ps1")
 
 <#
 .SYNOPSIS
     Centralized authentication management for Intune operations using Microsoft.Graph SDK
 
 .DESCRIPTION
-    This module provides unified authentication functions that replace the deprecated MSAL.PS-based
-    Connect-MSIntuneGraph with modern Microsoft.Graph SDK authentication. All IntuneWin32App cmdlets
-    are fully compatible with Microsoft.Graph authentication.
+    This module provides unified authentication functions using modern Microsoft.Graph SDK
+    authentication. The Intune module's own authentication state is prepared through the
+    IntuneInterop.ps1 boundary (Initialize-InteropAuth).
 #>
 
 function Initialize-IntuneAuthentication {
@@ -108,65 +110,9 @@ function Initialize-IntuneAuthentication {
         Write-Verbose "Auth Type: $($context.AuthType)"
         Write-Verbose "Account: $($context.Account)"
         
-        # Also authenticate IntuneWin32App module by getting a raw token
-        # The IntuneWin32App module requires its own authentication via MSAL.PS
-        # Since MSAL.PS is deprecated and potentially broken, we'll get a token directly from Azure AD
-        Write-Verbose "Authenticating IntuneWin32App module..."
-        try {
-            # Get access token directly from Azure AD
-            $tokenEndpoint = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
-            $body = @{
-                grant_type    = "client_credentials"
-                client_id     = $ClientId
-                client_secret = $ClientSecret
-                scope         = "https://graph.microsoft.com/.default"
-            }
-            
-            $response = Invoke-RestMethod -Method Post -Uri $tokenEndpoint -Body $body -ContentType "application/x-www-form-urlencoded" -ErrorAction Stop
-            $accessToken = $response.access_token
-            
-            # ExpiresOn handling for IntuneWin32App compatibility on non-English locales:
-            # - AuthenticationHeader.ExpiresOn must be [DateTime] (UTC) because
-            #   New-IntuneWin32AppSupersedence does DateTime subtraction on it.
-            # - AccessToken.ExpiresOn needs a wrapper because Test-AccessToken calls
-            #   .ToString() then parses with InvariantCulture — bare DateTime.ToString()
-            #   uses CurrentCulture which fails on e.g. German locale (dd.MM.yyyy).
-            $expiresOnUtc = (Get-Date).ToUniversalTime().AddSeconds($response.expires_in)
-            
-            $expiresOnWrapped = New-Object -TypeName PSObject
-            $expiresOnWrapped | Add-Member -MemberType NoteProperty -Name '_utc' -Value $expiresOnUtc
-            $expiresOnWrapped | Add-Member -MemberType ScriptMethod -Name 'ToUniversalTime' -Value {
-                return $this._utc
-            }
-            $expiresOnWrapped | Add-Member -MemberType ScriptMethod -Name 'ToString' -Force -Value {
-                return $this._utc.ToString('o')
-            }
-            
-            # Create the authentication header structure that IntuneWin32App expects
-            # ExpiresOn as plain [DateTime] for arithmetic support in supersedence cmdlets
-            $Global:AuthenticationHeader = @{
-                "Authorization" = "Bearer $accessToken"
-                "Content-Type"  = "application/json"
-                "ExpiresOn"     = $expiresOnUtc
-            }
-            
-            # Also set the AccessToken variable that some cmdlets check
-            # Must be PSCustomObject so Test-AccessToken can find ExpiresOn via .PSObject.Properties
-            # ExpiresOn uses wrapper for culture-invariant ToString()
-            $Global:AccessToken = [PSCustomObject]@{
-                AccessToken = $accessToken
-                ExpiresOn   = $expiresOnWrapped
-            }
-            
-            # Set tenant ID variable required by IntuneWin32App Test-AuthenticationState
-            $Global:AccessTokenTenantID = $TenantId
-            
-            Write-Verbose "IntuneWin32App authentication header configured"
-        }
-        catch {
-            Write-Warning "Failed to configure IntuneWin32App authentication: $_"
-            Write-Warning "IntuneWin32App cmdlets may not work properly"
-        }
+        # Prepare the Intune module's authentication state. The shim lives inside the
+        # interop boundary (IntuneInterop.ps1); failure warns but is non-fatal.
+        $null = Initialize-InteropAuth -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
         
         # Validate we can access Intune endpoints
         if (Test-IntuneConnection) {

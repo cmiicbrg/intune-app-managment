@@ -2,32 +2,16 @@
 
 Automated download, packaging, and deployment of Windows applications to Microsoft Intune.
 
-## ⚠️ Breaking Changes in Version 2.0.0
+## ⚠️ Upgrading from 2.x
 
-**Version 2.0.0 introduces a restructured folder layout.** All application packages have been moved to a `packages/` directory for better organization.
+Version 3.0.0 is a **breaking release**: the baseline moved from Windows PowerShell 5.1 to PowerShell 7.4+, and tenant secrets are now encrypted with AES-256-GCM. Old `intune-tenants.json` files (AES-CBC, no `version` field) are rejected — there is no migration path.
 
-### Migration from v1.x
+To upgrade:
 
-If you're upgrading from version 1.x:
-
-1. **Back up your existing app folders** (firefox, chrome, 7zip, etc.)
-2. **Create packages directory:** `New-Item -ItemType Directory -Path "packages"`
-3. **Move app folders:** `Move-Item -Path firefox,chrome,7zip,gimp,vlc,npp,affinity,inkscape,audacity,libreoffice,openshot,geogebra -Destination packages\`
-4. **Pull latest scripts** from v2.0.0
-
-Or stay on v1.0.0 by checking out the `v1.0.0` tag: `git checkout v1.0.0`
-
-### New Structure
-
-```pre
-intune-app-management/
-├── packages/           # ← All app packages now here
-│   ├── firefox/
-│   ├── chrome/
-│   └── ...
-├── Deploy-ToIntune.ps1
-└── ...
-```
+1. Install PowerShell 7.4+ if needed: `winget install --id Microsoft.PowerShell --source winget`
+2. Open your old `intune-tenants.json` and copy each tenant's name, `tenantId`, and `clientId` (these are stored in plain text — only the secret is encrypted)
+3. Delete `intune-tenants.json`
+4. Re-add each tenant: `. .\TenantConfig.ps1` then `Add-IntuneTenant -Name "YourTenant" -TenantId "..." -ClientId "..."` — you'll need the client secret from the Azure portal (create a new one if you no longer have the value)
 
 ## Features
 
@@ -275,6 +259,7 @@ intune-app-management/
 ├── AppConfig.ps1                          # Application configuration
 ├── AppVersions.json                       # Version cache (machine-maintained)
 ├── SharedFunctions.ps1                    # Shared functions
+├── IntuneInterop.ps1                      # Boundary to the IntuneWin32App module
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
 ├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
@@ -575,17 +560,6 @@ Remove-IntuneTenant -Name "OldTenant"
 # Clear cached credentials (e.g., before leaving workstation)
 Clear-IntuneTenantCache
 ```
-
-## Upgrading from 2.x
-
-Version 3.0.0 is a **breaking release**: the baseline moved from Windows PowerShell 5.1 to PowerShell 7.4+, and tenant secrets are now encrypted with AES-256-GCM. Old `intune-tenants.json` files (AES-CBC, no `version` field) are rejected — there is no migration path.
-
-To upgrade:
-
-1. Install PowerShell 7.4+ if needed: `winget install --id Microsoft.PowerShell --source winget`
-2. Open your old `intune-tenants.json` and copy each tenant's name, `tenantId`, and `clientId` (these are stored in plain text — only the secret is encrypted)
-3. Delete `intune-tenants.json`
-4. Re-add each tenant: `. .\TenantConfig.ps1` then `Add-IntuneTenant -Name "YourTenant" -TenantId "..." -ClientId "..."` — you'll need the client secret from the Azure portal (create a new one if you no longer have the value)
 
 ## Security Considerations
 

@@ -7,6 +7,9 @@
 # Import configuration
 . (Join-Path $PSScriptRoot "AppConfig.ps1")
 
+# All Intune module interaction goes through the interop boundary
+. (Join-Path $PSScriptRoot "IntuneInterop.ps1")
+
 # Function to extract version from an installer file
 # For MSI files, queries the MSI database directly via the WindowsInstaller COM object.
 # For EXE files, falls back to Get-AppLockerFileInformation, which PS 7 loads through
@@ -406,7 +409,7 @@ function Get-MsiAppConfig {
     $commonSettings = Get-CommonSettings
     
     # Get MSI metadata from .intunewin file
-    $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $IntuneWinPath
+    $IntuneWinMetaData = Get-InteropPackageMetadata -FilePath $IntuneWinPath
     
     # Determine detection method based on config
     if ($appConfig.DetectionFile) {
@@ -418,8 +421,7 @@ function Get-MsiAppConfig {
             $commonSettings.DetectionOperator
         }
         
-        $DetectionRule = New-IntuneWin32AppDetectionRuleFile `
-            -Version `
+        $DetectionRule = New-InteropFileDetectionRule `
             -Path $appConfig.DetectionPath `
             -FileOrFolder $appConfig.DetectionFile `
             -Check32BitOn64System $commonSettings.Check32BitOn64System `
@@ -433,7 +435,7 @@ function Get-MsiAppConfig {
     else {
         # Pure MSI: Product code only detection (like 7-Zip)
         # Each version has unique product code, no version checking needed
-        $DetectionRule = New-IntuneWin32AppDetectionRuleMSI `
+        $DetectionRule = New-InteropMsiDetectionRule `
             -ProductCode $IntuneWinMetaData.ApplicationInfo.MsiInfo.MsiProductCode
         
         # Use MSI metadata for version
@@ -447,7 +449,7 @@ function Get-MsiAppConfig {
     $DisplayName = $appConfig.DisplayNameTemplate -f $majorVersion
     $Description = $appConfig.Description
     
-    $RequirementRule = New-IntuneWin32AppRequirementRule `
+    $RequirementRule = New-InteropRequirementRule `
         -Architecture $commonSettings.Architecture `
         -MinimumSupportedOperatingSystem $commonSettings.MinimumOS
     
@@ -501,7 +503,6 @@ function Get-FileAppConfig {
                 $detectionOperator = "doesNotExist"
             }
             $existenceParams = @{
-                Existence            = $true
                 KeyPath              = $appConfig.DetectionPath
                 DetectionType        = $detectionOperator
                 Check32BitOn64System = $commonSettings.Check32BitOn64System
@@ -509,22 +510,20 @@ function Get-FileAppConfig {
             if ($appConfig.DetectionValueName) {
                 $existenceParams['ValueName'] = $appConfig.DetectionValueName
             }
-            $DetectionRule = New-IntuneWin32AppDetectionRuleRegistry @existenceParams
+            $DetectionRule = New-InteropRegistryExistenceDetectionRule @existenceParams
         }
         else {
-            $DetectionRule = New-IntuneWin32AppDetectionRuleRegistry `
-                -VersionComparison `
+            $DetectionRule = New-InteropRegistryVersionDetectionRule `
                 -KeyPath $appConfig.DetectionPath `
                 -ValueName $appConfig.DetectionValueName `
-                -VersionComparisonOperator $detectionOperator `
-                -VersionComparisonValue $Version `
+                -Operator $detectionOperator `
+                -VersionValue $Version `
                 -Check32BitOn64System $commonSettings.Check32BitOn64System
         }
     }
     else {
         # Default: file-based detection
-        $DetectionRule = New-IntuneWin32AppDetectionRuleFile `
-            -Version `
+        $DetectionRule = New-InteropFileDetectionRule `
             -Path $appConfig.DetectionPath `
             -FileOrFolder $appConfig.DetectionFile `
             -Check32BitOn64System $commonSettings.Check32BitOn64System `
@@ -532,7 +531,7 @@ function Get-FileAppConfig {
             -VersionValue $Version
     }
     
-    $RequirementRule = New-IntuneWin32AppRequirementRule `
+    $RequirementRule = New-InteropRequirementRule `
         -Architecture $commonSettings.Architecture `
         -MinimumSupportedOperatingSystem $commonSettings.MinimumOS
     
@@ -592,32 +591,24 @@ function Get-ScriptAppConfig {
         Write-Host "  Falling back to MSI detection..." -ForegroundColor Yellow
         
         # Fallback to MSI detection if script doesn't exist
-        $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $IntuneWinPath
-        $DetectionRule = New-IntuneWin32AppDetectionRuleMSI `
+        $IntuneWinMetaData = Get-InteropPackageMetadata -FilePath $IntuneWinPath
+        $DetectionRule = New-InteropMsiDetectionRule `
             -ProductCode $IntuneWinMetaData.ApplicationInfo.MsiInfo.MsiProductCode
     }
     else {
         # Read the detection script and inject the required version
         $scriptContent = Get-Content $scriptPath -Raw
-        
+
         # Replace the param block to inject the actual version
         $scriptWithVersion = $scriptContent -replace 'param\(\s*\[Parameter\(Mandatory=\$true\)\]\s*\[string\]\$RequiredVersion\s*\)', "`$RequiredVersion = '$Version'"
-        
-        # Create a temporary script file with the version baked in
-        $tempScriptPath = Join-Path $env:TEMP "Detect-$AppName-$Version.ps1"
-        $scriptWithVersion | Out-File -FilePath $tempScriptPath -Encoding UTF8 -Force
-        
-        # Create script detection rule
-        $DetectionRule = New-IntuneWin32AppDetectionRuleScript `
-            -ScriptFile $tempScriptPath `
+
+        $DetectionRule = New-InteropScriptDetectionRule `
+            -ScriptContent $scriptWithVersion `
             -EnforceSignatureCheck $false `
             -RunAs32Bit $false
-        
-        # Clean up temp file
-        Remove-Item $tempScriptPath -Force -ErrorAction SilentlyContinue
     }
     
-    $RequirementRule = New-IntuneWin32AppRequirementRule `
+    $RequirementRule = New-InteropRequirementRule `
         -Architecture $commonSettings.Architecture `
         -MinimumSupportedOperatingSystem $commonSettings.MinimumOS
     
@@ -634,7 +625,7 @@ function Get-ScriptAppConfig {
     # Format uninstall command based on package type
     if ($appConfig.PackageType -eq "MSI" -and $IntuneWinPath) {
         # MSI apps: use product code for uninstall
-        $IntuneWinMetaData = Get-IntuneWin32AppMetaData -FilePath $IntuneWinPath
+        $IntuneWinMetaData = Get-InteropPackageMetadata -FilePath $IntuneWinPath
         $UninstallCommand = $appConfig.UninstallCommandTemplate -f $IntuneWinMetaData.ApplicationInfo.MsiInfo.MsiProductCode
     }
     else {
