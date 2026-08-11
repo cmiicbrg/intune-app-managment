@@ -103,13 +103,13 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Versions are pinned so the golden-config tests (which execute the real
-      # IntuneWin32App rule builders) stay deterministic. Bump them deliberately.
+      # Pinned so runs stay deterministic; bump deliberately. The test suite is fully
+      # offline and no longer needs the IntuneWin32App module - the rule builders and
+      # metadata parser under test are native (IntuneInterop.ps1).
       - name: Install test dependencies
         shell: pwsh
         run: |
           Install-Module -Name Pester -RequiredVersion 6.0.1 -Force -SkipPublisherCheck -Scope CurrentUser
-          Install-Module -Name IntuneWin32App -RequiredVersion 1.5.0 -Force -Scope CurrentUser
 
       - name: Run Pester tests
         shell: pwsh

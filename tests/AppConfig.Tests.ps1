@@ -3,14 +3,12 @@
 # Golden-config guard: characterizes the exact detection/requirement rule shapes and
 # command lines that Get-MsiAppConfig / Get-FileAppConfig / Get-ScriptAppConfig produce
 # for one representative app per detection type. These tests pin the contract that the
-# issue #8 interop refactor (and later the #9 native Graph migration) must preserve.
+# #9 native Graph migration must preserve.
 #
-# Requires the IntuneWin32App module (rule builders are executed for real).
-# Get-IntuneWin32AppMetaData is mocked so no .intunewin fixture binaries are needed.
+# Fully offline: rule builders and the package metadata parser are native
+# (IntuneInterop.ps1), and a minimal .intunewin fixture zip is built in TestDrive.
 
 BeforeAll {
-    Import-Module IntuneWin32App -ErrorAction Stop
-
     # Copy the scripts to TestDrive so $PSScriptRoot-derived paths (AppVersions.json,
     # detection scripts) resolve inside the sandbox, and skip the version-cache overlay
     # so FallbackVersion values stay at their deterministic seeds.
@@ -25,16 +23,12 @@ BeforeAll {
 
     $mockProductCode = '{AAAAAAAA-BBBB-CCCC-DDDD-EEEEFFFF0000}'
 
-    # Get-IntuneWin32AppMetaData validates that -FilePath exists even when mocked
-    # (Pester mock proxies keep parameter validation), so provide a real empty file.
-    $dummyIntuneWin = Join-Path $TestDrive 'dummy.intunewin'
-    New-Item -ItemType File -Path $dummyIntuneWin -Force | Out-Null
-}
-
-Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
-    BeforeAll {
-        Mock Get-IntuneWin32AppMetaData {
-            [xml]@"
+    # Build a minimal real .intunewin fixture (a zip carrying only the Detection.xml
+    # metadata), so Get-InteropPackageMetadata is exercised for real.
+    $stagingRoot = Join-Path $TestDrive 'intunewin-staging'
+    $metadataDir = Join-Path $stagingRoot 'IntuneWinPackage\Metadata'
+    New-Item -ItemType Directory -Path $metadataDir -Force | Out-Null
+    @"
 <ApplicationInfo>
   <SetupFile>mock-setup.msi</SetupFile>
   <MsiInfo>
@@ -43,10 +37,12 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
     <MsiPublisher>Mock Publisher GmbH</MsiPublisher>
   </MsiInfo>
 </ApplicationInfo>
-"@
-        }
-    }
+"@ | Set-Content -Path (Join-Path $metadataDir 'Detection.xml')
+    $dummyIntuneWin = Join-Path $TestDrive 'dummy.intunewin'
+    [System.IO.Compression.ZipFile]::CreateFromDirectory($stagingRoot, $dummyIntuneWin)
+}
 
+Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
     Context 'Get-MsiAppConfig - SevenZip (pure MSI, ProductCodeOnly detection)' {
         BeforeAll {
             $config = Get-MsiAppConfig -AppName 'SevenZip' -Version '26.02' -SetupFile '7z2602-x64.msi' -IntuneWinPath $dummyIntuneWin
