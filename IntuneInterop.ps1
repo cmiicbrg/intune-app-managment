@@ -9,9 +9,10 @@
 # shaped hashtables, so issue #9 can swap each implementation for native Microsoft
 # Graph calls without changing any caller.
 #
-# Migration state (#9): package metadata, detection/requirement rule builders, icons,
-# read-only Graph queries, assignments, and relationship writes are native. Only app
-# creation/upload (Publish-InteropWin32App) is still backed by the IntuneWin32App module.
+# Migration state (#9): every wrapper implementation is native Microsoft Graph. The
+# IntuneWin32App module is no longer called at runtime - only the bootstrap
+# (Install-InteropModule) and the auth shim (Initialize-InteropAuth) still reference
+# it, and both go away in the final #9 cleanup phase.
 
 $script:InteropModuleName = 'IntuneWin32App'
 
@@ -476,6 +477,14 @@ function Publish-InteropWin32App {
     Hashtable with FilePath, DisplayName, Description, Publisher, AppVersion,
     InstallExperience, RestartBehavior, DetectionRule, RequirementRule,
     InstallCommandLine, UninstallCommandLine, and optionally Icon / Verbose.
+
+    .DESCRIPTION
+    Native Graph implementation of the module's create-and-upload sequence:
+    build the win32LobApp body, POST the app, create a content version and file
+    entry, extract the pre-encrypted payload from the .intunewin package, upload
+    it to Azure Storage in chunks, commit the file with the fileEncryptionInfo
+    from Detection.xml, and mark the content version committed. Throws on failure
+    (callers recover via their existing retry-lookup path).
     #>
     [CmdletBinding()]
     param(
@@ -483,7 +492,177 @@ function Publish-InteropWin32App {
         [hashtable]$AppParams
     )
 
-    return Add-IntuneWin32App @AppParams -ErrorAction Stop
+    if ($AppParams['Verbose']) {
+        $VerbosePreference = 'Continue'
+    }
+
+    Write-Verbose "Attempting to gather additional meta data from .intunewin file: $($AppParams.FilePath)"
+    $metadata = Get-InteropPackageMetadata -FilePath $AppParams.FilePath
+    if ($null -eq $metadata) {
+        throw "Could not read metadata from .intunewin file '$($AppParams.FilePath)'"
+    }
+    $appInfo = $metadata.ApplicationInfo
+
+    # Build the win32LobApp body. This repository always provides explicit install and
+    # uninstall command lines, which is the module's 'EXE' body shape - msiInformation
+    # is never sent, matching how every app (MSI packages included) has always been
+    # deployed here.
+    $body = [ordered]@{
+        '@odata.type'           = '#microsoft.graph.win32LobApp'
+        'description'           = $AppParams.Description
+        'developer'             = ''
+        'displayVersion'        = $AppParams.AppVersion
+        'owner'                 = ''
+        'notes'                 = ''
+        'informationUrl'        = ''
+        'privacyInformationUrl' = ''
+        'isFeatured'            = $false
+        'displayName'           = $AppParams.DisplayName
+        'fileName'              = $appInfo.FileName
+        'setupFilePath'         = $appInfo.SetupFile
+        'installCommandLine'    = $AppParams.InstallCommandLine
+        'uninstallCommandLine'  = $AppParams.UninstallCommandLine
+        'installExperience'     = @{
+            'runAsAccount'          = $AppParams.InstallExperience
+            'deviceRestartBehavior' = $AppParams.RestartBehavior
+            'maxRunTimeInMinutes'   = 60
+        }
+        'publisher'             = $AppParams.Publisher
+        'runAs32bit'            = $false
+    }
+
+    $requirementRule = $AppParams.RequirementRule
+    if ($requirementRule) {
+        $body['minimumSupportedWindowsRelease'] = $requirementRule['minimumSupportedWindowsRelease']
+        if ($requirementRule['allowedArchitectures']) {
+            $body['allowedArchitectures'] = $requirementRule['allowedArchitectures']
+            $body['applicableArchitectures'] = 'none'
+        }
+        else {
+            $body['applicableArchitectures'] = $requirementRule['applicableArchitectures']
+        }
+        foreach ($ruleProperty in 'minimumFreeDiskSpaceInMB', 'minimumMemoryInMB', 'minimumNumberOfProcessors', 'minimumCpuSpeedInMHz') {
+            if ($requirementRule[$ruleProperty]) {
+                $body[$ruleProperty] = $requirementRule[$ruleProperty]
+            }
+        }
+    }
+    else {
+        # Module defaults when no requirement rule is given
+        $body['applicableArchitectures'] = 'x64,x86'
+        $body['minimumSupportedWindowsRelease'] = '2H20'
+    }
+
+    $body['detectionRules'] = @($AppParams.DetectionRule)
+
+    # Default return code set (module parity)
+    $body['returnCodes'] = @(
+        @{ 'returnCode' = 0; 'type' = 'success' }
+        @{ 'returnCode' = 1707; 'type' = 'success' }
+        @{ 'returnCode' = 3010; 'type' = 'softReboot' }
+        @{ 'returnCode' = 1641; 'type' = 'hardReboot' }
+        @{ 'returnCode' = 1618; 'type' = 'retry' }
+    )
+
+    if ($AppParams.Icon) {
+        $body['largeIcon'] = @{
+            'type'  = 'image/png'
+            'value' = $AppParams.Icon
+        }
+    }
+
+    # Create the app
+    Write-Verbose 'Attempting to create Win32 app using constructed body'
+    $app = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceAppManagement/mobileApps' -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+    if ($app.'@odata.type' -notlike '#microsoft.graph.win32LobApp') {
+        throw "Failed to create Win32 app - unexpected response type '$($app.'@odata.type')'"
+    }
+    Write-Verbose "Successfully created Win32 app with ID: $($app.id)"
+
+    # Create the content version
+    $appUri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($app.id)"
+    $contentVersion = Invoke-MgGraphRequest -Method POST -Uri "$appUri/microsoft.graph.win32LobApp/contentVersions" -Body '{}' -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+    if ([string]::IsNullOrEmpty($contentVersion.id)) {
+        throw 'Failed to create the contentVersions resource for the Win32 app'
+    }
+    Write-Verbose "Successfully created contentVersions resource with ID: $($contentVersion.id)"
+
+    # Extract the pre-encrypted payload from the .intunewin package
+    $extractDir = Join-Path ([System.IO.Path]::GetTempPath()) ('InteropExpand-{0}' -f [guid]::NewGuid().ToString('N'))
+    try {
+        New-Item -ItemType Directory -Path $extractDir -Force | Out-Null
+        $payloadPath = Join-Path $extractDir $appInfo.FileName
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($AppParams.FilePath)
+        try {
+            $payloadEntry = $archive.Entries | Where-Object { $_.Name -like $appInfo.FileName } | Select-Object -First 1
+            if ($null -eq $payloadEntry) {
+                throw "Could not find the encrypted payload '$($appInfo.FileName)' inside the .intunewin package"
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($payloadEntry, $payloadPath, $true)
+        }
+        finally {
+            $archive.Dispose()
+        }
+
+        # Create the content file entry and wait for the Azure Storage SAS URI
+        Write-Verbose 'Constructing Win32 app content file body for uploading of .intunewin file'
+        $fileBody = [ordered]@{
+            '@odata.type'   = '#microsoft.graph.mobileAppContentFile'
+            'name'          = [System.IO.Path]::GetFileName($AppParams.FilePath)
+            'size'          = [int64]$appInfo.UnencryptedContentSize
+            'sizeEncrypted' = (Get-Item -Path $payloadPath).Length
+            'manifest'      = $null
+            'isDependency'  = $false
+        }
+        $contentFile = Invoke-MgGraphRequest -Method POST -Uri "$appUri/microsoft.graph.win32LobApp/contentVersions/$($contentVersion.id)/files" -Body ($fileBody | ConvertTo-Json) -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+        if ([string]::IsNullOrEmpty($contentFile.id)) {
+            throw 'Failed to create the contentVersions files resource for the Win32 app'
+        }
+
+        $filesUri = "$appUri/microsoft.graph.win32LobApp/contentVersions/$($contentVersion.id)/files/$($contentFile.id)"
+        Write-Verbose 'Waiting for Intune service to process contentVersions/files request'
+        $processedFile = Wait-InteropFileProcessing -Stage 'AzureStorageUriRequest' -Uri $filesUri
+        if ($processedFile.uploadState -notlike 'azureStorageUriRequestSuccess') {
+            throw "Azure Storage URI request failed with uploadState: $($processedFile.uploadState)"
+        }
+
+        # Upload the payload in chunks
+        Invoke-InteropAzureBlobUpload -StorageUri $processedFile.azureStorageUri -FilePath $payloadPath -FilesUri $filesUri
+
+        # Commit the file with the encryption info the packaging tool recorded
+        $commitBody = @{
+            'fileEncryptionInfo' = [ordered]@{
+                'encryptionKey'        = $appInfo.EncryptionInfo.EncryptionKey
+                'macKey'               = $appInfo.EncryptionInfo.MacKey
+                'initializationVector' = $appInfo.EncryptionInfo.InitializationVector
+                'mac'                  = $appInfo.EncryptionInfo.Mac
+                'profileIdentifier'    = 'ProfileVersion1'
+                'fileDigest'           = $appInfo.EncryptionInfo.FileDigest
+                'fileDigestAlgorithm'  = $appInfo.EncryptionInfo.FileDigestAlgorithm
+            }
+        }
+        $null = Invoke-MgGraphRequest -Method POST -Uri "$filesUri/commit" -Body ($commitBody | ConvertTo-Json) -ContentType 'application/json' -ErrorAction Stop
+
+        Write-Verbose 'Waiting for Intune service to process the commit file request'
+        $commitResult = Wait-InteropFileProcessing -Stage 'CommitFile' -Uri $filesUri
+        if ($commitResult.uploadState -notlike 'commitFileSuccess') {
+            throw "Commit file request failed with uploadState: $($commitResult.uploadState)"
+        }
+
+        # Mark the content version as committed and return the final app object
+        Write-Verbose "Updating committedContentVersion property with ID '$($contentVersion.id)' for Win32 app with ID: $($app.id)"
+        $patchBody = [ordered]@{
+            '@odata.type'             = '#microsoft.graph.win32LobApp'
+            'committedContentVersion' = $contentVersion.id
+        }
+        $null = Invoke-MgGraphRequest -Method PATCH -Uri $appUri -Body ($patchBody | ConvertTo-Json) -ContentType 'application/json' -ErrorAction Stop
+
+        Write-Verbose 'Successfully created Win32 app and committed file content to Azure Storage blob'
+        return Invoke-MgGraphRequest -Method GET -Uri $appUri -OutputType PSObject -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -Path $extractDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 #endregion
@@ -565,6 +744,155 @@ function Get-InteropAppRelationship {
         return @($relationships | Where-Object { $_.'@odata.type' -eq $ODataType })
     }
     return $relationships
+}
+
+function Wait-InteropFileProcessing {
+    <#
+    .SYNOPSIS
+    Internal: polls a contentVersions file resource until the given stage completes
+
+    .DESCRIPTION
+    Returns the resource once uploadState reaches <Stage>Success, <Stage>Failed, or
+    <Stage>TimedOut, using the module's original backoff (1s for the first 5 polls,
+    then 3s, then 5s).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Stage,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Uri
+    )
+
+    $pollCount = 0
+    do {
+        $request = Invoke-MgGraphRequest -Method GET -Uri $Uri -OutputType PSObject -ErrorAction Stop
+        switch ($request.uploadState) {
+            "$($Stage)Pending" {
+                $pollCount++
+                $waitSeconds = if ($pollCount -le 5) { 1 } elseif ($pollCount -le 15) { 3 } else { 5 }
+                Write-Verbose "Intune service request for operation '$Stage' is in pending state (attempt $pollCount), waiting $waitSeconds second(s)"
+                Start-Sleep -Seconds $waitSeconds
+            }
+            "$($Stage)Failed" {
+                Write-Warning "Intune service request for operation '$Stage' failed"
+                return $request
+            }
+            "$($Stage)TimedOut" {
+                Write-Warning "Intune service request for operation '$Stage' timed out"
+                return $request
+            }
+        }
+    }
+    until ($request.uploadState -like "$($Stage)Success")
+
+    Write-Verbose "Intune service request for operation '$Stage' was successful with uploadState: $($request.uploadState)"
+    return $request
+}
+
+function Invoke-InteropAzureBlobUpload {
+    <#
+    .SYNOPSIS
+    Internal: uploads a file to the Azure Storage block blob behind a SAS URI
+
+    .DESCRIPTION
+    6 MiB PutBlock chunks with retry, SAS URI renewal via /renewUpload when the
+    upload runs long (the SAS is only valid for a few minutes), and a final
+    PutBlockList commit - the module's proven sequence.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StorageUri,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        # Full Graph URI of the contentVersions file resource (for SAS renewal)
+        [Parameter(Mandatory = $true)]
+        [string]$FilesUri,
+
+        [int64]$ChunkSizeBytes = 6MB
+    )
+
+    Write-Verbose 'Waiting for Azure Storage SAS token propagation'
+    Start-Sleep -Seconds 2
+
+    $sasRenewalTimer = [System.Diagnostics.Stopwatch]::StartNew()
+    $fileSize = (Get-Item -Path $FilePath).Length
+    $chunkCount = [System.Math]::Ceiling($fileSize / $ChunkSizeBytes)
+    $reader = [System.IO.BinaryReader]::new([System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite))
+    try {
+        $chunkIds = @()
+        for ($chunk = 0; $chunk -lt $chunkCount; $chunk++) {
+            $chunkId = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($chunk.ToString('0000')))
+            $chunkIds += $chunkId
+            $start = $chunk * $ChunkSizeBytes
+            $length = [int][System.Math]::Min($ChunkSizeBytes, $fileSize - $start)
+            $bytes = $reader.ReadBytes($length)
+            $currentChunk = $chunk + 1
+            Write-Verbose "Uploading file to Azure Storage blob, processing chunk '$currentChunk' of '$chunkCount'"
+
+            $uploaded = $false
+            for ($attempt = 1; $attempt -le 8; $attempt++) {
+                try {
+                    $null = Invoke-WebRequest -Uri "$StorageUri&comp=block&blockid=$chunkId" -Method Put -Headers @{ 'x-ms-blob-type' = 'BlockBlob' } -Body $bytes -ErrorAction Stop
+                    $uploaded = $true
+                    break
+                }
+                catch {
+                    $delay = Get-Random -Minimum 7 -Maximum 30
+                    Write-Warning "Failed to upload chunk $currentChunk of $chunkCount (attempt $attempt of 8), retrying in $delay seconds: $($_.Exception.Message)"
+                    Start-Sleep -Seconds $delay
+                }
+            }
+            if (-not $uploaded) {
+                throw "Failed to upload chunk $currentChunk of $chunkCount after 8 attempts"
+            }
+
+            # Renew the SAS URI before it expires on long uploads (~7.5 minutes elapsed)
+            if (($currentChunk -lt $chunkCount) -and ($sasRenewalTimer.ElapsedMilliseconds -ge 450000)) {
+                Write-Verbose 'SAS Uri renewal is required, attempting to renew'
+                try {
+                    $null = Invoke-MgGraphRequest -Method POST -Uri "$FilesUri/renewUpload" -Body '{}' -ContentType 'application/json' -ErrorAction Stop
+                    $renewed = Wait-InteropFileProcessing -Stage 'AzureStorageUriRenewal' -Uri $FilesUri
+                    if ($renewed.uploadState -like 'azureStorageUriRenewalSuccess') {
+                        $StorageUri = $renewed.azureStorageUri
+                        $sasRenewalTimer.Restart()
+                    }
+                    else {
+                        Write-Warning 'SAS Uri renewal failed, continuing with the existing Uri'
+                    }
+                }
+                catch {
+                    Write-Warning "SAS Uri renewal attempt failed, continuing with the existing Uri: $($_.Exception.Message)"
+                }
+            }
+        }
+
+        # Commit the block list
+        $blockListXml = '<?xml version="1.0" encoding="utf-8"?><BlockList>' + (($chunkIds | ForEach-Object { "<Latest>$_</Latest>" }) -join '') + '</BlockList>'
+        $finalized = $false
+        for ($attempt = 1; $attempt -le 8; $attempt++) {
+            try {
+                $null = Invoke-RestMethod -Uri "$StorageUri&comp=blocklist" -Method Put -Body $blockListXml -ContentType 'text/plain; charset=UTF-8' -ErrorAction Stop
+                $finalized = $true
+                break
+            }
+            catch {
+                $delay = Get-Random -Minimum 7 -Maximum 30
+                Write-Warning "Failed to finalize the blob upload (attempt $attempt of 8), retrying in $delay seconds: $($_.Exception.Message)"
+                Start-Sleep -Seconds $delay
+            }
+        }
+        if (-not $finalized) {
+            throw 'Failed to finalize the Azure Storage blob upload after 8 attempts'
+        }
+    }
+    finally {
+        $reader.Dispose()
+    }
 }
 
 #endregion
