@@ -259,7 +259,9 @@ function New-InteropRegistryExistenceDetectionRule {
         [ValidateSet('exists', 'doesNotExist')]
         [string]$DetectionType,
 
-        [string]$ValueName,
+        # Defaults to '' explicitly: the output shape always carries valueName, as an
+        # empty string for key-only existence checks (matching the module's output)
+        [string]$ValueName = '',
 
         [bool]$Check32BitOn64System = $false
     )
@@ -447,7 +449,9 @@ function Get-InteropWin32App {
     }
 
     if ($DisplayName) {
-        return @($apps | Where-Object { $_.displayName -like "*$DisplayName*" })
+        # Literal case-insensitive contains rather than -like: app names with wildcard
+        # metacharacters (e.g. '[') would otherwise fail to match themselves
+        return @($apps | Where-Object { $_.displayName -and $_.displayName.Contains($DisplayName, [System.StringComparison]::OrdinalIgnoreCase) })
     }
     return $apps
 }
