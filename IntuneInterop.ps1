@@ -352,10 +352,18 @@ function Get-InteropWin32App {
         [string]$DisplayName
     )
 
-    if ($DisplayName) {
-        return Get-IntuneWin32App -DisplayName $DisplayName
+    # Forward an explicitly passed -ErrorAction to the module call: preference-variable
+    # propagation does not reliably cross script-module boundaries, so relying on it
+    # would change behavior vs the previous direct calls.
+    $forward = @{}
+    if ($PSBoundParameters.ContainsKey('ErrorAction')) {
+        $forward['ErrorAction'] = $PSBoundParameters['ErrorAction']
     }
-    return Get-IntuneWin32App
+
+    if ($DisplayName) {
+        return Get-IntuneWin32App -DisplayName $DisplayName @forward
+    }
+    return Get-IntuneWin32App @forward
 }
 
 function Publish-InteropWin32App {
@@ -410,7 +418,10 @@ function Get-InteropAppAssignment {
     catch {
         Write-Verbose "Could not read existing assignments for app '$AppId': $($_.Exception.Message)"
     }
-    return , $targets
+    # Plain return: the pipeline unrolls the array and callers collect with @(...),
+    # which also yields an empty array when there are no targets. Returning ", $targets"
+    # here would make @(...) produce a nested single-element array and break -contains.
+    return $targets
 }
 
 function Add-InteropAllUsersAssignment {
