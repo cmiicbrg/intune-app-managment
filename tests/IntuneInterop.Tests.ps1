@@ -87,22 +87,32 @@ Describe 'New-InteropRequirementRule (native mapping)' {
     }
 }
 
-Describe 'Get-InteropWin32App (native Graph list)' {
+Describe 'Get-InteropWin32App (native Graph list + per-ID fetch)' {
     BeforeAll {
+        # The list responses deliberately carry ONLY id and displayName: derived
+        # win32LobApp properties (displayVersion) cannot be $select-ed on the list
+        # endpoint and are not guaranteed there, which is why the implementation must
+        # do per-ID GETs for the full objects.
         Mock Invoke-MgGraphRequest {
-            if ($Uri -like '*next-page*') {
-                # Final page: no @odata.nextLink property
+            if ($Uri -match '/mobileApps/([^/?]+)$') {
+                # Per-ID GET returns the full app object
+                $id = $Matches[1]
+                $names = @{ '1' = 'Google Chrome 151'; '2' = 'Mozilla Firefox 153 (German)'; '3' = '7-Zip 26' }
+                [PSCustomObject]@{ id = $id; displayName = $names[$id]; displayVersion = "$id.0"; createdDateTime = "2026-01-0$id" }
+            }
+            elseif ($Uri -like '*next-page*') {
+                # Final list page: no @odata.nextLink property
                 [PSCustomObject]@{
                     value = @(
-                        [PSCustomObject]@{ id = '3'; displayName = '7-Zip 26'; displayVersion = '26.02.00.0'; createdDateTime = '2026-01-03' }
+                        [PSCustomObject]@{ id = '3'; displayName = '7-Zip 26' }
                     )
                 }
             }
             else {
                 [PSCustomObject]@{
                     value             = @(
-                        [PSCustomObject]@{ id = '1'; displayName = 'Google Chrome 151'; displayVersion = '151.0'; createdDateTime = '2026-01-01' },
-                        [PSCustomObject]@{ id = '2'; displayName = 'Mozilla Firefox 153 (German)'; displayVersion = '153.0'; createdDateTime = '2026-01-02' }
+                        [PSCustomObject]@{ id = '1'; displayName = 'Google Chrome 151' },
+                        [PSCustomObject]@{ id = '2'; displayName = 'Mozilla Firefox 153 (German)' }
                     )
                     '@odata.nextLink' = 'https://graph.microsoft.com/beta/next-page'
                 }
@@ -110,20 +120,22 @@ Describe 'Get-InteropWin32App (native Graph list)' {
         }
     }
 
-    It 'follows @odata.nextLink paging and returns all apps' {
-        @(Get-InteropWin32App).Count | Should -Be 3
-        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    It 'follows @odata.nextLink paging and returns a full object per app' {
+        $result = @(Get-InteropWin32App)
+        $result.Count | Should -Be 3
+        foreach ($app in $result) {
+            $app.displayVersion | Should -Not -BeNullOrEmpty -Because 'full objects come from the per-ID GETs, not the list'
+        }
+        # 2 list pages + 3 per-ID fetches
+        Should -Invoke Invoke-MgGraphRequest -Times 5 -Exactly
     }
 
-    It 'requests only the summary properties via $select' {
-        $null = Get-InteropWin32App
-        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Uri -like '*`$select=id,displayName,displayVersion,createdDateTime*' }
-    }
-
-    It 'filters by display name with contains-match semantics' {
+    It 'filters by display name with contains-match semantics before fetching details' {
         $result = @(Get-InteropWin32App -DisplayName 'Chrome')
         $result.Count | Should -Be 1
         $result[0].id | Should -Be '1'
+        # Only the matching app is fetched individually
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Uri -match '/mobileApps/[^/?]+$' } -Times 1 -Exactly
     }
 
     It 'returns an empty result when nothing matches the display name' {

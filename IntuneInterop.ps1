@@ -417,10 +417,13 @@ function Get-InteropWin32App {
     Retrieves Win32 apps from Intune, optionally filtered by display name (contains match)
 
     .DESCRIPTION
-    Native Graph implementation. Returns summary objects carrying the properties this
-    repository consumes - id, displayName, displayVersion, createdDateTime - requested
-    via an explicit $select so they are guaranteed present in list responses.
-    -DisplayName keeps the module's contains-match semantics.
+    Native Graph implementation, mirroring the module's proven two-step pattern:
+    a paged isof-filtered list, then a per-ID GET for each app. The per-ID GETs are
+    required because the list endpoint validates $select against the base
+    microsoft.graph.mobileApp type - derived win32LobApp properties (displayVersion)
+    cannot be $select-ed there and list items are not guaranteed to carry them.
+    -DisplayName keeps the module's contains-match semantics (filtered before the
+    per-ID fetches).
     #>
     [CmdletBinding()]
     param(
@@ -428,22 +431,22 @@ function Get-InteropWin32App {
     )
 
     # Forward an explicitly passed -ErrorAction (e.g. SilentlyContinue from the
-    # post-upload retry lookup) to the Graph call.
+    # post-upload retry lookup) to the Graph calls.
     $forward = @{}
     if ($PSBoundParameters.ContainsKey('ErrorAction')) {
         $forward['ErrorAction'] = $PSBoundParameters['ErrorAction']
     }
 
-    $apps = [System.Collections.Generic.List[object]]::new()
-    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=isof('microsoft.graph.win32LobApp')&`$select=id,displayName,displayVersion,createdDateTime"
+    $summaries = [System.Collections.Generic.List[object]]::new()
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps?`$filter=isof('microsoft.graph.win32LobApp')"
     while ($uri) {
         $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject @forward
         if ($null -eq $response) {
             # Request failed under a suppressed error action - return what we have
             break
         }
-        foreach ($app in @($response.value)) {
-            $apps.Add($app)
+        foreach ($item in @($response.value)) {
+            $summaries.Add($item)
         }
         $uri = $response.'@odata.nextLink'
     }
@@ -451,7 +454,15 @@ function Get-InteropWin32App {
     if ($DisplayName) {
         # Literal case-insensitive contains rather than -like: app names with wildcard
         # metacharacters (e.g. '[') would otherwise fail to match themselves
-        return @($apps | Where-Object { $_.displayName -and $_.displayName.Contains($DisplayName, [System.StringComparison]::OrdinalIgnoreCase) })
+        $summaries = @($summaries | Where-Object { $_.displayName -and $_.displayName.Contains($DisplayName, [System.StringComparison]::OrdinalIgnoreCase) })
+    }
+
+    $apps = [System.Collections.Generic.List[object]]::new()
+    foreach ($summary in $summaries) {
+        $app = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$($summary.id)" -OutputType PSObject @forward
+        if ($null -ne $app) {
+            $apps.Add($app)
+        }
     }
     return $apps
 }
