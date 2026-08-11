@@ -751,7 +751,7 @@ function Add-InteropSupersedence {
 
     $supersedence = [ordered]@{
         '@odata.type'      = '#microsoft.graph.mobileAppSupersedence'
-        'supersedenceType' = $SupersedenceType.ToLower()
+        'supersedenceType' = $SupersedenceType.ToLowerInvariant()
         'targetId'         = $SupersededAppId
     }
 
