@@ -528,8 +528,10 @@ function Publish-InteropWin32App {
             'maxRunTimeInMinutes'   = 60
         }
         'publisher'             = $AppParams.Publisher
-        'runAs32bit'            = $false
     }
+    # Note: the module also sent 'runAs32bit = $false' here. That property does not
+    # exist on win32LobApp in the Graph schema (runAs32Bit belongs to the script
+    # detection/requirement rule types) and the service ignores it, so it is omitted.
 
     $requirementRule = $AppParams.RequirementRule
     if ($requirementRule) {

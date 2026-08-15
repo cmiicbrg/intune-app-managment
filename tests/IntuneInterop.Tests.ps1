@@ -441,7 +441,8 @@ Describe 'Publish-InteropWin32App (native create + upload)' {
             @($parsed.returnCodes).Count -eq 5 -and
             @($parsed.detectionRules).Count -eq 1 -and
             $parsed.largeIcon.value -eq 'aWNvbg==' -and
-            $parsed.PSObject.Properties.Name -notcontains 'msiInformation'
+            $parsed.PSObject.Properties.Name -notcontains 'msiInformation' -and
+            $parsed.PSObject.Properties.Name -notcontains 'runAs32bit'
         } -Times 1 -Exactly
     }
 
