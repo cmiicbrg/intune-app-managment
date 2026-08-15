@@ -758,7 +758,9 @@ function Wait-InteropFileProcessing {
     .DESCRIPTION
     Returns the resource once uploadState reaches <Stage>Success, <Stage>Failed, or
     <Stage>TimedOut, using the module's original backoff (1s for the first 5 polls,
-    then 3s, then 5s).
+    then 3s, then 5s). Waiting - whether the state is the expected Pending one or
+    something unexpected - is bounded by TimeoutSeconds of scheduled wait so a stuck
+    resource can never hang a deployment forever.
     #>
     [CmdletBinding()]
     param(
@@ -766,19 +768,18 @@ function Wait-InteropFileProcessing {
         [string]$Stage,
 
         [Parameter(Mandatory = $true)]
-        [string]$Uri
+        [string]$Uri,
+
+        # Total scheduled wait budget. Intune normally self-limits by transitioning
+        # to <Stage>TimedOut long before this; it is a safety net, not the norm.
+        [int]$TimeoutSeconds = 1800
     )
 
     $pollCount = 0
+    $scheduledWait = 0
     do {
         $request = Invoke-MgGraphRequest -Method GET -Uri $Uri -OutputType PSObject -ErrorAction Stop
         switch ($request.uploadState) {
-            "$($Stage)Pending" {
-                $pollCount++
-                $waitSeconds = if ($pollCount -le 5) { 1 } elseif ($pollCount -le 15) { 3 } else { 5 }
-                Write-Verbose "Intune service request for operation '$Stage' is in pending state (attempt $pollCount), waiting $waitSeconds second(s)"
-                Start-Sleep -Seconds $waitSeconds
-            }
             "$($Stage)Failed" {
                 Write-Warning "Intune service request for operation '$Stage' failed"
                 return $request
@@ -791,15 +792,21 @@ function Wait-InteropFileProcessing {
                 # Handled by the until condition below
             }
             default {
-                # Unknown or stale state (e.g. the previous stage's state briefly
-                # lingering right after a renewal request): keep polling with backoff,
-                # but bounded so an unexpected state can never spin forever
+                # Either the expected <Stage>Pending, or an unknown/stale state (e.g.
+                # the previous stage's state briefly lingering right after a renewal
+                # request). Both keep polling with backoff, within the shared budget.
                 $pollCount++
-                if ($pollCount -gt 60) {
-                    throw "Gave up waiting for operation '$Stage' - last uploadState: '$($request.uploadState)'"
-                }
                 $waitSeconds = if ($pollCount -le 5) { 1 } elseif ($pollCount -le 15) { 3 } else { 5 }
-                Write-Verbose "Unexpected uploadState '$($request.uploadState)' while waiting for '$Stage' (attempt $pollCount), waiting $waitSeconds second(s)"
+                $scheduledWait += $waitSeconds
+                if ($scheduledWait -gt $TimeoutSeconds) {
+                    throw "Gave up waiting for operation '$Stage' after $TimeoutSeconds seconds - last uploadState: '$($request.uploadState)'"
+                }
+                if ($request.uploadState -eq "$($Stage)Pending") {
+                    Write-Verbose "Intune service request for operation '$Stage' is in pending state (attempt $pollCount), waiting $waitSeconds second(s)"
+                }
+                else {
+                    Write-Verbose "Unexpected uploadState '$($request.uploadState)' while waiting for '$Stage' (attempt $pollCount), waiting $waitSeconds second(s)"
+                }
                 Start-Sleep -Seconds $waitSeconds
             }
         }
@@ -875,7 +882,7 @@ function Invoke-InteropAzureBlobUpload {
                 Write-Verbose 'SAS Uri renewal is required, attempting to renew'
                 try {
                     $null = Invoke-MgGraphRequest -Method POST -Uri "$FilesUri/renewUpload" -Body '{}' -ContentType 'application/json' -ErrorAction Stop
-                    $renewed = Wait-InteropFileProcessing -Stage 'AzureStorageUriRenewal' -Uri $FilesUri
+                    $renewed = Wait-InteropFileProcessing -Stage 'AzureStorageUriRenewal' -Uri $FilesUri -TimeoutSeconds 60
                     if ($renewed.uploadState -like 'azureStorageUriRenewalSuccess') {
                         $StorageUri = $renewed.azureStorageUri
                         $sasRenewalTimer.Restart()

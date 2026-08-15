@@ -533,6 +533,20 @@ Describe 'Wait-InteropFileProcessing (bounded polling)' {
         Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
     }
 
+    It 'polls through pending until the stage succeeds' {
+        $script:waitPollCount = 0
+        Mock Invoke-MgGraphRequest {
+            $script:waitPollCount++
+            if ($script:waitPollCount -lt 4) {
+                return [PSCustomObject]@{ uploadState = 'commitFilePending' }
+            }
+            [PSCustomObject]@{ uploadState = 'commitFileSuccess' }
+        }
+        (Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1').uploadState |
+            Should -Be 'commitFileSuccess'
+        Should -Invoke Invoke-MgGraphRequest -Times 4 -Exactly
+    }
+
     It 'polls through an unknown state until the stage succeeds' {
         $script:waitPollCount = 0
         Mock Invoke-MgGraphRequest {
@@ -546,9 +560,21 @@ Describe 'Wait-InteropFileProcessing (bounded polling)' {
             Should -Be 'azureStorageUriRenewalSuccess'
     }
 
-    It 'gives up after bounded polling when the state never resolves' {
+    It 'returns the failed state without throwing' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'commitFileFailed' } }
+        (Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' -WarningAction SilentlyContinue).uploadState |
+            Should -Be 'commitFileFailed'
+    }
+
+    It 'gives up when the request stays pending past the wait budget' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'commitFilePending' } }
+        { Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' -TimeoutSeconds 20 } |
+            Should -Throw '*commitFilePending*'
+    }
+
+    It 'gives up when an unknown state never resolves' {
         Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'somethingUnexpected' } }
-        { Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' } |
+        { Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' -TimeoutSeconds 20 } |
             Should -Throw '*somethingUnexpected*'
     }
 }
