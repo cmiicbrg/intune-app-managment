@@ -58,8 +58,8 @@
 
 .NOTES
     Prerequisites:
-    1. Install-Module -Name Microsoft.Graph.Authentication (and Microsoft.Graph.Groups
-       for group assignments) - or run .\Setup-Prerequisites.ps1
+    1. Install-Module -Name Microsoft.Graph.Authentication - or run .\Setup-Prerequisites.ps1
+       (Microsoft.Graph.Groups is installed on demand for group assignments)
     2. Configure tenant: Add-IntuneTenant -Name "YourTenant"
        OR provide TenantId, ClientId, ClientSecret parameters directly
 #>
@@ -139,14 +139,14 @@ if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $ShowPlan) {
     Write-Host "Credentials loaded for tenant: $TenantName (TenantId: $TenantId)" -ForegroundColor Green
 }
 
-# Check and install required modules. Only the first-party Microsoft.Graph modules are
-# needed - Intune API calls are native Graph requests (see IntuneInterop.ps1).
+# Check and install required modules. Only Microsoft.Graph.Authentication is mandatory -
+# Intune API calls are native Graph requests (see IntuneInterop.ps1). Microsoft.Graph.Groups
+# is needed only for group assignments and is resolved lazily in Set-AppAssignment.
 function Install-RequiredModules {
     Write-Host "Checking required modules..." -ForegroundColor Cyan
 
     $requiredModules = @(
-        "Microsoft.Graph.Authentication",
-        "Microsoft.Graph.Groups"
+        "Microsoft.Graph.Authentication"
     )
 
     foreach ($moduleName in $requiredModules) {
@@ -250,11 +250,14 @@ function Set-AppAssignment {
     # Resolve the Groups module once per app rather than once per group: Get-Module
     # -ListAvailable scans the whole module path, and Install-Module can prompt. If it is
     # unavailable, skip every group assignment but keep the All Users / All Devices
-    # assignments applied above.
+    # assignments applied above. Honors -SkipInstallation like Install-RequiredModules.
     $groupsModuleReady = $true
     if (@($AssignGroups).Count -gt 0) {
         try {
             if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
+                if ($SkipInstallation) {
+                    throw "Microsoft.Graph.Groups is not installed and -SkipInstallation was specified"
+                }
                 Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
                 Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
             }
