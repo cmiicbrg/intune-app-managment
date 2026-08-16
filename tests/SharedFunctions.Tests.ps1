@@ -130,6 +130,99 @@ Describe 'Test-DownloadedFileIntegrity' {
     }
 }
 
+Describe 'Get-AppFamilyBaseName' {
+    It 'takes the text before the version placeholder from a template' {
+        Get-AppFamilyBaseName -DisplayNameTemplate 'Mozilla Firefox {0} (German)' | Should -Be 'Mozilla Firefox'
+        Get-AppFamilyBaseName -DisplayNameTemplate '7-Zip {0}' | Should -Be '7-Zip'
+    }
+
+    It 'takes the text before the first version number from a display name' {
+        Get-AppFamilyBaseName -DisplayName 'Mozilla Firefox 153 (German)' | Should -Be 'Mozilla Firefox'
+        Get-AppFamilyBaseName -DisplayName 'Gpg4win 5' | Should -Be 'Gpg4win' -Because 'digits inside a word are not a version'
+    }
+
+    It 'agrees between template and rendered display name for every configured app' {
+        # This equivalence is what lets Deploy-ToIntune.ps1 (display-name based) and the inventory
+        # (template based) identify the same families
+        foreach ($name in (Get-AllAppNames)) {
+            $template = (Get-AppConfiguration -AppName $name).DisplayNameTemplate
+            $rendered = $template -f 42
+            (Get-AppFamilyBaseName -DisplayName $rendered) | Should -Be (Get-AppFamilyBaseName -DisplayNameTemplate $template) -Because "template '$template'"
+        }
+    }
+}
+
+Describe 'Get-AppFamilyCatalog / Resolve-AppFamily' {
+    BeforeAll {
+        $catalog = @(Get-AppFamilyCatalog)
+    }
+
+    It 'lists every deployable app in canonical order with label and base name' {
+        $catalog.AppConfigName | Should -Be @(Get-AllAppNames)
+        $firefox = $catalog | Where-Object AppConfigName -eq 'Firefox'
+        $firefox.Name | Should -Be 'Mozilla Firefox (German)'
+        $firefox.BaseName | Should -Be 'Mozilla Firefox'
+        $firefox.Folder | Should -Be 'firefox'
+        $firefox.PackageType | Should -Be 'EXE'
+    }
+
+    It 'resolves Intune display names to their families' {
+        (Resolve-AppFamily -DisplayName 'Google Chrome 151' -Families $catalog).AppConfigName | Should -Be 'Chrome'
+        (Resolve-AppFamily -DisplayName 'Google Drive 129' -Families $catalog).AppConfigName | Should -Be 'GoogleDrive'
+        (Resolve-AppFamily -DisplayName 'Google Earth Pro 7' -Families $catalog).AppConfigName | Should -Be 'GoogleEarthPro'
+        (Resolve-AppFamily -DisplayName 'mozilla firefox 153 (German)' -Families $catalog).AppConfigName | Should -Be 'Firefox'
+    }
+
+    It 'returns $null for apps this repository does not manage' {
+        Resolve-AppFamily -DisplayName 'Adobe Reader DC' -Families $catalog | Should -BeNullOrEmpty
+    }
+
+    It 'prefers the longest matching base name' {
+        $families = @(
+            [PSCustomObject]@{ AppConfigName = 'Short'; BaseName = 'Google Drive' },
+            [PSCustomObject]@{ AppConfigName = 'Long'; BaseName = 'Google Drive Enterprise' }
+        )
+        (Resolve-AppFamily -DisplayName 'Google Drive Enterprise 3' -Families $families).AppConfigName | Should -Be 'Long'
+        (Resolve-AppFamily -DisplayName 'Google Drive 129' -Families $families).AppConfigName | Should -Be 'Short'
+    }
+}
+
+Describe 'Get-IntuneAppVersion' {
+    It 'prefers displayVersion' {
+        $info = Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = 'Google Chrome 151'; displayVersion = '151.0.7922.109' })
+        $info.Raw | Should -Be '151.0.7922.109'
+        $info.Version | Should -Be ([version]'151.0.7922.109')
+        $info.Source | Should -Be 'displayVersion'
+    }
+
+    It 'falls back to the first dotted number in the display name' {
+        $info = Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = 'Some App 2.5.1 (x64)'; displayVersion = '' })
+        $info.Raw | Should -Be '2.5.1'
+        $info.Version | Should -Be ([version]'2.5.1')
+        $info.Source | Should -Be 'displayName'
+    }
+
+    It 'returns $null when there is no version anywhere' {
+        Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = 'Some App'; displayVersion = $null }) | Should -BeNullOrEmpty
+    }
+
+    It 'keeps Raw but leaves Version $null for values that are not a [version]' {
+        $info = Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = '7-Zip 26'; displayVersion = 'Latest' })
+        $info.Raw | Should -Be 'Latest'
+        $info.Version | Should -BeNullOrEmpty
+        $bare = Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = 'Notepad++ 8'; displayVersion = '' })
+        $bare.Raw | Should -Be '8'
+        $bare.Version | Should -BeNullOrEmpty -Because 'a bare major number is not a [version]'
+    }
+
+    It 'takes the FIRST number in the name (pre-existing Deploy-ToIntune behaviour, kept for parity)' {
+        # "7-Zip 26" yields "7", not "26". Apps deployed by this repository always carry displayVersion,
+        # so the fallback is only reached for foreign or very old apps; the quirk is pinned here so a
+        # future change to it is a deliberate one.
+        (Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = '7-Zip 26'; displayVersion = '' })).Raw | Should -Be '7'
+    }
+}
+
 # These execute against real installer binaries in packages/, which are not in git.
 # They run on a workstation with downloaded packages and are excluded in CI via -ExcludeTag LocalOnly.
 Describe 'Get-InstallerVersion (real installers)' -Tag 'LocalOnly' {

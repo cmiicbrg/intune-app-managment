@@ -111,68 +111,23 @@ param(
 $ErrorActionPreference = "Stop"
 $BaseDir = $PSScriptRoot
 
-# Import shared functions and configuration
+# Import shared functions and configuration. IntuneSession.ps1 loads AuthenticationManager.ps1
+# and TenantConfig.ps1 and provides the credential/connect bootstrap.
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
-. (Join-Path $PSScriptRoot "AuthenticationManager.ps1")
-. (Join-Path $PSScriptRoot "TenantConfig.ps1")
+. (Join-Path $PSScriptRoot "IntuneSession.ps1")
 . (Join-Path $PSScriptRoot "TenantDeployments.ps1")
 
 # Resolve TenantName to credentials if using that parameter set.
 # Skipped for -ShowPlan, which never connects and so must not prompt for the master password.
 if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $ShowPlan) {
-    Write-Host "Loading credentials for tenant '$TenantName'..." -ForegroundColor Cyan
-    $tenantCreds = Get-IntuneTenant -Name $TenantName
-    
+    $tenantCreds = Resolve-IntuneTenantCredential -TenantName $TenantName
     if ($null -eq $tenantCreds) {
-        Write-Host "Failed to retrieve credentials for tenant '$TenantName'." -ForegroundColor Red
-        Write-Host ""
-        Write-Host "To configure a new tenant, run:" -ForegroundColor Yellow
-        Write-Host "  . .\TenantConfig.ps1" -ForegroundColor Gray
-        Write-Host "  Add-IntuneTenant -Name '$TenantName'" -ForegroundColor Gray
         exit 1
     }
-    
+
     $TenantId = $tenantCreds.TenantId
     $ClientId = $tenantCreds.ClientId
     $ClientSecret = $tenantCreds.ClientSecret
-    
-    Write-Host "Credentials loaded for tenant: $TenantName (TenantId: $TenantId)" -ForegroundColor Green
-}
-
-# Check and install required modules. Only Microsoft.Graph.Authentication is mandatory -
-# Intune API calls are native Graph requests (see IntuneInterop.ps1). Microsoft.Graph.Groups
-# is needed only for group assignments and is resolved lazily in Set-AppAssignment.
-function Install-RequiredModules {
-    Write-Host "Checking required modules..." -ForegroundColor Cyan
-
-    $requiredModules = @(
-        "Microsoft.Graph.Authentication"
-    )
-
-    foreach ($moduleName in $requiredModules) {
-        if (-not (Get-Module -ListAvailable -Name $moduleName)) {
-            Write-Host "Module '$moduleName' not found. Installing..." -ForegroundColor Yellow
-            try {
-                if (-not $SkipInstallation) {
-                    Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber
-                    Write-Host "Successfully installed $moduleName" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "Skipping installation of $moduleName (use without -SkipInstallation to install)" -ForegroundColor Yellow
-                    return $false
-                }
-            }
-            catch {
-                Write-Host "Failed to install $moduleName : $_" -ForegroundColor Red
-                return $false
-            }
-        }
-        else {
-            Write-Host "Module '$moduleName' is already installed" -ForegroundColor Green
-        }
-    }
-    
-    return $true
 }
 
 # Applies an assignment spec to an app already present in Intune and returns the IDs of the
@@ -367,25 +322,21 @@ function Publish-App {
             $newestOlderVersion = $null
             
             foreach ($existingApp in $allExistingApps) {
-                # Get version from displayVersion field or parse from display name
-                $existingVersion = $null
-                
-                if ($existingApp.displayVersion) {
-                    $existingVersion = $existingApp.displayVersion
+                # Version from displayVersion, else parsed from the display name (shared helper)
+                $versionInfo = Get-IntuneAppVersion -App $existingApp
+                if ($null -eq $versionInfo) {
+                    Write-Host "    - $($existingApp.displayName) (version unknown - skipping)" -ForegroundColor Yellow
+                    continue
+                }
+
+                $existingVersion = $versionInfo.Raw
+                if ($versionInfo.Source -eq 'displayVersion') {
                     Write-Host "    - $($existingApp.displayName) (v$existingVersion)" -ForegroundColor Gray
                 }
                 else {
-                    # Try to extract version from display name
-                    if ($existingApp.displayName -match '(\d+(?:\.\d+)*)') {
-                        $existingVersion = $matches[1]
-                        Write-Host "    - $($existingApp.displayName) (v$existingVersion extracted from name)" -ForegroundColor Gray
-                    }
-                    else {
-                        Write-Host "    - $($existingApp.displayName) (version unknown - skipping)" -ForegroundColor Yellow
-                        continue
-                    }
+                    Write-Host "    - $($existingApp.displayName) (v$existingVersion extracted from name)" -ForegroundColor Gray
                 }
-                
+
                 try {
                     # Compare versions
                     $existingVer = [version]$existingVersion
@@ -677,23 +628,10 @@ else {
 }
 Write-Host ""
 
-# Build apps to deploy dynamically from AppConfig.ps1 (single source of truth).
-# Resolved before authentication because it needs no connection - which is what lets
-# -ShowPlan report the plan without credentials.
-$script:appsToDeploy = @()
-foreach ($appConfigName in (Get-AllAppNames)) {
-    $cfg = Get-AppConfiguration -AppName $appConfigName
-    if ($cfg -and $cfg.Folder -and $cfg.IntuneWinPattern) {
-        $displayName = $cfg.DisplayNameTemplate -replace '\s*\{0\}', ''
-        $script:appsToDeploy += @{
-            Name = $displayName.Trim()
-            Folder = $cfg.Folder
-            Pattern = $cfg.IntuneWinPattern
-            AppConfigName = $appConfigName
-            PackageType = $cfg.PackageType
-        }
-    }
-}
+# Build apps to deploy dynamically from AppConfig.ps1 (single source of truth) via the shared
+# family catalog. Resolved before authentication because it needs no connection - which is what
+# lets -ShowPlan report the plan without credentials.
+$script:appsToDeploy = @(Get-AppFamilyCatalog)
 
 # Explicit assignment switches always win, so every existing command line keeps working unchanged
 $explicitAssignment = $AssignToAllUsers -or $AssignToAllDevices -or [bool]$AssignToGroupName
@@ -796,31 +734,10 @@ if ($ShowPlan) {
     exit 0
 }
 
-# Check and install modules
-if (-not (Install-RequiredModules)) {
-    Write-Host "`nCannot proceed without required modules." -ForegroundColor Red
-    Write-Host "Run the script without -SkipInstallation to install them automatically." -ForegroundColor Yellow
+# Check modules and authenticate to Microsoft Intune (shared bootstrap in IntuneSession.ps1)
+if (-not (Connect-IntuneTenantSession -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret -SkipInstallation:$SkipInstallation)) {
     exit 1
 }
-
-# Authenticate to Microsoft Intune
-Write-Host "`nConnecting to Microsoft Intune..." -ForegroundColor Cyan
-Write-Host "Tenant ID: $TenantId" -ForegroundColor Gray
-
-if (-not $ClientId -or -not $ClientSecret) {
-    Write-Host "Error: ClientId and ClientSecret are required for authentication" -ForegroundColor Red
-    Write-Host "Usage: .\Deploy-ToIntune.ps1 -TenantId <tenant> -ClientId <id> -ClientSecret <secret>" -ForegroundColor Yellow
-    exit 1
-}
-
-Write-Host "Using app-based authentication (Client ID: $ClientId)" -ForegroundColor Gray
-
-if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret)) {
-    Write-Host "`nAuthentication failed. Exiting." -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Successfully connected to Microsoft Intune!" -ForegroundColor Green
 
 $deployedApps = @()
 $failedApps = @()

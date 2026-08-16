@@ -10,6 +10,116 @@
 # All Intune module interaction goes through the interop boundary
 . (Join-Path $PSScriptRoot "IntuneInterop.ps1")
 
+#region App family and version helpers
+# Shared by Deploy-ToIntune.ps1 and the inventory/cleanup tooling so "which AppConfig family does
+# this Intune app belong to, and which version is it" is answered the same way everywhere.
+
+# Base display name of an app family - the part every version shares. Derived either from the
+# AppConfig DisplayNameTemplate (the text before the "{0}" version placeholder) or from a concrete
+# Intune display name (the text before the first version number). For this repository's naming
+# convention ("<base> {0}[ suffix]") both readings are equivalent; a unit test pins that.
+function Get-AppFamilyBaseName {
+    [CmdletBinding(DefaultParameterSetName = 'Template')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Template')]
+        [string]$DisplayNameTemplate,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'DisplayName')]
+        [string]$DisplayName
+    )
+
+    if ($PSCmdlet.ParameterSetName -eq 'Template') {
+        $index = $DisplayNameTemplate.IndexOf('{0}')
+        $base = if ($index -ge 0) { $DisplayNameTemplate.Substring(0, $index) } else { $DisplayNameTemplate }
+        return $base.Trim()
+    }
+
+    # e.g. "Google Chrome 142" -> "Google Chrome"; "Mozilla Firefox 153 (German)" -> "Mozilla Firefox"
+    return ($DisplayName -replace '\s+\d+.*$', '').Trim()
+}
+
+# One entry per AppConfig app that has a package folder and pattern - the deployable set.
+# Returned in canonical app-name order (Get-AllAppNames), which is also the order Deploy-ToIntune.ps1
+# processes apps in.
+#   AppConfigName - key in AppConfig.ps1 (e.g. "Firefox")
+#   Name          - display label, template without the version placeholder (e.g. "Mozilla Firefox (German)")
+#   BaseName      - family prefix used to match Intune display names (e.g. "Mozilla Firefox")
+function Get-AppFamilyCatalog {
+    $families = @()
+    foreach ($appConfigName in (Get-AllAppNames)) {
+        $cfg = Get-AppConfiguration -AppName $appConfigName
+        if ($cfg -and $cfg.Folder -and $cfg.IntuneWinPattern) {
+            $families += [PSCustomObject]@{
+                AppConfigName = $appConfigName
+                Name          = ($cfg.DisplayNameTemplate -replace '\s*\{0\}', '').Trim()
+                BaseName      = Get-AppFamilyBaseName -DisplayNameTemplate $cfg.DisplayNameTemplate
+                Folder        = $cfg.Folder
+                Pattern       = $cfg.IntuneWinPattern
+                PackageType   = $cfg.PackageType
+            }
+        }
+    }
+    return $families
+}
+
+# Maps an Intune display name to the family it belongs to. The longest matching base name wins,
+# so a hypothetical "Google Drive Enterprise" family could never be claimed by "Google Drive".
+# Returns $null for apps this repository does not manage.
+function Resolve-AppFamily {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayName,
+
+        # Output of Get-AppFamilyCatalog
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [array]$Families
+    )
+
+    foreach ($family in ($Families | Sort-Object { $_.BaseName.Length } -Descending)) {
+        if ($DisplayName.StartsWith($family.BaseName, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $family
+        }
+    }
+    return $null
+}
+
+# The version an Intune app reports: displayVersion first, else the first dotted number in the
+# display name (older deployments left displayVersion empty). Returns $null when neither yields
+# anything. Version is the parsed [version], or $null when Raw does not parse (e.g. "Latest").
+function Get-IntuneAppVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        $App
+    )
+
+    $raw = $null
+    $source = $null
+    if ($App.displayVersion) {
+        $raw = "$($App.displayVersion)"
+        $source = 'displayVersion'
+    }
+    elseif ($App.displayName -match '(\d+(?:\.\d+)*)') {
+        $raw = $matches[1]
+        $source = 'displayName'
+    }
+
+    if ($null -eq $raw) {
+        return $null
+    }
+
+    $parsed = $null
+    $version = if ([version]::TryParse($raw, [ref]$parsed)) { $parsed } else { $null }
+
+    return [PSCustomObject]@{
+        Raw     = $raw
+        Version = $version
+        Source  = $source
+    }
+}
+
+#endregion
+
 # Function to extract version from an installer file
 # For MSI files, queries the MSI database directly via the WindowsInstaller COM object.
 # For EXE files, falls back to Get-AppLockerFileInformation, which PS 7 loads through

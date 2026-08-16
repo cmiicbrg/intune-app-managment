@@ -262,6 +262,8 @@ intune-app-management/
 ├── AppVersions.json                       # Version cache (machine-maintained)
 ├── SharedFunctions.ps1                    # Shared functions
 ├── IntuneInterop.ps1                      # Native Microsoft Graph Intune API layer
+├── IntuneSession.ps1                      # Tenant session bootstrap (credentials, modules, connect)
+├── AppRetention.ps1                       # Version retention evaluation (inventory/cleanup)
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
 ├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
@@ -361,6 +363,7 @@ Schema:
 | `AllDevices` | Assign to All Devices with intent `required` |
 | `Groups` | Array of `{ "Name": ..., "Intent": "Available" \| "Required" }`. `Intent` defaults to `Available` |
 | `{ }` | Deploy with no assignment — for dependency-only apps such as `VCRedist` |
+| `Retention` | Optional version-retention policy, on the tenant and/or on an app (see below) |
 
 Notes:
 
@@ -379,6 +382,34 @@ Notes:
 - With no plan file, or no entry for the tenant, the script behaves exactly as it did before.
 - Dependencies still resolve against the full app list, so a tenant that lists `KeePassXC` without
   `VCRedist` still gets VCRedist auto-deployed.
+
+### Version Retention (inventory and cleanup)
+
+Every deployment of a new version leaves the previous versions in Intune. That is what makes
+supersedence work, but unbounded it hits Intune's supersedence-graph limit (11 nodes) and clutters
+the Company Portal. A retention policy in the same plan file states how much history to keep:
+
+```json
+"Tenants": {
+  "School": {
+    "Retention": { "KeepNewest": 3, "KeepNewerThanWeeks": 10 },
+    "Apps": {
+      "Chrome": { "AllUsers": true, "AllDevices": true, "Retention": { "KeepNewest": 2 } }
+    }
+  }
+}
+```
+
+A version is **kept** when it is among the newest `KeepNewest` versions **or** was created within
+the last `KeepNewerThanWeeks` weeks. Defaults are 3 / 10 when omitted; an app's block overrides the
+tenant's, which overrides the defaults. `KeepNewest` can never go below 2 — Intune irrevocably
+drops Company Portal auto-update tracking for a superseded app whose assignment disappears, so the
+immediate predecessor must always survive. Always kept regardless of policy: dependency targets,
+unparseable versions, and versions with an unknown creation date. Duplicate version numbers are
+flagged for manual review, never deleted automatically.
+
+A tenant-level `Retention` block is the opt-in for automated cleanup. `Deploy-ToIntune.ps1` only
+validates these values; the inventory and cleanup tooling evaluate and act on them.
 
 ### Version Cache
 
