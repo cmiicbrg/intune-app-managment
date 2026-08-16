@@ -135,6 +135,8 @@ Describe 'Get-TenantRetentionPolicy' {
     It 'rejects strings, decimals and booleans' {
         Set-Plan '{ "Tenants": { "Contoso": { "Retention": { "KeepNewest": 2.5 }, "Apps": { "Chrome": {} } } } }'
         { Get-TenantRetentionPolicy -TenantName 'Contoso' } | Should -Throw '*whole number*'
+        Set-Plan '{ "Tenants": { "Contoso": { "Retention": { "KeepNewest": 3.0 }, "Apps": { "Chrome": {} } } } }'
+        { Get-TenantRetentionPolicy -TenantName 'Contoso' } | Should -Throw '*whole number*' -Because 'a decimal representation of a whole number is still not a JSON integer'
         Set-Plan '{ "Tenants": { "Contoso": { "Retention": { "KeepNewerThanWeeks": true }, "Apps": { "Chrome": {} } } } }'
         { Get-TenantRetentionPolicy -TenantName 'Contoso' } | Should -Throw '*whole number*'
     }

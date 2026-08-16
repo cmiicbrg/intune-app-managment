@@ -114,8 +114,23 @@ function Get-AppRetentionPlan {
         })
     }
 
-    foreach ($app in $unparseable) {
-        $ageWeeks = if ($null -ne $app.CreatedDateTime) { [math]::Round(($Now - [datetime]$app.CreatedDateTime).TotalDays / 7, 1) } else { $null }
+    # Unparseable versions last, newest-created first (unknown dates at the very end), so the
+    # output order is deterministic regardless of input order
+    $orderedUnparseable = @($unparseable | Sort-Object -Property @{ Expression = { $null -eq $_.CreatedDateTime } }, @{ Expression = 'CreatedDateTime'; Descending = $true }, 'DisplayName')
+    foreach ($app in $orderedUnparseable) {
+        $reasons = [System.Collections.Generic.List[string]]::new()
+        $reasons.Add('unparseable version - never deleted automatically')
+        $ageWeeks = $null
+        if ($null -eq $app.CreatedDateTime) {
+            $reasons.Add('unknown creation date')
+        }
+        else {
+            $ageWeeks = [math]::Round(($Now - [datetime]$app.CreatedDateTime).TotalDays / 7, 1)
+        }
+        if ($ProtectedAppIds -contains $app.Id) {
+            $reasons.Add('protected (dependency target)')
+        }
+
         $results.Add([PSCustomObject]@{
             Id              = $app.Id
             DisplayName     = $app.DisplayName
@@ -124,7 +139,7 @@ function Get-AppRetentionPlan {
             Rank            = $null
             AgeWeeks        = $ageWeeks
             Action          = 'Keep'
-            Reasons         = @('unparseable version - never deleted automatically')
+            Reasons         = @($reasons)
         })
     }
 

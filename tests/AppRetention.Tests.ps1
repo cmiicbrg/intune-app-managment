@@ -115,6 +115,19 @@ Describe 'Get-AppRetentionPlan' {
         $x.Reasons[0] | Should -Match 'unparseable'
     }
 
+    It 'lists unparseable versions after ranked ones, newest-created first, with all applicable reasons' {
+        $apps = @(
+            [PSCustomObject]@{ Id = 'u-nodate'; DisplayName = 'App Latest'; Version = $null; CreatedDateTime = $null },
+            (New-TestApp -Id 'u-old' -Version '' -WeeksOld 40 -Name 'App Old'),
+            (New-TestApp -Id 'a' -Version '2.0' -WeeksOld 1),
+            (New-TestApp -Id 'u-new' -Version '' -WeeksOld 2 -Name 'App New')
+        )
+        $plan = @(Get-AppRetentionPlan -Apps $apps -Policy $defaultPolicy -ProtectedAppIds @('u-old') -Now $now)
+        $plan.Id | Should -Be @('a', 'u-new', 'u-old', 'u-nodate')
+        ($plan | Where-Object Id -eq 'u-nodate').Reasons | Should -Contain 'unknown creation date'
+        ($plan | Where-Object Id -eq 'u-old').Reasons | Should -Contain 'protected (dependency target)'
+    }
+
     It 'keeps apps with an unknown creation date' {
         $apps = @(
             (New-TestApp -Id 'a' -Version '5.0' -WeeksOld 1),

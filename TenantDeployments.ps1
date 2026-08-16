@@ -242,8 +242,9 @@ function Get-StrictWholeNumber {
         [int]$Minimum
     )
 
-    $isWhole = ($Value -is [int]) -or ($Value -is [long]) -or (($Value -is [double] -and [math]::Floor($Value) -eq $Value))
-    if (-not $isWhole -or $Value -is [bool]) {
+    # ConvertFrom-Json yields Int64 for JSON integers and Double for anything with a decimal point,
+    # so "2.0" is rejected too: the message promises JSON integers, and a decimal is a typo here.
+    if (-not (($Value -is [int]) -or ($Value -is [long]))) {
         $shown = if ($Value -is [string]) { "`"$Value`"" } else { "$Value" }
         throw "'$Name' for '$Context' must be a whole number, got $shown. Use JSON integers, not strings or decimals."
     }

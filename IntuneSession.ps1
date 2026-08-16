@@ -28,7 +28,7 @@ function Install-RequiredModules {
             Write-Host "Module '$moduleName' not found. Installing..." -ForegroundColor Yellow
             try {
                 if (-not $SkipInstallation) {
-                    Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber
+                    Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
                     Write-Host "Successfully installed $moduleName" -ForegroundColor Green
                 }
                 else {
