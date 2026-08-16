@@ -58,9 +58,11 @@ To upgrade:
 ### Required PowerShell Modules
 
 ```powershell
-Install-Module -Name IntuneWin32App -Scope CurrentUser -Force
 Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force
+Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force   # only needed for group assignments
 ```
+
+Intune API calls are made natively through Microsoft Graph — no third-party Intune module is required.
 
 ### Required Azure AD App Registration (Recommended)
 
@@ -259,7 +261,7 @@ intune-app-management/
 ├── AppConfig.ps1                          # Application configuration
 ├── AppVersions.json                       # Version cache (machine-maintained)
 ├── SharedFunctions.ps1                    # Shared functions
-├── IntuneInterop.ps1                      # Boundary to the IntuneWin32App module
+├── IntuneInterop.ps1                      # Native Microsoft Graph Intune API layer
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
 ├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
@@ -613,6 +615,6 @@ Third-party software notices - see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.
 
 ## Credits
 
-- **IntuneWin32App Module**: [Nickolaj Andersen](https://github.com/MSEndpointMgr/IntuneWin32App)
 - **IntuneWinAppUtil**: Microsoft Win32 Content Prep Tool
+- **IntuneWin32App Module** by [Nickolaj Andersen](https://github.com/MSEndpointMgr/IntuneWin32App): powered deployments through v3.1; the native Graph implementation in `IntuneInterop.ps1` was informed by its request sequences
 - **Development Assistance**: Created with assistance from GitHub Copilot (Claude Sonnet 4.5)

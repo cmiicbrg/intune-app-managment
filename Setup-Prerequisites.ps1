@@ -86,8 +86,7 @@ Write-Host ""
 # Install required modules
 $modules = @(
     @{Name="Microsoft.Graph.Authentication"; Description="Microsoft Graph Authentication"},
-    @{Name="Microsoft.Graph.Groups"; Description="Microsoft Graph Groups Management"},
-    @{Name="IntuneWin32App"; Description="Intune Win32 App Management"}
+    @{Name="Microsoft.Graph.Groups"; Description="Microsoft Graph Groups Management"}
 )
 
 foreach ($module in $modules) {
@@ -138,16 +137,6 @@ try {
 }
 catch {
     Write-Host "[ERROR] Failed to load Microsoft Graph module" -ForegroundColor Red
-}
-
-Write-Host ""
-
-try {
-    Import-Module IntuneWin32App -ErrorAction Stop
-    Write-Host "[OK] IntuneWin32App module loaded" -ForegroundColor Green
-}
-catch {
-    Write-Host "[ERROR] Failed to load IntuneWin32App module" -ForegroundColor Red
 }
 
 Write-Host ""

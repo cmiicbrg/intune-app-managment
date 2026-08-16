@@ -50,9 +50,10 @@ jobs:
       - name: Enforce the IntuneInterop boundary
         shell: pwsh
         run: |
-          # Only IntuneInterop.ps1 may call IntuneWin32App cmdlets or assign the module's
-          # global auth state. AST-based, so comments and doc prose mentioning the module
-          # do not trip the check, and reads of the globals are not flagged.
+          # Tripwire: the third-party IntuneWin32App module was removed in 3.2.0 (native
+          # Graph in IntuneInterop.ps1). Fail on any reintroduction outside that file -
+          # cmdlet calls or assignments to the module's legacy auth globals. AST-based, so
+          # comments and doc prose mentioning the module do not trip the check.
           $violationCount = 0
           $authGlobals = @('Global:AuthenticationHeader', 'Global:AccessToken', 'Global:AccessTokenTenantID')
 
@@ -104,8 +105,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Pinned so runs stay deterministic; bump deliberately. The test suite is fully
-      # offline and no longer needs the IntuneWin32App module - the rule builders and
-      # metadata parser under test are native (IntuneInterop.ps1).
+      # offline (Graph calls are mocked).
       - name: Install test dependencies
         shell: pwsh
         run: |

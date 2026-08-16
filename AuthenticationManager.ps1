@@ -3,17 +3,14 @@
 # Authentication Manager Module
 # Centralized authentication for Microsoft Intune operations
 
-# The Intune module's auth shim lives behind the interop boundary
-. (Join-Path $PSScriptRoot "IntuneInterop.ps1")
-
 <#
 .SYNOPSIS
     Centralized authentication management for Intune operations using Microsoft.Graph SDK
 
 .DESCRIPTION
     This module provides unified authentication functions using modern Microsoft.Graph SDK
-    authentication. The Intune module's own authentication state is prepared through the
-    IntuneInterop.ps1 boundary (Initialize-InteropAuth).
+    authentication. The Connect-MgGraph session it establishes is the only credential the
+    native Graph calls in IntuneInterop.ps1 need.
 #>
 
 function Initialize-IntuneAuthentication {
@@ -109,10 +106,6 @@ function Initialize-IntuneAuthentication {
         Write-Verbose "Successfully connected to Microsoft Graph"
         Write-Verbose "Auth Type: $($context.AuthType)"
         Write-Verbose "Account: $($context.Account)"
-        
-        # Prepare the Intune module's authentication state. The shim lives inside the
-        # interop boundary (IntuneInterop.ps1); failure warns but is non-fatal.
-        $null = Initialize-InteropAuth -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
         
         # Validate we can access Intune endpoints
         if (Test-IntuneConnection) {
