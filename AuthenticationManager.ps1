@@ -294,7 +294,8 @@ function Disconnect-IntuneSession {
         
         if ($context) {
             Write-Verbose "Disconnecting from Microsoft Graph (Tenant: $($context.TenantId))..."
-            Disconnect-MgGraph -ErrorAction Stop
+            # Discard the returned context object so it doesn't dump to the console
+            $null = Disconnect-MgGraph -ErrorAction Stop
             Write-Verbose "Successfully disconnected from Microsoft Graph"
         }
         else {

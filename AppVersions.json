@@ -13,6 +13,12 @@
       "Filename": "audacity-win-3.7.8-64bit.exe",
       "UpdatedUtc": "2026-08-10T18:11:36Z"
     },
+    "Chrome": {
+      "Version": "151.0.7922.138",
+      "Url": "https://dl.google.com/chrome/install/googlechromestandaloneenterprise64.msi",
+      "Filename": "",
+      "UpdatedUtc": "2026-08-12T10:23:51Z"
+    },
     "Firefox": {
       "Version": "153.0.4",
       "Url": "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=de",

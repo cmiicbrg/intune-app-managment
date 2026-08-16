@@ -342,3 +342,240 @@ Describe 'Add-InteropDependency (native updateRelationships)' {
         Should -Invoke Invoke-MgGraphRequest -Times 0 -Exactly
     }
 }
+
+Describe 'Publish-InteropWin32App (native create + upload)' {
+    BeforeAll {
+        # Full fixture .intunewin: Detection.xml with encryption info plus the
+        # pre-encrypted payload entry the packaging tool would have produced
+        $publishStaging = Join-Path $TestDrive 'publish-staging'
+        $publishMetadataDir = Join-Path $publishStaging 'IntuneWinPackage\Metadata'
+        $publishContentsDir = Join-Path $publishStaging 'IntuneWinPackage\Contents'
+        New-Item -ItemType Directory -Path $publishMetadataDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $publishContentsDir -Force | Out-Null
+        @"
+<ApplicationInfo>
+  <Name>Mock App</Name>
+  <FileName>IntunePackage.intunewin</FileName>
+  <SetupFile>mock-setup.exe</SetupFile>
+  <UnencryptedContentSize>12345</UnencryptedContentSize>
+  <EncryptionInfo>
+    <EncryptionKey>key-base64</EncryptionKey>
+    <MacKey>mac-key-base64</MacKey>
+    <InitializationVector>iv-base64</InitializationVector>
+    <Mac>mac-base64</Mac>
+    <ProfileIdentifier>ProfileVersion1</ProfileIdentifier>
+    <FileDigest>digest-base64</FileDigest>
+    <FileDigestAlgorithm>SHA256</FileDigestAlgorithm>
+  </EncryptionInfo>
+</ApplicationInfo>
+"@ | Set-Content (Join-Path $publishMetadataDir 'Detection.xml')
+        [System.IO.File]::WriteAllBytes((Join-Path $publishContentsDir 'IntunePackage.intunewin'), [byte[]](1..64))
+        $publishPackage = Join-Path $TestDrive 'publish-fixture.intunewin'
+        [System.IO.Compression.ZipFile]::CreateFromDirectory($publishStaging, $publishPackage)
+
+        $appParams = @{
+            FilePath             = $publishPackage
+            DisplayName          = 'Mock App 1'
+            Description          = 'Mock description'
+            Publisher            = 'Mock Publisher'
+            AppVersion           = '1.2.3'
+            InstallExperience    = 'system'
+            RestartBehavior      = 'suppress'
+            DetectionRule        = [ordered]@{ '@odata.type' = '#microsoft.graph.win32LobAppFileSystemDetection'; path = 'C:\x'; fileOrFolderName = 'y.exe' }
+            RequirementRule      = [ordered]@{ allowedArchitectures = 'x64'; applicableArchitectures = 'none'; minimumSupportedWindowsRelease = 'Windows11_21H2' }
+            InstallCommandLine   = '"mock-setup.exe" /S'
+            UninstallCommandLine = '"C:\uninstall.exe" /S'
+            Icon                 = 'aWNvbg=='
+        }
+    }
+
+    BeforeEach {
+        $script:filesGetCount = 0
+        # Keep the suite fast: skip the real SAS-propagation and backoff sleeps
+        Mock Start-Sleep { }
+        Mock Invoke-WebRequest { [PSCustomObject]@{ StatusCode = 201 } }
+        Mock Invoke-RestMethod { }
+        Mock Invoke-MgGraphRequest {
+            switch -Regex ("$Method $Uri") {
+                'POST .*/mobileApps$' { return [PSCustomObject]@{ id = 'app-9'; '@odata.type' = '#microsoft.graph.win32LobApp' } }
+                'POST .*/contentVersions$' { return [PSCustomObject]@{ id = '1' } }
+                'POST .*/files$' { return [PSCustomObject]@{ id = 'file-7' } }
+                'POST .*/commit$' { return $null }
+                'GET .*/files/file-7$' {
+                    $script:filesGetCount++
+                    if ($script:filesGetCount -eq 1) {
+                        return [PSCustomObject]@{ uploadState = 'azureStorageUriRequestSuccess'; azureStorageUri = 'https://blob.test/container/file?sv=1' }
+                    }
+                    return [PSCustomObject]@{ uploadState = 'commitFileSuccess' }
+                }
+                'PATCH .*/mobileApps/app-9$' { return $null }
+                'GET .*/mobileApps/app-9$' { return [PSCustomObject]@{ id = 'app-9'; displayName = 'Mock App 1'; displayVersion = '1.2.3' } }
+            }
+        }
+    }
+
+    It 'runs the full create-upload-commit sequence and returns the final app' {
+        $result = Publish-InteropWin32App -AppParams $appParams
+        $result.id | Should -Be 'app-9'
+        $result.displayVersion | Should -Be '1.2.3'
+        # One block PUT (the payload is smaller than a chunk) and one block-list commit
+        Should -Invoke Invoke-WebRequest -Times 1 -Exactly
+        Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*comp=blocklist*' -and $Body -like '*<Latest>*' } -Times 1 -Exactly
+    }
+
+    It 'constructs the win32LobApp body with the EXE shape and requirement fields' {
+        $null = Publish-InteropWin32App -AppParams $appParams
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ("$Method $Uri" -notmatch 'POST .*/mobileApps$') { return $false }
+            $parsed = $Body | ConvertFrom-Json
+            $parsed.'@odata.type' -eq '#microsoft.graph.win32LobApp' -and
+            $parsed.displayName -eq 'Mock App 1' -and
+            $parsed.fileName -eq 'IntunePackage.intunewin' -and
+            $parsed.setupFilePath -eq 'mock-setup.exe' -and
+            $parsed.installCommandLine -eq '"mock-setup.exe" /S' -and
+            $parsed.allowedArchitectures -eq 'x64' -and
+            $parsed.applicableArchitectures -eq 'none' -and
+            $parsed.minimumSupportedWindowsRelease -eq 'Windows11_21H2' -and
+            $parsed.installExperience.runAsAccount -eq 'system' -and
+            $parsed.installExperience.deviceRestartBehavior -eq 'suppress' -and
+            @($parsed.returnCodes).Count -eq 5 -and
+            @($parsed.detectionRules).Count -eq 1 -and
+            $parsed.largeIcon.value -eq 'aWNvbg==' -and
+            $parsed.PSObject.Properties.Name -notcontains 'msiInformation' -and
+            $parsed.PSObject.Properties.Name -notcontains 'runAs32bit'
+        } -Times 1 -Exactly
+    }
+
+    It 'reports the payload sizes on the content file entry' {
+        $null = Publish-InteropWin32App -AppParams $appParams
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ("$Method $Uri" -notmatch 'POST .*/files$') { return $false }
+            $parsed = $Body | ConvertFrom-Json
+            $parsed.name -eq 'publish-fixture.intunewin' -and
+            $parsed.size -eq 12345 -and
+            $parsed.sizeEncrypted -eq 64 -and
+            $parsed.isDependency -eq $false
+        } -Times 1 -Exactly
+    }
+
+    It 'commits with the fileEncryptionInfo recorded in Detection.xml' {
+        $null = Publish-InteropWin32App -AppParams $appParams
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            if ("$Method $Uri" -notmatch 'POST .*/commit$') { return $false }
+            $info = ($Body | ConvertFrom-Json).fileEncryptionInfo
+            $info.encryptionKey -eq 'key-base64' -and
+            $info.macKey -eq 'mac-key-base64' -and
+            $info.initializationVector -eq 'iv-base64' -and
+            $info.mac -eq 'mac-base64' -and
+            $info.profileIdentifier -eq 'ProfileVersion1' -and
+            $info.fileDigest -eq 'digest-base64' -and
+            $info.fileDigestAlgorithm -eq 'SHA256'
+        } -Times 1 -Exactly
+    }
+
+    It 'marks the content version committed via PATCH' {
+        $null = Publish-InteropWin32App -AppParams $appParams
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            "$Method $Uri" -match 'PATCH .*/mobileApps/app-9$' -and
+            ($Body | ConvertFrom-Json).committedContentVersion -eq '1'
+        } -Times 1 -Exactly
+    }
+
+    It 'throws when the commit ends in a failed state' {
+        Mock Invoke-MgGraphRequest {
+            switch -Regex ("$Method $Uri") {
+                'POST .*/mobileApps$' { return [PSCustomObject]@{ id = 'app-9'; '@odata.type' = '#microsoft.graph.win32LobApp' } }
+                'POST .*/contentVersions$' { return [PSCustomObject]@{ id = '1' } }
+                'POST .*/files$' { return [PSCustomObject]@{ id = 'file-7' } }
+                'POST .*/commit$' { return $null }
+                'GET .*/files/file-7$' {
+                    $script:filesGetCount++
+                    if ($script:filesGetCount -eq 1) {
+                        return [PSCustomObject]@{ uploadState = 'azureStorageUriRequestSuccess'; azureStorageUri = 'https://blob.test/container/file?sv=1' }
+                    }
+                    return [PSCustomObject]@{ uploadState = 'commitFileFailed' }
+                }
+            }
+        }
+        { Publish-InteropWin32App -AppParams $appParams -WarningAction SilentlyContinue } | Should -Throw '*commitFileFailed*'
+    }
+}
+
+Describe 'Invoke-InteropAzureBlobUpload (chunking)' {
+    It 'splits the file into ordered chunks and commits the block list' {
+        $chunkFile = Join-Path $TestDrive 'chunky.bin'
+        [System.IO.File]::WriteAllBytes($chunkFile, [byte[]](1..25))
+        $script:blockIds = @()
+        Mock Start-Sleep { }
+        Mock Invoke-WebRequest {
+            if ($Uri -match 'blockid=([^&]+)') { $script:blockIds += $Matches[1] }
+            [PSCustomObject]@{ StatusCode = 201 }
+        }
+        Mock Invoke-RestMethod { }
+
+        Invoke-InteropAzureBlobUpload -StorageUri 'https://blob.test/c/f?sv=1' -FilePath $chunkFile -FilesUri 'https://graph.test/files/1' -ChunkSizeBytes 10
+
+        $script:blockIds.Count | Should -Be 3
+        $script:blockIds[0] | Should -Be ([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('0000')))
+        $script:blockIds[2] | Should -Be ([Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes('0002')))
+        Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*comp=blocklist*' -and $Body -like '*<Latest>*' } -Times 1 -Exactly
+    }
+}
+
+Describe 'Wait-InteropFileProcessing (bounded polling)' {
+    BeforeEach {
+        Mock Start-Sleep { }
+    }
+
+    It 'returns immediately on the success state' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'commitFileSuccess' } }
+        (Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1').uploadState |
+            Should -Be 'commitFileSuccess'
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
+    }
+
+    It 'polls through pending until the stage succeeds' {
+        $script:waitPollCount = 0
+        Mock Invoke-MgGraphRequest {
+            $script:waitPollCount++
+            if ($script:waitPollCount -lt 4) {
+                return [PSCustomObject]@{ uploadState = 'commitFilePending' }
+            }
+            [PSCustomObject]@{ uploadState = 'commitFileSuccess' }
+        }
+        (Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1').uploadState |
+            Should -Be 'commitFileSuccess'
+        Should -Invoke Invoke-MgGraphRequest -Times 4 -Exactly
+    }
+
+    It 'polls through an unknown state until the stage succeeds' {
+        $script:waitPollCount = 0
+        Mock Invoke-MgGraphRequest {
+            $script:waitPollCount++
+            if ($script:waitPollCount -lt 3) {
+                return [PSCustomObject]@{ uploadState = 'azureStorageUriRequestSuccess' }
+            }
+            [PSCustomObject]@{ uploadState = 'azureStorageUriRenewalSuccess' }
+        }
+        (Wait-InteropFileProcessing -Stage 'AzureStorageUriRenewal' -Uri 'https://graph.test/files/1').uploadState |
+            Should -Be 'azureStorageUriRenewalSuccess'
+    }
+
+    It 'returns the failed state without throwing' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'commitFileFailed' } }
+        (Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' -WarningAction SilentlyContinue).uploadState |
+            Should -Be 'commitFileFailed'
+    }
+
+    It 'gives up when the request stays pending past the wait budget' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'commitFilePending' } }
+        { Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' -TimeoutSeconds 20 } |
+            Should -Throw '*commitFilePending*'
+    }
+
+    It 'gives up when an unknown state never resolves' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ uploadState = 'somethingUnexpected' } }
+        { Wait-InteropFileProcessing -Stage 'CommitFile' -Uri 'https://graph.test/files/1' -TimeoutSeconds 20 } |
+            Should -Throw '*somethingUnexpected*'
+    }
+}
