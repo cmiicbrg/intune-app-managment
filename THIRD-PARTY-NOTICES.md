@@ -2,13 +2,6 @@
 
 This project uses or references the following third-party software:
 
-## IntuneWin32App PowerShell Module
-
-- **License**: MIT License
-- **Copyright**: Copyright (c) Nickolaj Andersen
-- **Source**: <https://github.com/MSEndpointMgr/IntuneWin32App>
-- **Usage**: Required dependency for Intune deployment functionality
-
 ## Microsoft Win32 Content Prep Tool (IntuneWinAppUtil.exe)
 
 - **License**: Microsoft Software License Terms
@@ -16,9 +9,13 @@ This project uses or references the following third-party software:
 - **Usage**: Required tool (not included - users must download separately)
 - **Note**: Subject to Microsoft's license terms. Users must obtain directly from Microsoft.
 
-## Microsoft.Graph.Authentication PowerShell Module
+## Microsoft Graph PowerShell SDK (`Microsoft.Graph.Authentication`, `Microsoft.Graph.Groups`)
 
 - **License**: MIT License
 - **Copyright**: Copyright (c) Microsoft Corporation
 - **Source**: <https://github.com/microsoftgraph/msgraph-sdk-powershell>
-- **Usage**: Required dependency for authentication to Microsoft Graph API
+- **Usage**: `Microsoft.Graph.Authentication` is required for authentication and all Microsoft Graph API calls; `Microsoft.Graph.Groups` is used to resolve Entra ID groups for group assignments
+
+## Historical note
+
+Versions up to 3.1 depended on the IntuneWin32App PowerShell module (MIT License, Copyright (c) Nickolaj Andersen, <https://github.com/MSEndpointMgr/IntuneWin32App>). Since 3.2.0, all Intune API interaction is implemented natively against Microsoft Graph and that module is no longer used or installed.

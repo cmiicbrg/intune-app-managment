@@ -1,7 +1,7 @@
 #Requires -Version 7.4
 
 # Complete Intune Win32 App Deployment Script
-# All Intune module interaction goes through the IntuneInterop.ps1 boundary
+# All Intune Graph API interaction goes through the IntuneInterop.ps1 boundary
 
 
 <#
@@ -10,8 +10,8 @@
 
 .DESCRIPTION
     This script automatically deploys all IntuneWin packages to Microsoft Intune.
-    Intune API interaction goes through IntuneInterop.ps1 (currently backed by the
-    IntuneWin32App PowerShell module).
+    Intune API interaction goes through IntuneInterop.ps1 (native Microsoft Graph
+    calls; no third-party Intune module required).
 
 .PARAMETER TenantName
     Name of pre-configured tenant from intune-tenants.json (see Add-IntuneTenant).
@@ -58,7 +58,8 @@
 
 .NOTES
     Prerequisites:
-    1. Install-Module -Name IntuneWin32App
+    1. Install-Module -Name Microsoft.Graph.Authentication - or run .\Setup-Prerequisites.ps1
+       (Microsoft.Graph.Groups is installed on demand for group assignments)
     2. Configure tenant: Add-IntuneTenant -Name "YourTenant"
        OR provide TenantId, ClientId, ClientSecret parameters directly
 #>
@@ -138,18 +139,14 @@ if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $ShowPlan) {
     Write-Host "Credentials loaded for tenant: $TenantName (TenantId: $TenantId)" -ForegroundColor Green
 }
 
-# Check and install required modules. The Intune module itself is owned by the
-# interop boundary; only the Microsoft.Graph modules are named here.
+# Check and install required modules. Only Microsoft.Graph.Authentication is mandatory -
+# Intune API calls are native Graph requests (see IntuneInterop.ps1). Microsoft.Graph.Groups
+# is needed only for group assignments and is resolved lazily in Set-AppAssignment.
 function Install-RequiredModules {
     Write-Host "Checking required modules..." -ForegroundColor Cyan
 
-    if (-not (Install-InteropModule -SkipInstallation:$SkipInstallation)) {
-        return $false
-    }
-
     $requiredModules = @(
-        "Microsoft.Graph.Authentication",
-        "Microsoft.Graph.Groups"
+        "Microsoft.Graph.Authentication"
     )
 
     foreach ($moduleName in $requiredModules) {
@@ -183,11 +180,10 @@ function Install-RequiredModules {
 #
 # Targets that are already assigned are skipped, so this is safe to call repeatedly - which is
 # what lets the "version already exists" path reconcile assignments instead of leaving them
-# stale. The check is done here rather than relying on the IntuneWin32App module's own
-# Test-IntuneWin32AppAssignment: in practice that misses existing All Users / All Devices
-# assignments, POSTs anyway, and the service rejects it with a BadRequest "The MobileApp
-# Assignment already exists". Nothing is duplicated either way, but the run is quieter and the
-# reported outcome is accurate.
+# stale. Existing targets are read up front (Get-InteropAppAssignment) rather than blindly
+# POSTing: the service rejects a duplicate with a BadRequest "The MobileApp Assignment already
+# exists". Nothing would be duplicated either way, but the run is quieter and the reported
+# outcome is accurate.
 function Set-AppAssignment {
     param(
         [Parameter(Mandatory = $true)]
@@ -254,11 +250,14 @@ function Set-AppAssignment {
     # Resolve the Groups module once per app rather than once per group: Get-Module
     # -ListAvailable scans the whole module path, and Install-Module can prompt. If it is
     # unavailable, skip every group assignment but keep the All Users / All Devices
-    # assignments applied above.
+    # assignments applied above. Honors -SkipInstallation like Install-RequiredModules.
     $groupsModuleReady = $true
     if (@($AssignGroups).Count -gt 0) {
         try {
             if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
+                if ($SkipInstallation) {
+                    throw "Microsoft.Graph.Groups is not installed and -SkipInstallation was specified"
+                }
                 Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
                 Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
             }
@@ -426,8 +425,8 @@ function Publish-App {
             # Same version already in Intune (unless ForceUpdate): skip the upload, but still
             # reconcile assignments. Adopting or changing a deployment plan for apps that are
             # already deployed would otherwise silently do nothing, even though -ShowPlan
-            # reports the new assignments. Add-IntuneWin32AppAssignment* skips targets that
-            # are already assigned, so this only fills in what is missing.
+            # reports the new assignments. Set-AppAssignment skips targets that are already
+            # assigned, so this only fills in what is missing.
             if ($sameVersionExists) {
                 Write-Host "  Version $NewVersion already exists in Intune (use -ForceUpdate to recreate the package)" -ForegroundColor Yellow
                 Write-Host "  Reconciling assignments on the existing app..." -ForegroundColor Cyan

@@ -86,8 +86,7 @@ Write-Host ""
 # Install required modules
 $modules = @(
     @{Name="Microsoft.Graph.Authentication"; Description="Microsoft Graph Authentication"},
-    @{Name="Microsoft.Graph.Groups"; Description="Microsoft Graph Groups Management"},
-    @{Name="IntuneWin32App"; Description="Intune Win32 App Management"}
+    @{Name="Microsoft.Graph.Groups"; Description="Microsoft Graph Groups Management"}
 )
 
 foreach ($module in $modules) {
@@ -130,24 +129,16 @@ foreach ($module in $modules) {
     Write-Host ""
 }
 
-# Test connection capability
-Write-Host "Testing Microsoft Graph connectivity..." -ForegroundColor Cyan
-try {
-    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-    Write-Host "[OK] Microsoft Graph module loaded" -ForegroundColor Green
-}
-catch {
-    Write-Host "[ERROR] Failed to load Microsoft Graph module" -ForegroundColor Red
-}
-
-Write-Host ""
-
-try {
-    Import-Module IntuneWin32App -ErrorAction Stop
-    Write-Host "[OK] IntuneWin32App module loaded" -ForegroundColor Green
-}
-catch {
-    Write-Host "[ERROR] Failed to load IntuneWin32App module" -ForegroundColor Red
+# Verify every required module actually loads, not just that it installed
+Write-Host "Verifying Microsoft Graph modules load..." -ForegroundColor Cyan
+foreach ($module in $modules) {
+    try {
+        Import-Module $module.Name -ErrorAction Stop
+        Write-Host "[OK] $($module.Name) loaded" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[ERROR] Failed to load $($module.Name): $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
 Write-Host ""

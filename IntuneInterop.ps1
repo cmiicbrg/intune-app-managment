@@ -1,147 +1,18 @@
 #Requires -Version 7.4
 
 # IntuneInterop.ps1
-# The single boundary between this repository and the external IntuneWin32App module.
+# The single boundary between this repository and the Microsoft Graph Intune APIs.
 #
-# No other script may call IntuneWin32App cmdlets or touch the module's internals -
-# CI enforces this (see the boundary check in pwsh-validate.yml). Wrapper functions
-# accept plain domain values (strings, bools, hashtables) and return Graph-schema
-# shaped hashtables, so issue #9 can swap each implementation for native Microsoft
-# Graph calls without changing any caller.
+# Every wrapper here is a native Graph implementation (Invoke-MgGraphRequest against
+# the beta endpoint, riding the Connect-MgGraph session that AuthenticationManager.ps1
+# establishes). Wrapper functions accept plain domain values (strings, bools,
+# hashtables) and return Graph-schema shaped hashtables, so callers never deal with
+# request bodies, paging, or upload mechanics.
 #
-# Migration state (#9): every wrapper implementation is native Microsoft Graph. The
-# IntuneWin32App module is no longer called at runtime - only the bootstrap
-# (Install-InteropModule) and the auth shim (Initialize-InteropAuth) still reference
-# it, and both go away in the final #9 cleanup phase.
-
-$script:InteropModuleName = 'IntuneWin32App'
-
-#region Module bootstrap
-
-function Install-InteropModule {
-    <#
-    .SYNOPSIS
-    Ensures the backing module is installed, installing it unless -SkipInstallation
-
-    .OUTPUTS
-    Boolean - $true when the module is available
-    #>
-    [CmdletBinding()]
-    param(
-        [switch]$SkipInstallation
-    )
-
-    if (Get-Module -ListAvailable -Name $script:InteropModuleName) {
-        Write-Host "Module '$script:InteropModuleName' is already installed" -ForegroundColor Green
-        return $true
-    }
-
-    Write-Host "Module '$script:InteropModuleName' not found. Installing..." -ForegroundColor Yellow
-    if ($SkipInstallation) {
-        Write-Host "Skipping installation of $script:InteropModuleName (use without -SkipInstallation to install)" -ForegroundColor Yellow
-        return $false
-    }
-
-    try {
-        Install-Module -Name $script:InteropModuleName -Scope CurrentUser -Force -AllowClobber
-        Write-Host "Successfully installed $script:InteropModuleName" -ForegroundColor Green
-        return $true
-    }
-    catch {
-        Write-Host "Failed to install $script:InteropModuleName : $_" -ForegroundColor Red
-        return $false
-    }
-}
-
-#endregion
-
-#region Authentication
-
-function Initialize-InteropAuth {
-    <#
-    .SYNOPSIS
-    Prepares the backing module's authentication state from client credentials
-
-    .DESCRIPTION
-    The IntuneWin32App module authenticates via the deprecated MSAL.PS, so instead a
-    token is requested directly from Entra ID and the global variables the module's
-    Test-AuthenticationState expects are populated. Failure is non-fatal: a warning is
-    written and $false returned, matching the previous inline behavior.
-    #>
-    [CmdletBinding()]
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', '')]
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$TenantId,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ClientId,
-
-        [Parameter(Mandatory = $true)]
-        [string]$ClientSecret
-    )
-
-    Write-Verbose "Authenticating $script:InteropModuleName module..."
-    try {
-        # Get access token directly from Entra ID
-        $tokenEndpoint = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
-        $body = @{
-            grant_type    = "client_credentials"
-            client_id     = $ClientId
-            client_secret = $ClientSecret
-            scope         = "https://graph.microsoft.com/.default"
-        }
-
-        $response = Invoke-RestMethod -Method Post -Uri $tokenEndpoint -Body $body -ContentType "application/x-www-form-urlencoded" -ErrorAction Stop
-        $accessToken = $response.access_token
-
-        # ExpiresOn handling for module compatibility on non-English locales:
-        # - AuthenticationHeader.ExpiresOn must be [DateTime] (UTC) because
-        #   New-IntuneWin32AppSupersedence does DateTime subtraction on it.
-        # - AccessToken.ExpiresOn needs a wrapper because Test-AccessToken calls
-        #   .ToString() then parses with InvariantCulture - bare DateTime.ToString()
-        #   uses CurrentCulture which fails on e.g. German locale (dd.MM.yyyy).
-        $expiresOnUtc = (Get-Date).ToUniversalTime().AddSeconds($response.expires_in)
-
-        $expiresOnWrapped = New-Object -TypeName PSObject
-        $expiresOnWrapped | Add-Member -MemberType NoteProperty -Name '_utc' -Value $expiresOnUtc
-        $expiresOnWrapped | Add-Member -MemberType ScriptMethod -Name 'ToUniversalTime' -Value {
-            return $this._utc
-        }
-        $expiresOnWrapped | Add-Member -MemberType ScriptMethod -Name 'ToString' -Force -Value {
-            return $this._utc.ToString('o')
-        }
-
-        # Create the authentication header structure that the module expects
-        # ExpiresOn as plain [DateTime] for arithmetic support in supersedence cmdlets
-        $Global:AuthenticationHeader = @{
-            "Authorization" = "Bearer $accessToken"
-            "Content-Type"  = "application/json"
-            "ExpiresOn"     = $expiresOnUtc
-        }
-
-        # Also set the AccessToken variable that some cmdlets check
-        # Must be PSCustomObject so Test-AccessToken can find ExpiresOn via .PSObject.Properties
-        # ExpiresOn uses wrapper for culture-invariant ToString()
-        $Global:AccessToken = [PSCustomObject]@{
-            AccessToken = $accessToken
-            ExpiresOn   = $expiresOnWrapped
-        }
-
-        # Set tenant ID variable required by the module's Test-AuthenticationState
-        $Global:AccessTokenTenantID = $TenantId
-
-        Write-Verbose "$script:InteropModuleName authentication header configured"
-        return $true
-    }
-    catch {
-        Write-Warning "Failed to configure $script:InteropModuleName authentication: $_"
-        Write-Warning "$script:InteropModuleName cmdlets may not work properly"
-        return $false
-    }
-}
-
-#endregion
+# History: this file began (issue #8) as the isolation layer around the third-party
+# IntuneWin32App module and was then migrated function by function to native Graph
+# (issue #9). The module dependency is gone; the boundary check in pwsh-validate.yml
+# remains as a tripwire so it is never reintroduced outside this file.
 
 #region Package metadata
 
