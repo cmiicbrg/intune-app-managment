@@ -129,14 +129,16 @@ foreach ($module in $modules) {
     Write-Host ""
 }
 
-# Test connection capability
-Write-Host "Testing Microsoft Graph connectivity..." -ForegroundColor Cyan
-try {
-    Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
-    Write-Host "[OK] Microsoft Graph module loaded" -ForegroundColor Green
-}
-catch {
-    Write-Host "[ERROR] Failed to load Microsoft Graph module" -ForegroundColor Red
+# Verify every required module actually loads, not just that it installed
+Write-Host "Verifying Microsoft Graph modules load..." -ForegroundColor Cyan
+foreach ($module in $modules) {
+    try {
+        Import-Module $module.Name -ErrorAction Stop
+        Write-Host "[OK] $($module.Name) loaded" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "[ERROR] Failed to load $($module.Name): $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
 Write-Host ""
