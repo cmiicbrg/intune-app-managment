@@ -297,19 +297,24 @@ function Publish-App {
         # the script-level -AssignTo* switches, so both modes share one assignment code path.
         [bool]$AssignAllUsers,
         [bool]$AssignAllDevices,
-        [array]$AssignGroups = @()
+        [array]$AssignGroups = @(),
+
+        # The family's naming convention (Get-AppFamilyNamePattern). Only apps whose display name
+        # follows it count as existing versions - the same classifier the inventory and cleanup
+        # tooling use, so an unrelated app sharing the base name (e.g. "Google Chrome Remote
+        # Desktop 2.0") is never superseded, and a hand-deployed same-family app under a
+        # non-conforming name is left alone until it is renamed to the convention.
+        [Parameter(Mandatory = $true)]
+        [string]$FamilyNamePattern
     )
-    
+
     Write-Host "`n  Checking for existing apps..." -ForegroundColor Cyan
-    
+
     try {
-        # Get the base app name without version for searching (e.g., "Google Chrome" from "Google Chrome 142")
-        $baseDisplayName = $AppConfig.DisplayName -replace '\s+\d+.*$', ''
-        Write-Host "  Searching for apps matching: '$baseDisplayName*'" -ForegroundColor Gray
-        
-        # Search for all apps that start with the base display name (to find different versions)
-        $searchPattern = $baseDisplayName  # Use base display name for searching
-        $allExistingApps = Get-InteropWin32App | Where-Object { $_.displayName -like "$searchPattern*" }
+        $baseDisplayName = Get-AppFamilyBaseName -DisplayName $AppConfig.DisplayName
+        Write-Host "  Searching for existing versions of '$baseDisplayName' (names following the family's naming convention)" -ForegroundColor Gray
+
+        $allExistingApps = Get-InteropWin32App | Where-Object { $_.displayName -match $FamilyNamePattern }
         
         if ($allExistingApps) {
             Write-Host "  Found $($allExistingApps.Count) existing app(s) for '$AppName'" -ForegroundColor Yellow
@@ -503,9 +508,10 @@ function Publish-App {
                         continue
                     }
                     
-                    # Search Intune for the dependency app by base display name
-                    $depBaseName = $depConfig.DisplayNameTemplate -replace '\s*\{0\}', ''
-                    $depIntuneApp = $allIntuneApps | Where-Object { $_.displayName -like "$depBaseName*" } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
+                    # Search Intune for the newest app of the dependency's family (same naming-convention
+                    # classifier as everywhere else)
+                    $depNamePattern = Get-AppFamilyNamePattern -DisplayNameTemplate $depConfig.DisplayNameTemplate
+                    $depIntuneApp = $allIntuneApps | Where-Object { $_.displayName -match $depNamePattern } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
                     
                     # Auto-deploy dependency if not found in Intune
                     if (-not $depIntuneApp) {
@@ -890,8 +896,9 @@ foreach ($appItem in $appsToProcess) {
         -ForceUpdate:$ForceUpdate `
         -AssignAllUsers $assignmentSpec.AllUsers `
         -AssignAllDevices $assignmentSpec.AllDevices `
-        -AssignGroups $assignmentSpec.Groups
-    
+        -AssignGroups $assignmentSpec.Groups `
+        -FamilyNamePattern $app.NamePattern
+
     if ($result) {
         $deployedApps += $app.Name
     }

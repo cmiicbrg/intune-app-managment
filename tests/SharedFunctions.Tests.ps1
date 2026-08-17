@@ -173,17 +173,64 @@ Describe 'Get-AppFamilyCatalog / Resolve-AppFamily' {
         (Resolve-AppFamily -DisplayName 'mozilla firefox 153 (German)' -Families $catalog).AppConfigName | Should -Be 'Firefox'
     }
 
+    It 'accepts full version numbers, not just the major version this tooling writes' {
+        (Resolve-AppFamily -DisplayName 'Mozilla Firefox 145.0.2 (German)' -Families $catalog).AppConfigName | Should -Be 'Firefox'
+    }
+
     It 'returns $null for apps this repository does not manage' {
         Resolve-AppFamily -DisplayName 'Adobe Reader DC' -Families $catalog | Should -BeNullOrEmpty
     }
 
-    It 'prefers the longest matching base name' {
+    It 'requires the version boundary, so unrelated apps sharing a base name are not claimed' {
+        # A plain prefix match would make these deletion candidates of the Chrome / Firefox families
+        Resolve-AppFamily -DisplayName 'Google Chrome Remote Desktop 2.0' -Families $catalog | Should -BeNullOrEmpty
+        Resolve-AppFamily -DisplayName 'Google Chrome Enterprise 100' -Families $catalog | Should -BeNullOrEmpty
+        Resolve-AppFamily -DisplayName 'Mozilla Firefox 153 (English)' -Families $catalog | Should -BeNullOrEmpty -Because 'the suffix is part of the convention'
+        Resolve-AppFamily -DisplayName 'Mozilla Firefox 153' -Families $catalog | Should -BeNullOrEmpty -Because 'the German family requires its suffix'
+    }
+
+    It 'treats a hand-deployed app without a version in its name as unmanaged' {
+        Resolve-AppFamily -DisplayName 'Google Chrome' -Families $catalog | Should -BeNullOrEmpty
+        Resolve-AppFamily -DisplayName '7-Zip' -Families $catalog | Should -BeNullOrEmpty
+    }
+
+    It 'prefers the longest matching base name when patterns overlap' {
         $families = @(
-            [PSCustomObject]@{ AppConfigName = 'Short'; BaseName = 'Google Drive' },
-            [PSCustomObject]@{ AppConfigName = 'Long'; BaseName = 'Google Drive Enterprise' }
+            [PSCustomObject]@{ AppConfigName = 'Short'; BaseName = 'Google Drive'; NamePattern = (Get-AppFamilyNamePattern -DisplayNameTemplate 'Google Drive {0}') },
+            [PSCustomObject]@{ AppConfigName = 'Long'; BaseName = 'Google Drive Enterprise'; NamePattern = (Get-AppFamilyNamePattern -DisplayNameTemplate 'Google Drive Enterprise {0}') }
         )
         (Resolve-AppFamily -DisplayName 'Google Drive Enterprise 3' -Families $families).AppConfigName | Should -Be 'Long'
         (Resolve-AppFamily -DisplayName 'Google Drive 129' -Families $families).AppConfigName | Should -Be 'Short'
+    }
+}
+
+Describe 'Get-AppFamilyNamePattern' {
+    It 'builds base + version + suffix from a template' {
+        $pattern = Get-AppFamilyNamePattern -DisplayNameTemplate 'Mozilla Firefox {0} (German)'
+        'Mozilla Firefox 153 (German)' | Should -Match $pattern
+        'Mozilla Firefox 153.0.4 (German)' | Should -Match $pattern
+        'Mozilla Firefox 153 (German) Beta' | Should -Not -Match $pattern
+        'Mozilla Firefox (German)' | Should -Not -Match $pattern
+    }
+
+    It 'escapes regex metacharacters in the template' {
+        $pattern = Get-AppFamilyNamePattern -DisplayNameTemplate 'Notepad++ {0}'
+        'Notepad++ 8' | Should -Match $pattern
+        'Notepad 8' | Should -Not -Match $pattern
+        (Get-AppFamilyNamePattern -DisplayNameTemplate 'Visual C++ Redistributable {0}') | Should -Match '\\\+\\\+'
+    }
+
+    It 'matches the display names this tooling generates for every configured app' {
+        foreach ($name in (Get-AllAppNames)) {
+            $template = (Get-AppConfiguration -AppName $name).DisplayNameTemplate
+            ($template -f 42) | Should -Match (Get-AppFamilyNamePattern -DisplayNameTemplate $template) -Because "template '$template'"
+        }
+    }
+
+    It 'falls back to an exact match for a template without a version placeholder' {
+        $pattern = Get-AppFamilyNamePattern -DisplayNameTemplate 'Some Tool'
+        'Some Tool' | Should -Match $pattern
+        'Some Tool 2' | Should -Not -Match $pattern
     }
 }
 

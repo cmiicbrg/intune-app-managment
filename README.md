@@ -411,6 +411,13 @@ flagged for manual review, never deleted automatically.
 A tenant-level `Retention` block is the opt-in for automated cleanup. `Deploy-ToIntune.ps1` only
 validates these values; the inventory and cleanup tooling evaluate and act on them.
 
+Only apps whose display name follows the family's naming convention (`DisplayNameTemplate` in
+`AppConfig.ps1`, e.g. `Google Chrome 151` or `Mozilla Firefox 153 (German)`) count as versions of
+that family. An app deployed by hand under a different name — a bare `Google Chrome`, or an
+unrelated app that merely shares the prefix such as `Google Chrome Remote Desktop 2.0` — is not
+managed by this tooling: it is never superseded and never deleted. To bring a hand-deployed
+version under management, rename it in Intune to match the template.
+
 ### Version Cache
 
 Every app config carries a `FallbackVersion` / `FallbackUrl` pair, used only when live version

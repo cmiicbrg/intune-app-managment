@@ -39,11 +39,43 @@ function Get-AppFamilyBaseName {
 }
 
 # One entry per AppConfig app that has a package folder and pattern - the deployable set.
+# Regex that an Intune display name must match to count as a member of the family described by
+# an AppConfig DisplayNameTemplate: the base name, whitespace, a version number, and the template's
+# suffix (if any) - e.g. "Mozilla Firefox {0} (German)" -> ^Mozilla\ Firefox\s+\d+(?:\.\d+)*\s+\(German\)$
+#
+# The version boundary is what keeps unrelated apps out: with a plain prefix match, "Google Chrome
+# Remote Desktop 2.0" would be a Chrome version, and since family membership feeds the retention
+# cleanup, that would make an unrelated app a deletion candidate. Apps that share a base name but
+# do not follow the convention (a bare "Google Chrome", or a differently suffixed variant) are
+# simply not managed by this tooling; renaming them to the template brings them under management.
+function Get-AppFamilyNamePattern {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DisplayNameTemplate
+    )
+
+    $index = $DisplayNameTemplate.IndexOf('{0}')
+    if ($index -lt 0) {
+        return '^' + [regex]::Escape($DisplayNameTemplate.Trim()) + '$'
+    }
+
+    $prefix = $DisplayNameTemplate.Substring(0, $index).TrimEnd()
+    $suffix = $DisplayNameTemplate.Substring($index + 3).TrimStart()
+
+    $pattern = '^' + [regex]::Escape($prefix) + '\s+\d+(?:\.\d+)*'
+    if ($suffix) {
+        $pattern += '\s+' + [regex]::Escape($suffix)
+    }
+    return $pattern + '$'
+}
+
+# One entry per AppConfig app that has a package folder and pattern - the deployable set.
 # Returned in canonical app-name order (Get-AllAppNames), which is also the order Deploy-ToIntune.ps1
 # processes apps in.
 #   AppConfigName - key in AppConfig.ps1 (e.g. "Firefox")
 #   Name          - display label, template without the version placeholder (e.g. "Mozilla Firefox (German)")
-#   BaseName      - family prefix used to match Intune display names (e.g. "Mozilla Firefox")
+#   BaseName      - family prefix (e.g. "Mozilla Firefox")
+#   NamePattern   - regex a display name must match to belong to the family (Get-AppFamilyNamePattern)
 function Get-AppFamilyCatalog {
     $families = @()
     foreach ($appConfigName in (Get-AllAppNames)) {
@@ -53,6 +85,7 @@ function Get-AppFamilyCatalog {
                 AppConfigName = $appConfigName
                 Name          = ($cfg.DisplayNameTemplate -replace '\s*\{0\}', '').Trim()
                 BaseName      = Get-AppFamilyBaseName -DisplayNameTemplate $cfg.DisplayNameTemplate
+                NamePattern   = Get-AppFamilyNamePattern -DisplayNameTemplate $cfg.DisplayNameTemplate
                 Folder        = $cfg.Folder
                 Pattern       = $cfg.IntuneWinPattern
                 PackageType   = $cfg.PackageType
@@ -62,9 +95,11 @@ function Get-AppFamilyCatalog {
     return $families
 }
 
-# Maps an Intune display name to the family it belongs to. The longest matching base name wins,
-# so a hypothetical "Google Drive Enterprise" family could never be claimed by "Google Drive".
-# Returns $null for apps this repository does not manage.
+# Maps an Intune display name to the family it belongs to: the name must match the family's
+# naming convention (NamePattern - base name, version, suffix), not merely start with the base
+# name. Longer base names are tried first for deterministic tie-breaking. Returns $null for apps
+# this repository does not manage - including same-family apps deployed by hand under a name
+# that does not follow the convention.
 function Resolve-AppFamily {
     param(
         [Parameter(Mandatory = $true)]
@@ -77,7 +112,7 @@ function Resolve-AppFamily {
     )
 
     foreach ($family in ($Families | Sort-Object { $_.BaseName.Length } -Descending)) {
-        if ($DisplayName.StartsWith($family.BaseName, [System.StringComparison]::OrdinalIgnoreCase)) {
+        if ($DisplayName -match $family.NamePattern) {
             return $family
         }
     }
