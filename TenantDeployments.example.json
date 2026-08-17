@@ -2,8 +2,10 @@
   "_comment": "Per-tenant deployment plans. Copy to TenantDeployments.json (git-ignored) and edit. Deploy-ToIntune.ps1 uses a tenant's plan automatically, so '.\\Deploy-ToIntune.ps1 -TenantName \"Contoso\"' deploys exactly these apps with these assignments. Passing -AssignToAllUsers/-AssignToAllDevices/-AssignToGroupName ignores the plan. Preview with -ShowPlan, which needs no credentials. App names must match the keys in AppConfig.ps1 (case-insensitive).",
   "Tenants": {
     "Contoso": {
+      "_retention": "Optional. Version retention evaluated by the inventory/cleanup tooling: keep the newest KeepNewest versions of each app plus everything created in the last KeepNewerThanWeeks weeks (defaults 3 / 10 when omitted). A tenant-level block opts the tenant in to automated cleanup; each app may override it with its own Retention block. KeepNewest can never go below 2. Deploy-ToIntune.ps1 only validates these values.",
+      "Retention": { "KeepNewest": 3, "KeepNewerThanWeeks": 10 },
       "Apps": {
-        "Chrome": { "AllUsers": true, "AllDevices": true },
+        "Chrome": { "AllUsers": true, "AllDevices": true, "Retention": { "KeepNewest": 2 } },
         "Firefox": { "AllUsers": true, "AllDevices": true },
         "SevenZip": { "AllUsers": true },
         "NotepadPlusPlus": { "AllUsers": true },

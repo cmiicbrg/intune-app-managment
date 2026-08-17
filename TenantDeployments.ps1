@@ -9,6 +9,10 @@
 #
 # The plan lives in TenantDeployments.json (git-ignored, like intune-tenants.json, because it names
 # real tenants and Entra ID groups). TenantDeployments.example.json documents the schema.
+#
+# The same file also carries the optional version-retention policy ("Retention" blocks per tenant,
+# overridable per app) that the inventory and cleanup tooling evaluate. Deploy-ToIntune.ps1 only
+# validates those blocks; it never deletes anything.
 
 # Import configuration for app-name validation, unless a caller already loaded it.
 # Deploy-ToIntune.ps1 dot-sources SharedFunctions.ps1, which dot-sources AppConfig.ps1, so an
@@ -42,6 +46,39 @@ function Get-TenantDeploymentPlan {
         [string]$TenantName
     )
 
+    $tenant = Get-TenantDeploymentEntry -TenantName $TenantName
+    if ($null -eq $tenant) {
+        return $null
+    }
+    $tenantKey = $tenant.Key
+    $tenantEntry = $tenant.Entry
+
+    if (-not $tenantEntry.Apps) {
+        throw "Tenant '$tenantKey' in '$script:TenantDeploymentsPath' has no 'Apps' object."
+    }
+
+    # A malformed tenant-level Retention block fails here, at plan load, like every other input error
+    $tenantPolicy = ConvertTo-RetentionPolicy -Spec $tenantEntry -Base $script:DefaultRetentionPolicy -Context $tenantKey
+
+    # Canonical app names, for case-insensitive resolution of entries like "Gimp" or "Openshot"
+    $knownApps = @(Get-AllAppNames)
+
+    $plan = [ordered]@{}
+    foreach ($appEntry in $tenantEntry.Apps.PSObject.Properties) {
+        $canonical = $knownApps | Where-Object { $_ -eq $appEntry.Name } | Select-Object -First 1
+        if (-not $canonical) {
+            throw "Tenant '$tenantKey' lists unknown app '$($appEntry.Name)' in '$script:TenantDeploymentsPath'. Known apps: $($knownApps -join ', ')"
+        }
+
+        $plan[$canonical] = ConvertTo-AssignmentSpec -Spec $appEntry.Value -Context "$tenantKey/$canonical"
+        $null = ConvertTo-RetentionPolicy -Spec $appEntry.Value -Base $tenantPolicy -Context "$tenantKey/$canonical"
+    }
+
+    return $plan
+}
+
+# Reads and parses TenantDeployments.json. Returns $null when there is no file.
+function Read-TenantDeploymentDocument {
     if (-not (Test-Path $script:TenantDeploymentsPath)) {
         return $null
     }
@@ -57,32 +94,169 @@ function Get-TenantDeploymentPlan {
         throw "'$script:TenantDeploymentsPath' has no 'Tenants' object. See TenantDeployments.example.json."
     }
 
-    # Tenant names are matched case-insensitively, like the rest of the script's string comparisons
+    return $document
+}
+
+# Locates a tenant's entry in the plan file (case-insensitive name match, like the rest of the
+# script's string comparisons). Returns @{ Key = <canonical key>; Entry = <object> } or $null.
+function Get-TenantDeploymentEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TenantName
+    )
+
+    $document = Read-TenantDeploymentDocument
+    if ($null -eq $document) {
+        return $null
+    }
+
     $tenantKey = $document.Tenants.PSObject.Properties.Name | Where-Object { $_ -eq $TenantName } | Select-Object -First 1
     if (-not $tenantKey) {
         return $null
     }
 
-    $tenantEntry = $document.Tenants.$tenantKey
-    if (-not $tenantEntry.Apps) {
-        throw "Tenant '$tenantKey' in '$script:TenantDeploymentsPath' has no 'Apps' object."
-    }
-
-    # Canonical app names, for case-insensitive resolution of entries like "Gimp" or "Openshot"
-    $knownApps = @(Get-AllAppNames)
-
-    $plan = [ordered]@{}
-    foreach ($appEntry in $tenantEntry.Apps.PSObject.Properties) {
-        $canonical = $knownApps | Where-Object { $_ -eq $appEntry.Name } | Select-Object -First 1
-        if (-not $canonical) {
-            throw "Tenant '$tenantKey' lists unknown app '$($appEntry.Name)' in '$script:TenantDeploymentsPath'. Known apps: $($knownApps -join ', ')"
-        }
-
-        $plan[$canonical] = ConvertTo-AssignmentSpec -Spec $appEntry.Value -Context "$tenantKey/$canonical"
-    }
-
-    return $plan
+    return @{ Key = $tenantKey; Entry = $document.Tenants.$tenantKey }
 }
+
+#region Version retention policy
+
+# Built-in defaults: keep the newest 3 versions of every app family, plus everything created in
+# the last 10 weeks. Runs are at most weekly, and a client that has not updated in 10 weeks is
+# outdated by any measure. Tenants may override both, and apps may override the tenant.
+$script:DefaultRetentionPolicy = @{ KeepNewest = 3; KeepNewerThanWeeks = 10 }
+
+# The immediate predecessor of the newest version must always survive: Intune drops the
+# auto-update tracking for users who installed an app from the Company Portal as soon as that
+# app's assignment goes away, and it never comes back. Two is therefore the floor.
+$script:MinimumKeepNewest = 2
+
+# Effective retention policy for a tenant, or for one app within a tenant.
+#
+# Resolution: app override -> tenant "Retention" block -> built-in defaults. Returns:
+#     @{ KeepNewest = <int>; KeepNewerThanWeeks = <int>; Source = 'app'|'tenant'|'default'; OptIn = <bool> }
+# OptIn is true only when the tenant has an explicit tenant-level "Retention" block. The inventory
+# evaluates the policy either way; the cleanup tooling acts only on opted-in tenants.
+# Missing plan file or unknown tenant/app simply yields the defaults (Source 'default', OptIn false).
+function Get-TenantRetentionPolicy {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$TenantName,
+
+        [string]$AppName
+    )
+
+    $policy = @{
+        KeepNewest         = $script:DefaultRetentionPolicy.KeepNewest
+        KeepNewerThanWeeks = $script:DefaultRetentionPolicy.KeepNewerThanWeeks
+        Source             = 'default'
+        OptIn              = $false
+    }
+
+    $tenant = Get-TenantDeploymentEntry -TenantName $TenantName
+    if ($null -eq $tenant) {
+        return $policy
+    }
+    $tenantKey = $tenant.Key
+    $tenantEntry = $tenant.Entry
+
+    if ($tenantEntry.PSObject.Properties.Name -contains 'Retention') {
+        $resolved = ConvertTo-RetentionPolicy -Spec $tenantEntry -Base $policy -Context $tenantKey
+        $policy.KeepNewest = $resolved.KeepNewest
+        $policy.KeepNewerThanWeeks = $resolved.KeepNewerThanWeeks
+        $policy.Source = 'tenant'
+        $policy.OptIn = $true
+    }
+
+    if ($AppName -and $tenantEntry.Apps) {
+        $appKey = $tenantEntry.Apps.PSObject.Properties.Name | Where-Object { $_ -eq $AppName } | Select-Object -First 1
+        if ($appKey) {
+            $appEntry = $tenantEntry.Apps.$appKey
+            if ($null -ne $appEntry -and $appEntry.PSObject.Properties.Name -contains 'Retention') {
+                $resolved = ConvertTo-RetentionPolicy -Spec $appEntry -Base $policy -Context "$tenantKey/$appKey"
+                $policy.KeepNewest = $resolved.KeepNewest
+                $policy.KeepNewerThanWeeks = $resolved.KeepNewerThanWeeks
+                $policy.Source = 'app'
+            }
+        }
+    }
+
+    return $policy
+}
+
+# Reads an optional "Retention" block from a tenant or app entry, layered over $Base. Rejects
+# anything that is not a whole JSON number, unknown keys (typos must not silently mean "default"),
+# KeepNewest below the floor, and negative week counts. Returns @{ KeepNewest; KeepNewerThanWeeks }.
+function ConvertTo-RetentionPolicy {
+    param(
+        $Spec,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Base,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context
+    )
+
+    $result = @{ KeepNewest = $Base.KeepNewest; KeepNewerThanWeeks = $Base.KeepNewerThanWeeks }
+
+    if ($null -eq $Spec -or $Spec.PSObject.Properties.Name -notcontains 'Retention') {
+        return $result
+    }
+
+    $retention = $Spec.Retention
+    if ($null -eq $retention -or $retention -isnot [System.Management.Automation.PSCustomObject]) {
+        throw "'Retention' for '$Context' must be an object like { `"KeepNewest`": 3, `"KeepNewerThanWeeks`": 10 }."
+    }
+
+    foreach ($property in $retention.PSObject.Properties) {
+        $value = $property.Value
+        switch ($property.Name) {
+            'KeepNewest' {
+                $result.KeepNewest = Get-StrictWholeNumber -Value $value -Name 'KeepNewest' -Context $Context -Minimum $script:MinimumKeepNewest
+            }
+            'KeepNewerThanWeeks' {
+                $result.KeepNewerThanWeeks = Get-StrictWholeNumber -Value $value -Name 'KeepNewerThanWeeks' -Context $Context -Minimum 0
+            }
+            default {
+                throw "'Retention' for '$Context' has unknown setting '$($property.Name)'. Allowed: KeepNewest, KeepNewerThanWeeks."
+            }
+        }
+    }
+
+    return $result
+}
+
+# Same philosophy as Get-StrictBoolean: a retention count that arrived as a string or a decimal is
+# a mistake, and mistakes here decide what gets deleted, so they fail instead of being coerced.
+function Get-StrictWholeNumber {
+    param(
+        $Value,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Context,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Minimum
+    )
+
+    # ConvertFrom-Json yields Int64 for JSON integers and Double for anything with a decimal point,
+    # so "2.0" is rejected too: the message promises JSON integers, and a decimal is a typo here.
+    if (-not (($Value -is [int]) -or ($Value -is [long]))) {
+        $shown = if ($Value -is [string]) { "`"$Value`"" } else { "$Value" }
+        throw "'$Name' for '$Context' must be a whole number, got $shown. Use JSON integers, not strings or decimals."
+    }
+
+    if ([int]$Value -lt $Minimum) {
+        throw "'$Name' for '$Context' must be at least $Minimum, got $Value."
+    }
+
+    return [int]$Value
+}
+
+#endregion
 
 # Normalizes one app's plan entry into the assignment spec Publish-App expects.
 function ConvertTo-AssignmentSpec {
