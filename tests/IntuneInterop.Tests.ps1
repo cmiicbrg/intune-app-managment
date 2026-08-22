@@ -199,10 +199,50 @@ Describe 'Get-InteropAppAssignmentDetail (native Graph read, full detail)' {
 }
 
 Describe 'Get-InteropAppInstallSummary' {
-    It 'GETs the installSummary resource' {
+    It 'GETs the installSummary resource when the legacy endpoint works' {
         Mock Invoke-MgGraphRequest { [PSCustomObject]@{ installedDeviceCount = 5; failedDeviceCount = 1 } }
         (Get-InteropAppInstallSummary -AppId 'app-1').installedDeviceCount | Should -Be 5
         Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'GET' -and $Uri -like '*/mobileApps/app-1/installSummary' } -Times 1 -Exactly
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' } -Times 0 -Exactly
+    }
+
+    It 'falls back to getAppStatusOverviewReport when the legacy GET returns 400, mapping columns to camelCase' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { throw 'Response status code does not indicate success: BadRequest (Bad Request).' }
+            [PSCustomObject]@{
+                TotalRowCount = 1
+                Schema        = @(
+                    [PSCustomObject]@{ Column = 'ApplicationId' },
+                    [PSCustomObject]@{ Column = 'InstalledDeviceCount' },
+                    [PSCustomObject]@{ Column = 'FailedDeviceCount' },
+                    [PSCustomObject]@{ Column = 'PendingInstallDeviceCount' }
+                )
+                Values        = @(, @('app-1', 7, 1, 2))
+            }
+        }
+
+        $summary = Get-InteropAppInstallSummary -AppId 'app-1'
+        $summary.installedDeviceCount | Should -Be 7
+        $summary.failedDeviceCount | Should -Be 1
+        $summary.pendingInstallDeviceCount | Should -Be 2
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            $Method -eq 'POST' -and
+            $Uri -like '*deviceManagement/reports/getAppStatusOverviewReport' -and
+            ($Body | ConvertFrom-Json).filter -eq "(ApplicationId eq 'app-1')"
+        } -Times 1 -Exactly
+    }
+
+    It 'returns $null when the fallback report has no row for the app' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { throw 'BadRequest' }
+            [PSCustomObject]@{ TotalRowCount = 0; Schema = @(); Values = @() }
+        }
+        Get-InteropAppInstallSummary -AppId 'app-1' | Should -BeNullOrEmpty
+    }
+
+    It 'throws when both the legacy endpoint and the report fail' {
+        Mock Invoke-MgGraphRequest { throw 'Graph unavailable' }
+        { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw
     }
 }
 

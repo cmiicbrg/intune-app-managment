@@ -903,10 +903,17 @@ function Get-InteropAppInstallSummary {
     Returns the app's install summary (device and user counts by state)
 
     .DESCRIPTION
-    GET /mobileApps/{id}/installSummary. Note for version-comparison detection rules
-    ("greaterThanOrEqual" and >=-style scripts): a device with a newer version installed also
-    detects every older version, so installedDeviceCount on old versions is inflated - it is only
-    a reliable "still in use" signal for product-code and equal-operator apps.
+    Tries the documented GET /mobileApps/{id}/installSummary first; that legacy endpoint has
+    started returning 400 in current service releases, so on failure it falls back to what the
+    Intune admin center uses - POST /deviceManagement/reports/getAppStatusOverviewReport with an
+    ApplicationId filter - and maps the report's Schema/Values table onto the same camelCase
+    property names (installedDeviceCount, ...), so callers see one shape either way. Returns
+    $null when the report has no row for the app; throws when both paths fail.
+
+    Note for version-comparison detection rules ("greaterThanOrEqual" and >=-style scripts):
+    a device with a newer version installed also detects every older version, so
+    installedDeviceCount on old versions is inflated - it is only a reliable "still in use"
+    signal for product-code and equal-operator apps.
     #>
     [CmdletBinding()]
     param(
@@ -914,7 +921,31 @@ function Get-InteropAppInstallSummary {
         [string]$AppId
     )
 
-    return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -OutputType PSObject -ErrorAction Stop
+    try {
+        return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -OutputType PSObject -ErrorAction Stop
+    }
+    catch {
+        Write-Verbose "installSummary GET failed for app '$AppId' ($($_.Exception.Message)); falling back to getAppStatusOverviewReport"
+    }
+
+    $body = @{ filter = "(ApplicationId eq '$AppId')" } | ConvertTo-Json
+    $report = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppStatusOverviewReport' -Body $body -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+
+    $row = @($report.Values) | Select-Object -First 1
+    if ($null -eq $row) {
+        return $null
+    }
+
+    # Schema columns are PascalCase (InstalledDeviceCount, ...); lowercase the first letter to
+    # match the legacy installSummary property names
+    $summary = [ordered]@{}
+    $columns = @($report.Schema)
+    for ($i = 0; $i -lt $columns.Count; $i++) {
+        $name = "$($columns[$i].Column)"
+        if ([string]::IsNullOrEmpty($name)) { continue }
+        $summary[($name.Substring(0, 1).ToLowerInvariant() + $name.Substring(1))] = $row[$i]
+    }
+    return [PSCustomObject]$summary
 }
 
 function Add-InteropAllUsersAssignment {
