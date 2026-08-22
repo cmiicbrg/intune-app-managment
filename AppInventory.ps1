@@ -206,16 +206,18 @@ function Get-AppInventoryAnalysis {
         # A superseded version keeping its 'available' assignment is normal and required: the
         # Company Portal hides it behind the newest version, and the assignment is what keeps
         # supersedence/auto-update working - never flag that. What does show up as a separate
-        # app in the Company Portal is an older version that is assigned but NOT superseded by
-        # anything (a chain split at the graph limit, or a version that was never linked).
+        # app in the Company Portal is an older version with an 'available' assignment (the
+        # intent the portal lists) that is NOT superseded by anything - a chain split at the
+        # graph limit, or a version that was never linked. Required-only assignments are not
+        # visible in the portal and are left alone.
         $unlinkedOlder = @($members | Where-Object {
             $_.Retention.Rank -and $_.Retention.Rank -gt 1 -and
             @($_.SupersededBy).Count -eq 0 -and -not $_.RelationshipsUnavailable -and
-            @($_.Assignments).Count -gt 0
+            @($_.Assignments | Where-Object Intent -eq 'available').Count -gt 0
         })
         if ($unlinkedOlder.Count -gt 0) {
             $names = ($unlinkedOlder | ForEach-Object { "$($_.DisplayName) v$($_.DisplayVersion)" }) -join ', '
-            $anomalies.Add((New-Anomaly -Type 'OlderVersionUnlinked' -Family $family.AppConfigName -Message "$($unlinkedOlder.Count) older version(s) are assigned but not superseded by any version ($names) - they show up as separate apps in the Company Portal instead of being hidden behind the newest one. Retention deletes them once they leave the keep window; until then, make the next newer version supersede them." -AppIds @($unlinkedOlder.Id)))
+            $anomalies.Add((New-Anomaly -Type 'OlderVersionUnlinked' -Family $family.AppConfigName -Message "$($unlinkedOlder.Count) older version(s) are assigned 'available' but not superseded by any version ($names) - they show up as separate apps in the Company Portal instead of being hidden behind the newest one. Retention deletes them once they leave the keep window; until then, make the next newer version supersede them." -AppIds @($unlinkedOlder.Id)))
         }
 
         if ($appConfig -and $appConfig.AutoUpdate -eq $true) {

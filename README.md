@@ -443,7 +443,7 @@ evaluates the retention policy above. Per family it reports the version count, t
 supersedence graph against Intune's limit of 11 nodes, and the retention verdict for every
 version (keep / delete candidate / review), plus anomalies:
 
-- older versions that are assigned but not superseded by any version (a chain split at the
+- older versions assigned *available* but not superseded by any version (a chain split at the
   graph limit, or a version that was never linked) — the Company Portal hides superseded
   versions behind the newest one, but an unlinked one shows up as a separate app;
 - superseding versions assigned *available* without auto-update although `AutoUpdate` is on;
