@@ -296,6 +296,184 @@ Describe 'Get-InteropAppInstallSummaryReport' {
     }
 }
 
+Describe 'Remove-InteropWin32App' {
+    It 'DELETEs the app resource' {
+        Mock Invoke-MgGraphRequest { $null }
+        Remove-InteropWin32App -AppId 'app-1'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' -and $Uri -like '*/deviceAppManagement/mobileApps/app-1' } -Times 1 -Exactly
+    }
+
+    It 'throws when the delete fails (callers decide how to continue)' {
+        Mock Invoke-MgGraphRequest { throw 'Forbidden' }
+        { Remove-InteropWin32App -AppId 'app-1' } | Should -Throw '*Forbidden*'
+    }
+
+    It "surfaces Graph's error body, not just the HTTP status" {
+        Mock Invoke-MgGraphRequest {
+            $record = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('Response status code does not indicate success: BadRequest (Bad Request).'), 'Graph', 'InvalidOperation', $null)
+            $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new('{"error":{"code":"BadRequest","message":"App cannot be deleted because it has supersedence relationships"}}')
+            throw $record
+        }
+        { Remove-InteropWin32App -AppId 'app-1' } | Should -Throw '*BadRequest (Bad Request)*BadRequest: App cannot be deleted because it has supersedence relationships*'
+    }
+}
+
+Describe 'Relationship removal (updateRelationships on the owner)' {
+    BeforeAll {
+        function New-Rel {
+            param([ValidateSet('sup', 'dep')][string]$Kind, [string]$Target, [ValidateSet('child', 'parent')][string]$Direction, [string]$Name = 'x')
+            $type = if ($Kind -eq 'sup') { '#microsoft.graph.mobileAppSupersedence' } else { '#microsoft.graph.mobileAppDependency' }
+            $rel = [PSCustomObject]@{ id = "rel-$Target"; '@odata.type' = $type; targetId = $Target; targetDisplayName = $Name; targetDisplayVersion = '1'; targetType = $Direction }
+            if ($Kind -eq 'sup') { $rel | Add-Member -NotePropertyName supersedenceType -NotePropertyValue 'update' } else { $rel | Add-Member -NotePropertyName dependencyType -NotePropertyValue 'autoInstall' }
+            $rel
+        }
+        # Posted updateRelationships bodies, keyed by app id
+        function Get-PostedRelationships { param([string]$AppId)
+            $script:posted[$AppId]
+        }
+    }
+
+    BeforeEach {
+        $script:posted = @{}
+        $script:graph = @{}   # app id -> relationship list returned by GET
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET' -and $Uri -match '/mobileApps/([^/]+)/relationships') {
+                return [PSCustomObject]@{ value = @($script:graph[$Matches[1]]) }
+            }
+            if ($Method -eq 'POST' -and $Uri -match '/mobileApps/([^/]+)/updateRelationships') {
+                $script:posted[$Matches[1]] = @(($Body | ConvertFrom-Json).relationships)
+                return $null
+            }
+            throw "unexpected request $Method $Uri"
+        }
+    }
+
+    Context 'ConvertTo-InteropRelationshipBody' {
+        It 'keeps only child-direction entries, reduced to type, target and kind' {
+            $body = @(ConvertTo-InteropRelationshipBody -Relationships @(
+                (New-Rel -Kind sup -Target 'older' -Direction child),
+                (New-Rel -Kind dep -Target 'runtime' -Direction child),
+                (New-Rel -Kind sup -Target 'newer' -Direction parent),
+                (New-Rel -Kind dep -Target 'dependent' -Direction parent)
+            ))
+            $body.Count | Should -Be 2
+            $body[0].Keys | Should -Be @('@odata.type', 'targetId', 'supersedenceType')
+            $body[0].targetId | Should -Be 'older'
+            $body[1].Keys | Should -Be @('@odata.type', 'targetId', 'dependencyType')
+            $body[1].dependencyType | Should -Be 'autoInstall'
+        }
+
+        It 'returns an empty set for no relationships' {
+            @(ConvertTo-InteropRelationshipBody -Relationships @()).Count | Should -Be 0
+            @(ConvertTo-InteropRelationshipBody -Relationships $null).Count | Should -Be 0
+        }
+    }
+
+    Context 'Remove-InteropSupersedence' {
+        BeforeEach {
+            # Y supersedes X and V, depends on D, and is itself superseded by Z
+            $script:graph['Y'] = @(
+                (New-Rel -Kind sup -Target 'X' -Direction child),
+                (New-Rel -Kind sup -Target 'V' -Direction child),
+                (New-Rel -Kind dep -Target 'D' -Direction child),
+                (New-Rel -Kind sup -Target 'Z' -Direction parent)
+            )
+        }
+
+        It 're-submits the owner''s remaining child-direction set without the removed link' {
+            Remove-InteropSupersedence -AppId 'Y' -SupersededAppId 'X' | Should -Be 1
+            $posted = Get-PostedRelationships -AppId 'Y'
+            $posted.Count | Should -Be 2
+            ($posted | ForEach-Object { $_.targetId }) | Should -Be @('V', 'D')
+            ($posted | Where-Object targetId -eq 'V').supersedenceType | Should -Be 'update'
+            ($posted | Where-Object targetId -eq 'D').dependencyType | Should -Be 'autoInstall'
+            $posted.targetId | Should -Not -Contain 'Z' -Because 'the link from Z is owned by Z and must not be re-submitted'
+            Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' } -Times 1 -Exactly
+        }
+
+        It '-All drops every supersedence the app owns and keeps its dependencies' {
+            Remove-InteropSupersedence -AppId 'Y' -All | Should -Be 2
+            $posted = Get-PostedRelationships -AppId 'Y'
+            $posted.Count | Should -Be 1
+            $posted[0].targetId | Should -Be 'D'
+        }
+
+        It 'makes no request when the app does not own a matching link' {
+            Remove-InteropSupersedence -AppId 'Y' -SupersededAppId 'not-a-child' | Should -Be 0
+            Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' } -Times 0 -Exactly
+        }
+
+        It 'posts an empty set when the removed link was the only one' {
+            $script:graph['Y'] = @((New-Rel -Kind sup -Target 'X' -Direction child))
+            Remove-InteropSupersedence -AppId 'Y' -SupersededAppId 'X' | Should -Be 1
+            @(Get-PostedRelationships -AppId 'Y').Count | Should -Be 0
+            Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' -and $Body -match '"relationships":\s*\[\s*\]' } -Times 1 -Exactly
+        }
+
+        It "surfaces Graph's error from the module's HTTP dump when the update fails" {
+            Mock Invoke-MgGraphRequest {
+                if ($Method -eq 'GET') { return [PSCustomObject]@{ value = @((New-Rel -Kind sup -Target 'X' -Direction child)) } }
+                $record = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('Response status code does not indicate success: BadRequest (Bad Request).'), 'Graph', 'InvalidOperation', $null)
+                $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new("POST https://graph.microsoft.com/beta/x`nHTTP/1.1 400 Bad Request`nContent-Type: application/json`n`n{`"error`":{`"code`":`"BadRequest`",`"message`":`"The total supersedence limit was reached`"}}")
+                throw $record
+            }
+            { Remove-InteropSupersedence -AppId 'Y' -SupersededAppId 'X' } | Should -Throw "*relationships of app 'Y'*BadRequest: The total supersedence limit was reached*"
+        }
+    }
+
+    Context 'Remove-InteropAppRelationships (unlink before delete)' {
+        It 'unlinks a chain tail by updating the app that supersedes it' {
+            $script:graph['X'] = @((New-Rel -Kind sup -Target 'Y' -Direction parent))
+            $script:graph['Y'] = @((New-Rel -Kind sup -Target 'X' -Direction child), (New-Rel -Kind dep -Target 'D' -Direction child))
+            $result = Remove-InteropAppRelationships -AppId 'X'
+            $result.Total | Should -Be 1
+            $result.Removed | Should -Be 1
+            $result.Error | Should -BeNullOrEmpty
+            $result.DependencyTargets.Count | Should -Be 0
+            (Get-PostedRelationships -AppId 'Y').targetId | Should -Be @('D')
+            $script:posted.ContainsKey('X') | Should -BeFalse -Because 'a tail owns no supersedence of its own'
+        }
+
+        It 'also drops the supersedence a mid-chain app owns, keeping its own dependencies' {
+            $script:graph['X'] = @((New-Rel -Kind sup -Target 'Y' -Direction parent), (New-Rel -Kind sup -Target 'W' -Direction child), (New-Rel -Kind dep -Target 'D2' -Direction child))
+            $script:graph['Y'] = @((New-Rel -Kind sup -Target 'X' -Direction child))
+            $result = Remove-InteropAppRelationships -AppId 'X'
+            $result.Total | Should -Be 2
+            $result.Removed | Should -Be 2
+            @(Get-PostedRelationships -AppId 'Y').Count | Should -Be 0
+            (Get-PostedRelationships -AppId 'X').targetId | Should -Be @('D2')
+        }
+
+        It 'refuses to touch a dependency target: removes nothing and names the dependents' {
+            $script:graph['X'] = @((New-Rel -Kind sup -Target 'Y' -Direction parent), (New-Rel -Kind dep -Target 'kpx' -Direction parent -Name 'KeePassXC 2'))
+            $result = Remove-InteropAppRelationships -AppId 'X'
+            $result.DependencyTargets | Should -Be @('KeePassXC 2')
+            $result.Removed | Should -Be 0
+            Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' } -Times 0 -Exactly
+        }
+
+        It 'stops at the first owner that cannot be updated and reports the partial state' {
+            $script:graph['X'] = @((New-Rel -Kind sup -Target 'Y' -Direction parent), (New-Rel -Kind sup -Target 'W' -Direction child))
+            $script:graph['Y'] = @((New-Rel -Kind sup -Target 'X' -Direction child))
+            Mock Invoke-MgGraphRequest {
+                if ($Method -eq 'GET' -and $Uri -match '/mobileApps/([^/]+)/relationships') { return [PSCustomObject]@{ value = @($script:graph[$Matches[1]]) } }
+                throw 'Forbidden'
+            }
+            $result = Remove-InteropAppRelationships -AppId 'X'
+            $result.Total | Should -Be 2
+            $result.Removed | Should -Be 0
+            $result.Error | Should -BeLike "*relationships of app 'Y'*Forbidden*"
+            Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' } -Times 1 -Exactly -Because "the app's own links must not be touched after a failure"
+        }
+
+        It 'throws when the relationships cannot be read (nothing is removed)' {
+            Mock Invoke-MgGraphRequest { throw 'NotFound' }
+            { Remove-InteropAppRelationships -AppId 'X' } | Should -Throw '*NotFound*'
+            Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'POST' } -Times 0 -Exactly
+        }
+    }
+}
+
 Describe 'Get-InteropAppAssignment (native Graph read + normalization)' {
     It 'normalizes all three target types' {
         Mock Invoke-MgGraphRequest {

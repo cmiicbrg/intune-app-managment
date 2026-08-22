@@ -265,8 +265,11 @@ intune-app-management/
 ├── IntuneSession.ps1                      # Tenant session bootstrap (credentials, modules, connect)
 ├── AppRetention.ps1                       # Version retention evaluation (inventory/cleanup)
 ├── AppInventory.ps1                       # Inventory assembly and analysis (pure)
+├── IntuneInventory.ps1                    # Graph read path shared by inventory and cleanup
+├── AppCleanup.ps1                         # Cleanup planner (pure)
 ├── Get-IntuneAppInventory.ps1             # Read-only tenant inventory script
-├── inventory/                             # Inventory reports (git-ignored)
+├── Remove-OldIntuneAppVersions.ps1        # Retention-based cleanup script
+├── inventory/                             # Inventory reports and cleanup logs (git-ignored)
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
 ├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
@@ -430,8 +433,8 @@ it to `inventory/` (git-ignored) as JSON plus a Markdown report:
 
 ```powershell
 .\Get-IntuneAppInventory.ps1 -TenantName "School"                       # full inventory
-.\Get-IntuneAppInventory.ps1 -TenantName "School" -AppName "Chrome"     # one family
-.\Get-IntuneAppInventory.ps1 -TenantName "School" -SkipInstallSummary   # skip the per-app install counts
+.\Get-IntuneAppInventory.ps1 -TenantName "School" -AppName "Chrome"     # one family (only its apps and the unmanaged ones are read in detail)
+.\Get-IntuneAppInventory.ps1 -TenantName "School" -SkipInstallSummary   # skip the install counts
 ```
 
 For every app it records assignments (with the auto-update flag), supersedence and dependency
@@ -449,8 +452,42 @@ version (keep / delete candidate / review), plus anomalies:
 - apps that look like a family but break the naming convention (with a rename suggestion).
 
 Install counts on older versions of version-comparison families are inflated for the same
-reason and are marked as such in the report. Nothing is changed in Intune; the JSON is the
-input the cleanup tooling will act on.
+reason and are marked as such in the report. Nothing is changed in Intune.
+
+### Version Cleanup
+
+`Remove-OldIntuneAppVersions.ps1` deletes what the inventory marks as delete candidates — the
+versions outside the newest `KeepNewest` **and** older than `KeepNewerThanWeeks` — for every
+family in the tenant's deployment plan, oldest version first. It always evaluates the tenant
+live (the same read and analysis as the inventory; a saved report is never the authority for
+a delete):
+
+```powershell
+.\Remove-OldIntuneAppVersions.ps1 -TenantName "School" -WhatIf            # preview, nothing changes
+.\Remove-OldIntuneAppVersions.ps1 -TenantName "School"                    # confirms each deletion ("Yes to All" approves the rest)
+.\Remove-OldIntuneAppVersions.ps1 -TenantName "School" -AppName "Chrome"  # one family
+.\Remove-OldIntuneAppVersions.ps1 -TenantName "School" -Confirm:$false    # unattended
+```
+
+Guard rails, none of which a parameter can override:
+
+- the tenant must opt in with a tenant-level `Retention` block in `TenantDeployments.json`
+  (the script prints the snippet to add otherwise);
+- only families in the tenant's deployment plan are touched; apps that do not follow the naming
+  convention are not even considered;
+- never deleted: the newest version, anything within the keep window, dependency targets,
+  duplicate version numbers (`Review`), and versions whose relationships could not be read;
+- after each confirmation the app's relationships are re-read, and an app that became a
+  dependency target in the meantime is skipped untouched;
+- every decision is logged to `inventory/<Tenant>-cleanup-<timestamp>.json` (one file per run,
+  never overwritten).
+
+Intune refuses to delete an app that is still part of a supersedence relationship, so the
+script first unlinks the version — the version that supersedes it gets its relationship set
+updated without it, exactly what "Remove relationship" in the admin center does — and then
+deletes it. Nothing else in the chain is touched; it shrinks to the kept versions. Re-run the
+inventory afterwards to verify. Recommended first run: `-WhatIf`, then one family, then the
+full tenant.
 
 ### Version Cache
 
@@ -617,7 +654,8 @@ This error indicates Azure Storage upload failures, typically caused by:
 
 - Old installer files are automatically removed after packaging
 - Old .intunewin files are kept (one per version)
-- Manually retire old versions in Intune portal if needed
+- Old versions in Intune: `Get-IntuneAppInventory.ps1` shows what the retention policy would
+  remove, `Remove-OldIntuneAppVersions.ps1` removes it (see [Version Cleanup](#version-cleanup))
 
 ### Tenant Management
 
