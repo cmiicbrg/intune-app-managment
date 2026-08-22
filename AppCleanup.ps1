@@ -66,7 +66,7 @@ function Get-AppCleanupPlan {
                 Rank                 = if ($record) { $record.Retention.Rank } else { $null }
                 AgeWeeks             = $candidate.AgeWeeks
                 CreatedDateTime      = if ($record) { $record.CreatedDateTime } else { $null }
-                AssignmentCount      = if ($record) { @($record.Assignments).Count } else { $null }
+                AssignmentCount      = if ($record -and -not $record.AssignmentsUnavailable) { @($record.Assignments).Count } else { $null }   # $null = unknown
                 SupersededBy         = if ($record) { @($record.SupersededBy | ForEach-Object { $_.TargetDisplayName }) } else { @() }
                 InstalledDeviceCount = if ($record -and $record.InstallSummary) { $record.InstallSummary.installedDeviceCount } else { $null }
                 Reason               = $reason

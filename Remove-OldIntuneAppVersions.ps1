@@ -173,7 +173,8 @@ else {
     Write-Host ""
 
     foreach ($deletion in $cleanup.Deletions) {
-        $label = "$($deletion.DisplayName) v$($deletion.DisplayVersion) [$($deletion.Family)] - rank $($deletion.Rank), $($deletion.AgeWeeks) weeks old, $($deletion.AssignmentCount) assignment(s)"
+        $assignmentInfo = if ($null -ne $deletion.AssignmentCount) { "$($deletion.AssignmentCount) assignment(s)" } else { 'assignments unknown' }
+        $label = "$($deletion.DisplayName) v$($deletion.DisplayVersion) [$($deletion.Family)] - rank $($deletion.Rank), $($deletion.AgeWeeks) weeks old, $assignmentInfo"
         $outcome = [ordered]@{
             Id             = $deletion.Id
             Family         = $deletion.Family

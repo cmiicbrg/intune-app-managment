@@ -137,6 +137,7 @@ Describe 'ConvertTo-AppInventoryRecord' {
         $r = ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'x' -Name 'GIMP 3' -Version '3.0' -WeeksOld 1) -Assignments $null -Relationships @() -InstallSummary $null -Families $script:families
         $r.AssignmentsUnavailable | Should -BeTrue
         $r.RelationshipsUnavailable | Should -BeFalse
+        $r.Assignments.Count | Should -Be 0 -Because '@($null) iterates once in PowerShell; a failed read must not produce a phantom assignment'
     }
 
     It 'distinguishes a failed relationship read from an empty relationship set' {

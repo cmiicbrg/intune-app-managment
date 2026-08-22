@@ -146,6 +146,21 @@ Describe 'Get-AppCleanupPlan' {
         $reasons['x-missing'] | Should -Match 'no inventory record'
     }
 
+    It 'reports the assignment count as unknown ($null) when the assignments could not be read' {
+        $unknown = ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-1' -Name 'Google Chrome 130' -Version '130.0.1' -WeeksOld 80) -Assignments $null -Relationships @() -InstallSummary $null -Families $script:families
+        $unknown.Retention = @{ Rank = 9; Action = 'Delete' }
+        $analysis = [PSCustomObject]@{
+            Families = @([PSCustomObject]@{
+                Family = 'Chrome'; InPlan = $true; Policy = [ordered]@{ KeepNewest = 3; KeepNewerThanWeeks = 10 }
+                VersionCount = 9; KeepCount = 3; ReviewCount = 0; Newest = [ordered]@{ Id = 'someone-else' }
+                DeleteCandidates = @([ordered]@{ Id = 'u-1'; DisplayName = 'Google Chrome 130'; Version = '130.0.1'; AgeWeeks = 80 })
+            })
+        }
+        $plan = Get-AppCleanupPlan -Analysis $analysis -Records @($unknown)
+        $plan.Deletions.Count | Should -Be 1
+        $plan.Deletions[0].AssignmentCount | Should -BeNullOrEmpty
+    }
+
     It 'returns an empty plan for an analysis without families' {
         $plan = Get-AppCleanupPlan -Analysis ([PSCustomObject]@{ Families = @() }) -Records @()
         $plan.DeletionCount | Should -Be 0

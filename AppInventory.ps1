@@ -65,7 +65,10 @@ function ConvertTo-AppInventoryRecord {
         $_.Type -eq 'win32LobAppPowerShellScriptDetection' -or ($_.Operator -and $script:InflatingOperators -contains $_.Operator)
     })
 
+    # @($null) iterates once in PowerShell - a failed read ($Assignments = $null) must yield an
+    # empty set here, with AssignmentsUnavailable carrying the "unknown" state.
     $assignmentRecords = @(foreach ($assignment in @($Assignments)) {
+        if ($null -eq $assignment) { continue }
         [ordered]@{
             Intent               = $assignment.Intent
             Target               = $assignment.Target
