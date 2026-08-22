@@ -1023,7 +1023,8 @@ try {
         $retentionFailed = @($retentionResults | Where-Object Outcome -eq 'Failed').Count
         $retentionSkipped = @($retentionResults | Where-Object Outcome -eq 'Skipped').Count
         Write-Host "`nVersion retention: $retentionRemoved old version(s) removed$(if ($retentionSkipped) { ", $retentionSkipped skipped" })$(if ($retentionFailed) { ", $retentionFailed FAILED" })" -ForegroundColor $(if ($retentionFailed) { 'Red' } elseif ($retentionRemoved) { 'Green' } else { 'Gray' })
-        if ($retentionResults.Count -gt 0) {
+        # Every retention pass leaves its audit log, also one that found nothing to remove
+        if ($retentionFamilies.Count -gt 0 -or $retentionResults.Count -gt 0) {
             $retentionLog = Write-AppCleanupLog -Directory (Join-Path $BaseDir 'inventory') -TenantName $TenantName -Now $runStartedUtc `
                 -Mode 'Live' -Trigger 'Deploy' -AppName $AppName -TenantPolicy $retentionPolicy -PlanAppNames @($deploymentPlan.Keys) `
                 -Families @($retentionFamilies) -Results @($retentionResults) -ToolVersionPath (Join-Path $BaseDir 'VERSION.txt')

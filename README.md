@@ -501,8 +501,9 @@ For an opted-in tenant, `Deploy-ToIntune.ps1` runs the same evaluation and execu
 family right after deploying it (new version created, or an existing one reconciled): the
 family is re-read, and versions outside the policy are removed unattended — typically the one
 that was rank 3 before the deploy and is rank 4 now. The deployment summary reports what was
-removed and writes the same `inventory/<Tenant>-cleanup-<timestamp>.json` log (`Trigger:
-Deploy`). `-NoRetention` skips the step; `-ShowPlan` shows whether it would run. The deploy
+removed and every pass — also one that found nothing to remove — writes the same
+`inventory/<Tenant>-cleanup-<timestamp>.json` log with `Trigger: Deploy`. `-NoRetention`
+skips the step; `-ShowPlan` shows whether it would run. The deploy
 also checks the supersedence graph *before* uploading: if the version to be superseded already
 sits in a full graph (11 nodes), the app is not uploaded and the run tells you to clean up
 first — and a supersedence that fails after the upload now fails the deployment loudly (the new
