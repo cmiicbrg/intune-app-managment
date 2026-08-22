@@ -64,6 +64,13 @@ Describe 'Read-IntuneAppInventory' {
         ($result.Records | Where-Object Id -eq 'a1').InstallSummary | Should -BeNullOrEmpty
     }
 
+    It 'treats a successfully read but empty report as "included" with no counts' {
+        Mock Get-InteropAppInstallSummaryReport { @{} }
+        $result = Read-IntuneAppInventory -Families $script:families -IncludeInstallSummary 6> $null
+        $result.IncludesInstallSummary | Should -BeTrue
+        ($result.Records | Where-Object Id -eq 'a1').InstallSummary | Should -BeNullOrEmpty
+    }
+
     It 'does not request the report without -IncludeInstallSummary' {
         $result = Read-IntuneAppInventory -Families $script:families 6> $null
         $result.IncludesInstallSummary | Should -BeFalse

@@ -92,7 +92,7 @@ Describe 'Get-AppCleanupPlan' {
         $stellarium.Deletions.Count | Should -Be 0
         $stellarium.Skipped.Count | Should -Be 1
         $stellarium.Skipped[0].Id | Should -Be 's-0'
-        $stellarium.Skipped[0].Reason | Should -Match 'not in the tenant.s deployment plan'
+        $stellarium.Skipped[0].Reason | Should -Be "family 'Stellarium' is not in the tenant's deployment plan"
         $script:plan.SkippedCount | Should -Be 1
     }
 

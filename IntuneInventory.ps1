@@ -98,7 +98,9 @@ function Read-IntuneAppInventory {
             Write-Host "  Warning: could not read relationships for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
         }
 
-        $installSummary = if ($installSummaries) { $installSummaries["$($app.id)"] } else { $null }
+        # $null check, not truthiness: an empty (but successfully read) report is a hashtable
+        # that evaluates to $false
+        $installSummary = if ($null -ne $installSummaries) { $installSummaries["$($app.id)"] } else { $null }
 
         $records.Add((ConvertTo-AppInventoryRecord -App $app -Assignments $assignments -Relationships $relationships -InstallSummary $installSummary -Families $Families -GroupNames $groupNames))
     }
