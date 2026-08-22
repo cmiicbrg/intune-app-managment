@@ -136,7 +136,10 @@ try {
 
     # Fetch through the read path shared with the cleanup, so both see the same evaluation
     Write-Host "`nFetching Win32 apps..." -ForegroundColor Cyan
-    $inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary:(-not $SkipInstallSummary) -ResolveGroupNames
+    # With -AppName, details are read for that family plus the unmanaged apps only (the latter
+    # for near-miss reporting); other families are classified from the list but not fetched
+    $readScope = if ($AppName) { @{ OnlyFamilies = @($AppName); IncludeUnmanaged = $true } } else { @{} }
+    $inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary:(-not $SkipInstallSummary) -ResolveGroupNames @readScope
     $records = @($inventory.Records)
     $includesInstallSummary = $inventory.IncludesInstallSummary
 

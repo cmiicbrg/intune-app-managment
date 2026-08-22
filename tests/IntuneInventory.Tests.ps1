@@ -71,6 +71,21 @@ Describe 'Read-IntuneAppInventory' {
         ($result.Records | Where-Object Id -eq 'a1').InstallSummary | Should -BeNullOrEmpty
     }
 
+    It 'reads details only for the selected families, optionally plus the unmanaged apps' {
+        Mock Get-InteropWin32App { @((New-GraphApp -Id 'a1' -Name 'Google Chrome 150'), (New-GraphApp -Id 'a2' -Name 'Some Other App'), (New-GraphApp -Id 'a3' -Name 'Mozilla Firefox 153 (German)')) }
+
+        $chromeOnly = Read-IntuneAppInventory -Families $script:families -OnlyFamilies @('Chrome') 6> $null
+        $chromeOnly.AppCount | Should -Be 3
+        $chromeOnly.SelectedCount | Should -Be 1
+        $chromeOnly.Records.Id | Should -Be @('a1')
+        Should -Invoke Get-InteropAppAssignmentDetail -Times 1 -Exactly
+        Should -Invoke Get-InteropAppRelationship -Times 1 -Exactly
+
+        $withUnmanaged = Read-IntuneAppInventory -Families $script:families -OnlyFamilies @('Chrome') -IncludeUnmanaged 6> $null
+        ($withUnmanaged.Records.Id | Sort-Object) | Should -Be @('a1', 'a2')
+        $withUnmanaged.Records.Id | Should -Not -Contain 'a3' -Because 'Firefox is a managed family outside the selection'
+    }
+
     It 'does not request the report without -IncludeInstallSummary' {
         $result = Read-IntuneAppInventory -Families $script:families 6> $null
         $result.IncludesInstallSummary | Should -BeFalse

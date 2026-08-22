@@ -20,7 +20,11 @@ function Read-IntuneAppInventory {
     -IncludeInstallSummary, the install counts from one tenant-wide report. Group display names
     are resolved with -ResolveGroupNames when Microsoft.Graph.Groups is available.
 
-    Returns @{ Records = @(...); AppCount; IncludesInstallSummary }.
+    With -OnlyFamilies, the per-app detail reads are limited to the apps of those families
+    (classified by display name right after the list call, so nothing else is fetched);
+    -IncludeUnmanaged additionally reads the apps that belong to no family.
+
+    Returns @{ Records = @(...); AppCount (in tenant); SelectedCount; IncludesInstallSummary }.
     #>
     [CmdletBinding()]
     param(
@@ -29,13 +33,28 @@ function Read-IntuneAppInventory {
         [AllowEmptyCollection()]
         [array]$Families,
 
+        # AppConfig names; when set, only these families' apps get their details read
+        [string[]]$OnlyFamilies,
+
+        # With -OnlyFamilies: also read the apps that belong to no family (near-miss reporting)
+        [switch]$IncludeUnmanaged,
+
         [switch]$IncludeInstallSummary,
 
         [switch]$ResolveGroupNames
     )
 
     $apps = @(Get-InteropWin32App)
-    Write-Host "  $($apps.Count) Win32 app(s) in tenant" -ForegroundColor Gray
+    $appCount = $apps.Count
+    Write-Host "  $appCount Win32 app(s) in tenant" -ForegroundColor Gray
+
+    if ($OnlyFamilies) {
+        $apps = @($apps | Where-Object {
+            $family = Resolve-AppFamily -DisplayName "$($_.displayName)" -Families $Families
+            if ($family) { $OnlyFamilies -contains $family.AppConfigName } else { [bool]$IncludeUnmanaged }
+        })
+        Write-Host "  $($apps.Count) selected for $($OnlyFamilies -join ', ')$(if ($IncludeUnmanaged) { ' (plus unmanaged apps)' }) - details are read for these only" -ForegroundColor Gray
+    }
 
     # Group name resolution is best-effort: only when the Groups module is already available
     $groupNames = @{}
@@ -108,7 +127,8 @@ function Read-IntuneAppInventory {
 
     return [PSCustomObject]@{
         Records                = @($records)
-        AppCount               = $apps.Count
+        AppCount               = $appCount
+        SelectedCount          = $apps.Count
         IncludesInstallSummary = ($null -ne $installSummaries)
     }
 }

@@ -433,7 +433,7 @@ it to `inventory/` (git-ignored) as JSON plus a Markdown report:
 
 ```powershell
 .\Get-IntuneAppInventory.ps1 -TenantName "School"                       # full inventory
-.\Get-IntuneAppInventory.ps1 -TenantName "School" -AppName "Chrome"     # one family
+.\Get-IntuneAppInventory.ps1 -TenantName "School" -AppName "Chrome"     # one family (only its apps and the unmanaged ones are read in detail)
 .\Get-IntuneAppInventory.ps1 -TenantName "School" -SkipInstallSummary   # skip the install counts
 ```
 

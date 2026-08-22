@@ -124,11 +124,14 @@ if (-not (Connect-IntuneTenantSession -TenantId $tenantCreds.TenantId -ClientId 
 try {
     # --- Evaluate live (identical to the inventory) ----------------------------------------------
     Write-Host "`nReading the tenant..." -ForegroundColor Cyan
-    $inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary
+    # With -AppName only that family's apps are read in detail (the cleanup never touches
+    # unmanaged apps, so they are not needed here)
+    $readScope = if ($AppName) { @{ OnlyFamilies = @($AppName) } } else { @{} }
+    $inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary @readScope
     $records = @($inventory.Records)
     $recordsForAnalysis = $records
     if ($AppName) {
-        $recordsForAnalysis = @($records | Where-Object { $_.Family -eq $AppName -or $null -eq $_.Family })
+        $recordsForAnalysis = @($records | Where-Object { $_.Family -eq $AppName })
     }
 
     $appConfigs = @{}
