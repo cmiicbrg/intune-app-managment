@@ -143,6 +143,69 @@ Describe 'Get-InteropWin32App (native Graph list + per-ID fetch)' {
     }
 }
 
+Describe 'Get-InteropAppAssignmentDetail (native Graph read, full detail)' {
+    It 'returns intent, normalized target, group id and the auto-update flag, following paging' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -like '*next-assign*') {
+                [PSCustomObject]@{
+                    value = @(
+                        [PSCustomObject]@{ id = 'a3'; intent = 'required'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g-1' }; settings = [PSCustomObject]@{} }
+                    )
+                }
+            }
+            else {
+                [PSCustomObject]@{
+                    value             = @(
+                        [PSCustomObject]@{ id = 'a1'; intent = 'available'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' }; settings = [PSCustomObject]@{ autoUpdateSettings = [PSCustomObject]@{ autoUpdateSupersededAppsState = 'enabled' } } },
+                        [PSCustomObject]@{ id = 'a2'; intent = 'available'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.allDevicesAssignmentTarget' }; settings = [PSCustomObject]@{ autoUpdateSettings = [PSCustomObject]@{ autoUpdateSupersededAppsState = 'notConfigured' } } }
+                    )
+                    '@odata.nextLink' = 'https://graph.microsoft.com/beta/next-assign'
+                }
+            }
+        }
+
+        $details = @(Get-InteropAppAssignmentDetail -AppId 'app-1')
+        $details.Count | Should -Be 3
+        $details[0].Target | Should -Be 'AllUsers'
+        $details[0].AutoUpdateSuperseded | Should -BeTrue
+        $details[1].Target | Should -Be 'AllDevices'
+        $details[1].AutoUpdateSuperseded | Should -BeFalse
+        $details[2].Target | Should -Be 'Group:g-1'
+        $details[2].GroupId | Should -Be 'g-1'
+        $details[2].Intent | Should -Be 'required'
+        $details[2].AutoUpdateSuperseded | Should -BeNullOrEmpty -Because 'no autoUpdateSettings on the assignment'
+    }
+
+    It 'distinguishes exclusion targets from group assignments' {
+        Mock Invoke-MgGraphRequest {
+            [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'a9'; intent = 'available'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.exclusionGroupAssignmentTarget'; groupId = 'g-x' }; settings = $null }) }
+        }
+        $detail = (Get-InteropAppAssignmentDetail -AppId 'app-1')[0]
+        $detail.Target | Should -Be 'ExcludedGroup:g-x'
+        $detail.GroupId | Should -Be 'g-x'
+    }
+
+    It 'labels unknown target types instead of dropping them' {
+        Mock Invoke-MgGraphRequest {
+            [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'a9'; intent = 'required'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.configurationManagerCollectionAssignmentTarget'; collectionId = 'c-1' }; settings = $null }) }
+        }
+        (Get-InteropAppAssignmentDetail -AppId 'app-1')[0].Target | Should -Be 'Other:configurationManagerCollectionAssignmentTarget'
+    }
+
+    It 'throws when the read fails (callers decide how to degrade)' {
+        Mock Invoke-MgGraphRequest { throw 'Graph unavailable' }
+        { Get-InteropAppAssignmentDetail -AppId 'app-1' } | Should -Throw
+    }
+}
+
+Describe 'Get-InteropAppInstallSummary' {
+    It 'GETs the installSummary resource' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ installedDeviceCount = 5; failedDeviceCount = 1 } }
+        (Get-InteropAppInstallSummary -AppId 'app-1').installedDeviceCount | Should -Be 5
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'GET' -and $Uri -like '*/mobileApps/app-1/installSummary' } -Times 1 -Exactly
+    }
+}
+
 Describe 'Get-InteropAppAssignment (native Graph read + normalization)' {
     It 'normalizes all three target types' {
         Mock Invoke-MgGraphRequest {

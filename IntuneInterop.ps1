@@ -597,7 +597,13 @@ function New-InteropAssignmentBody {
 function Get-InteropAppRelationship {
     <#
     .SYNOPSIS
-    Internal: returns an app's relationship objects, optionally filtered by @odata.type
+    Returns an app's relationship objects (both directions), optionally filtered by @odata.type
+
+    .DESCRIPTION
+    Each mobileAppRelationship carries targetId/targetDisplayName/targetDisplayVersion and
+    targetType: 'child' means this app supersedes / depends on the target, 'parent' means the
+    target supersedes / depends on this app. Used by the relationship writers (read-merge-write)
+    and by the inventory.
     #>
     [CmdletBinding()]
     param(
@@ -836,6 +842,79 @@ function Get-InteropAppAssignment {
     # which also yields an empty array when there are no targets. Returning ", $targets"
     # here would make @(...) produce a nested single-element array and break -contains.
     return $targets
+}
+
+function Get-InteropAppAssignmentDetail {
+    <#
+    .SYNOPSIS
+    Returns the app's assignments with intent, normalized target, and the auto-update flag
+
+    .OUTPUTS
+    Objects with Id, Intent, Target ('AllUsers' | 'AllDevices' | 'Group:<groupId>' |
+    'ExcludedGroup:<groupId>' | 'Other:<type>'), GroupId ($null unless a group or excluded-group
+    target), AutoUpdateSuperseded ($true / $false / $null when the assignment carries no
+    autoUpdateSettings). Throws when the assignments cannot be read.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    $details = [System.Collections.Generic.List[object]]::new()
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+    while ($uri) {
+        $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
+        foreach ($assignment in @($response.value)) {
+            $targetType = "$($assignment.target.'@odata.type')"
+            $groupId = $null
+            # Exclusion targets are checked before the plain group pattern, which they also match;
+            # the breaks matter because switch keeps evaluating cases after a match
+            $target = switch -Wildcard ($targetType) {
+                '*allLicensedUsersAssignmentTarget' { 'AllUsers'; break }
+                '*allDevicesAssignmentTarget'       { 'AllDevices'; break }
+                '*exclusionGroupAssignmentTarget'   { $groupId = $assignment.target.groupId; "ExcludedGroup:$groupId"; break }
+                '*groupAssignmentTarget'            { $groupId = $assignment.target.groupId; "Group:$groupId"; break }
+                default                             { "Other:$($targetType -replace '^#microsoft\.graph\.', '')" }
+            }
+
+            $autoUpdate = $null
+            $state = $assignment.settings.autoUpdateSettings.autoUpdateSupersededAppsState
+            if ($null -ne $state) {
+                $autoUpdate = ($state -eq 'enabled')
+            }
+
+            $details.Add([PSCustomObject]@{
+                Id                   = $assignment.id
+                Intent               = $assignment.intent
+                Target               = $target
+                GroupId              = $groupId
+                AutoUpdateSuperseded = $autoUpdate
+            })
+        }
+        $uri = $response.'@odata.nextLink'
+    }
+    return @($details)
+}
+
+function Get-InteropAppInstallSummary {
+    <#
+    .SYNOPSIS
+    Returns the app's install summary (device and user counts by state)
+
+    .DESCRIPTION
+    GET /mobileApps/{id}/installSummary. Note for version-comparison detection rules
+    ("greaterThanOrEqual" and >=-style scripts): a device with a newer version installed also
+    detects every older version, so installedDeviceCount on old versions is inflated - it is only
+    a reliable "still in use" signal for product-code and equal-operator apps.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -OutputType PSObject -ErrorAction Stop
 }
 
 function Add-InteropAllUsersAssignment {
