@@ -150,6 +150,20 @@ if (Get-Module -ListAvailable -Name Microsoft.Graph.Groups) {
     }
 }
 
+# Install counts come from one tenant-wide report (getAppsInstallSummaryReport) rather than one
+# request per app. If the report fails, the inventory still runs - without counts.
+$installSummaries = $null
+if (-not $SkipInstallSummary) {
+    try {
+        $installSummaries = Get-InteropAppInstallSummaryReport
+        Write-Host "Read install summaries for $($installSummaries.Count) app(s)" -ForegroundColor Gray
+    }
+    catch {
+        Write-Host "  Warning: could not read the install summary report, the inventory will not include install counts: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+$includesInstallSummary = ($null -ne $installSummaries)
+
 $records = [System.Collections.Generic.List[object]]::new()
 $index = 0
 foreach ($app in $apps) {
@@ -185,15 +199,7 @@ foreach ($app in $apps) {
         Write-Host "  Warning: could not read relationships for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
     }
 
-    $installSummary = $null
-    if (-not $SkipInstallSummary) {
-        try {
-            $installSummary = Get-InteropAppInstallSummary -AppId $app.id
-        }
-        catch {
-            Write-Host "  Warning: could not read install summary for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
+    $installSummary = if ($installSummaries) { $installSummaries["$($app.id)"] } else { $null }
 
     $records.Add((ConvertTo-AppInventoryRecord -App $app -Assignments $assignments -Relationships $relationships -InstallSummary $installSummary -Families $allFamilies -GroupNames $groupNames))
 }
@@ -223,7 +229,7 @@ $document = [ordered]@{
     Tenant                 = $reportName
     GeneratedUtc           = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
     ToolVersion            = ((Get-Content (Join-Path $PSScriptRoot 'VERSION.txt') -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
-    IncludesInstallSummary = (-not $SkipInstallSummary)
+    IncludesInstallSummary = $includesInstallSummary
     PlanApps               = $planAppNames
     Summary                = $analysis.Summary
     Families               = $analysis.Families
@@ -233,7 +239,7 @@ $document = [ordered]@{
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($jsonPath, ($document | ConvertTo-Json -Depth 12), $utf8)
-[System.IO.File]::WriteAllText($mdPath, (Format-AppInventoryMarkdown -TenantName $reportName -GeneratedUtc $now -Analysis $analysis -Records $recordsForAnalysis -IncludesInstallSummary (-not $SkipInstallSummary)), $utf8)
+[System.IO.File]::WriteAllText($mdPath, (Format-AppInventoryMarkdown -TenantName $reportName -GeneratedUtc $now -Analysis $analysis -Records $recordsForAnalysis -IncludesInstallSummary $includesInstallSummary), $utf8)
 
 # Console summary
 $s = $analysis.Summary

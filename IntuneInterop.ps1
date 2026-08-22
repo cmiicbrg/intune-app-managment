@@ -897,19 +897,66 @@ function Get-InteropAppAssignmentDetail {
     return @($details)
 }
 
+# Runs one of the Intune reporting actions (POST /deviceManagement/reports/<action>) and returns
+# the parsed report: @{ TotalRowCount; Schema = @(@{Column}...); Values = @(@(row)...) }.
+# These endpoints deliver their JSON as an octet-stream download (with a Content-Disposition
+# header), which Invoke-MgGraphRequest refuses to parse inline - per its own guidance the
+# response is written to a temp file and parsed from there.
+function Invoke-InteropReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Action,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Body
+    )
+
+    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('InteropReport-{0}.json' -f [guid]::NewGuid().ToString('N'))
+    try {
+        $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/reports/$Action" -Body ($Body | ConvertTo-Json) -ContentType 'application/json' -OutputFilePath $tempPath -ErrorAction Stop
+        return Get-Content -Path $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Report '$Action' failed: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Maps one report row onto an object whose property names are the report's Schema columns with
+# the first letter lowercased (InstalledDeviceCount -> installedDeviceCount), i.e. the property
+# names of the retired mobileApps/{id}/installSummary resource.
+function ConvertFrom-InteropReportRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Schema,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] $Row
+    )
+
+    $result = [ordered]@{}
+    $columns = @($Schema)
+    for ($i = 0; $i -lt $columns.Count; $i++) {
+        $name = "$($columns[$i].Column)"
+        if ([string]::IsNullOrEmpty($name)) { continue }
+        $result[($name.Substring(0, 1).ToLowerInvariant() + $name.Substring(1))] = $Row[$i]
+    }
+    return [PSCustomObject]$result
+}
+
 function Get-InteropAppInstallSummary {
     <#
     .SYNOPSIS
-    Returns the app's install summary (device and user counts by state)
+    Returns one app's install summary (device and user counts by state), or $null
 
     .DESCRIPTION
-    Tries the documented GET /mobileApps/{id}/installSummary first; that legacy endpoint has
-    started returning 400 in current service releases, so on failure it falls back to what the
-    Intune admin center uses - POST /deviceManagement/reports/getAppStatusOverviewReport with an
-    ApplicationId filter (the response is an octet-stream JSON download, materialized via a temp
-    file) - and maps the report's Schema/Values table onto the same camelCase property names
-    (installedDeviceCount, ...), so callers see one shape either way. Returns $null when the
-    report has no row for the app; throws when both paths fail.
+    Uses what the Intune admin center uses - POST /deviceManagement/reports/getAppStatusOverviewReport
+    with an ApplicationId filter - and exposes the row with camelCase property names
+    (installedDeviceCount, failedDeviceCount, pendingInstallDeviceCount, ...). The legacy
+    GET /mobileApps/{id}/installSummary resource is retired (returns 400) and is not used.
+    Returns $null when the report has no row for the app. For every app at once use
+    Get-InteropAppInstallSummaryReport instead of calling this per app.
 
     Note for version-comparison detection rules ("greaterThanOrEqual" and >=-style scripts):
     a device with a newer version installed also detects every older version, so
@@ -922,49 +969,47 @@ function Get-InteropAppInstallSummary {
         [string]$AppId
     )
 
-    # The fallback is deliberately broad (any legacy-GET failure, not just 400): the endpoint is
-    # decaying and its failure mode may change again. To keep real problems diagnosable, the
-    # original error is preserved and both errors are thrown together when the fallback fails too.
-    $legacyError = $null
-    try {
-        return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -OutputType PSObject -ErrorAction Stop
-    }
-    catch {
-        $legacyError = $_.Exception.Message
-        Write-Verbose "installSummary GET failed for app '$AppId' ($legacyError); falling back to getAppStatusOverviewReport"
-    }
-
-    $body = @{ filter = "(ApplicationId eq '$AppId')" } | ConvertTo-Json
-    # The reports endpoints deliver their JSON as an octet-stream download (with a
-    # Content-Disposition header), which Invoke-MgGraphRequest refuses to parse inline -
-    # per its own guidance the response is written to a temp file and parsed from there.
-    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('InteropReport-{0}.json' -f [guid]::NewGuid().ToString('N'))
-    try {
-        $null = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppStatusOverviewReport' -Body $body -ContentType 'application/json' -OutputFilePath $tempPath -ErrorAction Stop
-        $report = Get-Content -Path $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        throw "Install summary unavailable for app '$AppId'. Legacy installSummary GET failed: $legacyError | getAppStatusOverviewReport fallback failed: $($_.Exception.Message)"
-    }
-    finally {
-        Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
-    }
-
+    $report = Invoke-InteropReport -Action 'getAppStatusOverviewReport' -Body @{ filter = "(ApplicationId eq '$AppId')" }
     $row = @($report.Values) | Select-Object -First 1
     if ($null -eq $row) {
         return $null
     }
+    return ConvertFrom-InteropReportRow -Schema $report.Schema -Row $row
+}
 
-    # Schema columns are PascalCase (InstalledDeviceCount, ...); lowercase the first letter to
-    # match the legacy installSummary property names
-    $summary = [ordered]@{}
-    $columns = @($report.Schema)
-    for ($i = 0; $i -lt $columns.Count; $i++) {
-        $name = "$($columns[$i].Column)"
-        if ([string]::IsNullOrEmpty($name)) { continue }
-        $summary[($name.Substring(0, 1).ToLowerInvariant() + $name.Substring(1))] = $row[$i]
+function Get-InteropAppInstallSummaryReport {
+    <#
+    .SYNOPSIS
+    Returns the install summary of every app in the tenant as a hashtable keyed by app id
+
+    .DESCRIPTION
+    One paged POST /deviceManagement/reports/getAppsInstallSummaryReport instead of one request
+    per app. Each value has the same camelCase shape as Get-InteropAppInstallSummary
+    (installedDeviceCount, failedDeviceCount, ...). Apps without a row are simply absent.
+    #>
+    [CmdletBinding()]
+    param(
+        # Rows per request
+        [int]$PageSize = 500
+    )
+
+    $result = @{}
+    $skip = 0
+    while ($true) {
+        $report = Invoke-InteropReport -Action 'getAppsInstallSummaryReport' -Body @{ top = $PageSize; skip = $skip }
+        $rows = @($report.Values)
+        $idIndex = [array]::FindIndex(@($report.Schema), [Predicate[object]]{ param($c) "$($c.Column)" -eq 'ApplicationId' })
+        if ($rows.Count -gt 0 -and $idIndex -lt 0) {
+            throw "Report 'getAppsInstallSummaryReport' has no ApplicationId column (columns: $(@($report.Schema | ForEach-Object { $_.Column }) -join ', '))"
+        }
+        foreach ($row in $rows) {
+            $result["$($row[$idIndex])"] = ConvertFrom-InteropReportRow -Schema $report.Schema -Row $row
+        }
+        $skip += $rows.Count
+        if ($rows.Count -lt $PageSize -or $rows.Count -eq 0) { break }
+        if ($null -ne $report.TotalRowCount -and $skip -ge [int]$report.TotalRowCount) { break }
     }
-    return [PSCustomObject]$summary
+    return $result
 }
 
 function Add-InteropAllUsersAssignment {
