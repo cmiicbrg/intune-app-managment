@@ -96,12 +96,15 @@ if (-not (Connect-IntuneTenantSession -TenantId $TenantId -ClientId $ClientId -C
     exit 1
 }
 
-# Families, plan scope, retention policy resolver
-$families = @(Get-AppFamilyCatalog)
+# Families, plan scope, retention policy resolver. Classification always uses the FULL catalog
+# so apps of other families are recognized as managed (not misreported as unmanaged) even when
+# -AppName narrows the analysis scope to one family.
+$allFamilies = @(Get-AppFamilyCatalog)
+$families = $allFamilies
 if ($AppName) {
-    $selected = $families | Where-Object { $_.AppConfigName -eq $AppName }
+    $selected = $allFamilies | Where-Object { $_.AppConfigName -eq $AppName }
     if (-not $selected) {
-        Write-Host "Error: App '$AppName' not found in AppConfig.ps1. Known apps: $($families.AppConfigName -join ', ')" -ForegroundColor Red
+        Write-Host "Error: App '$AppName' not found in AppConfig.ps1. Known apps: $($allFamilies.AppConfigName -join ', ')" -ForegroundColor Red
         exit 1
     }
     $families = @($selected)
@@ -190,13 +193,19 @@ foreach ($app in $apps) {
         }
     }
 
-    $records.Add((ConvertTo-AppInventoryRecord -App $app -Assignments $assignments -Relationships $relationships -InstallSummary $installSummary -Families $families -GroupNames $groupNames))
+    $records.Add((ConvertTo-AppInventoryRecord -App $app -Assignments $assignments -Relationships $relationships -InstallSummary $installSummary -Families $allFamilies -GroupNames $groupNames))
 }
 Write-Progress -Activity 'Reading app details' -Completed
 
-# Analyze
+# Analyze. With -AppName, scope the records to that family plus the unmanaged apps (so near-miss
+# names of the selected family are still reported); apps of other families are out of scope but
+# correctly classified, not "unmanaged".
+$recordsForAnalysis = @($records)
+if ($AppName) {
+    $recordsForAnalysis = @($records | Where-Object { $_.Family -eq $AppName -or $null -eq $_.Family })
+}
 $now = [datetime]::UtcNow
-$analysis = Get-AppInventoryAnalysis -Records @($records) -Families $families -PolicyResolver $policyResolver -PlanAppNames $planAppNames -AppConfigs $appConfigs -Now $now
+$analysis = Get-AppInventoryAnalysis -Records $recordsForAnalysis -Families $families -PolicyResolver $policyResolver -PlanAppNames $planAppNames -AppConfigs $appConfigs -Now $now
 
 # Write
 if (-not $OutputPath) {
@@ -211,18 +220,18 @@ $mdPath = Join-Path $OutputPath "$safeName-$stamp.md"
 $document = [ordered]@{
     Tenant                 = $reportName
     GeneratedUtc           = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    ToolVersion            = (Get-Content (Join-Path $PSScriptRoot 'VERSION.txt') -Raw -ErrorAction SilentlyContinue).Trim()
+    ToolVersion            = ((Get-Content (Join-Path $PSScriptRoot 'VERSION.txt') -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
     IncludesInstallSummary = (-not $SkipInstallSummary)
     PlanApps               = $planAppNames
     Summary                = $analysis.Summary
     Families               = $analysis.Families
     Anomalies              = $analysis.Anomalies
     Unmanaged              = $analysis.Unmanaged
-    Apps                   = @($records | Select-Object -Property * -ExcludeProperty ParsedVersion)
+    Apps                   = @($recordsForAnalysis | Select-Object -Property * -ExcludeProperty ParsedVersion)
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [System.IO.File]::WriteAllText($jsonPath, ($document | ConvertTo-Json -Depth 12), $utf8)
-[System.IO.File]::WriteAllText($mdPath, (Format-AppInventoryMarkdown -TenantName $reportName -GeneratedUtc $now -Analysis $analysis -Records @($records) -IncludesInstallSummary (-not $SkipInstallSummary)), $utf8)
+[System.IO.File]::WriteAllText($mdPath, (Format-AppInventoryMarkdown -TenantName $reportName -GeneratedUtc $now -Analysis $analysis -Records $recordsForAnalysis -IncludesInstallSummary (-not $SkipInstallSummary)), $utf8)
 
 # Console summary
 $s = $analysis.Summary

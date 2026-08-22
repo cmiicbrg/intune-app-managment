@@ -236,9 +236,12 @@ function Get-AppInventoryAnalysis {
     # Unmanaged apps: near misses first (actionable), then everything else
     $unmanaged = [System.Collections.Generic.List[object]]::new()
     foreach ($record in ($Records | Where-Object { $null -eq $_.Family })) {
-        if ($record.FamilyNearMiss) {
-            $template = ($Families | Where-Object AppConfigName -eq $record.FamilyNearMiss).Name
-            $anomalies.Add((New-Anomaly -Type 'NamingConventionMismatch' -Family $record.FamilyNearMiss -Message "'$($record.DisplayName)' looks like $($record.FamilyNearMiss) but does not follow the naming convention, so it is not managed (never superseded, never deleted). Rename it to the pattern '$template' with its version to bring it under management." -AppIds @($record.Id)))
+        # The anomaly only fires when the near-miss family is in the analysis scope (with -AppName
+        # the record may resemble an out-of-scope family); the Unmanaged listing keeps LooksLike
+        # either way.
+        $nearMissFamily = if ($record.FamilyNearMiss) { $Families | Where-Object AppConfigName -eq $record.FamilyNearMiss | Select-Object -First 1 } else { $null }
+        if ($nearMissFamily) {
+            $anomalies.Add((New-Anomaly -Type 'NamingConventionMismatch' -Family $record.FamilyNearMiss -Message "'$($record.DisplayName)' looks like $($record.FamilyNearMiss) but does not follow the naming convention, so it is not managed (never superseded, never deleted). Rename it to the pattern '$($nearMissFamily.Name)' with its version to bring it under management." -AppIds @($record.Id)))
         }
         $unmanaged.Add([ordered]@{ Id = $record.Id; DisplayName = $record.DisplayName; DisplayVersion = $record.DisplayVersion; Publisher = $record.Publisher; LooksLike = $record.FamilyNearMiss })
     }

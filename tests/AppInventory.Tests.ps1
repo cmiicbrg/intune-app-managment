@@ -224,6 +224,26 @@ Describe 'Get-AppInventoryAnalysis' {
         $noPlan = Get-AppInventoryAnalysis -Records @($script:records) -Families $script:families -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
         ($noPlan.Families | Where-Object Family -eq 'Stellarium').InPlan | Should -BeTrue
     }
+
+    It 'scopes cleanly to one family: other families are neither reported nor called unmanaged' {
+        # Mirrors the -AppName flow of the script: classification against the full catalog,
+        # analysis over the selected family's members plus the unmanaged records
+        $scopeFamilies = @($script:families | Where-Object AppConfigName -eq 'Chrome')
+        $scopedRecords = @($script:records | Where-Object { $_.Family -eq 'Chrome' -or $null -eq $_.Family })
+        $scoped = Get-AppInventoryAnalysis -Records $scopedRecords -Families $scopeFamilies -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
+
+        $scoped.Families.Family | Should -Be @('Chrome')
+        # Stellarium apps are classified (Family set), so they are not in the unmanaged list
+        $scoped.Unmanaged.DisplayName | Should -Not -Contain 'Stellarium 26'
+        $scoped.Unmanaged.Count | Should -Be 2
+        # The Chrome near miss still fires with the rename suggestion
+        ($scoped.Anomalies | Where-Object Type -eq 'NamingConventionMismatch').Family | Should -Be 'Chrome'
+        # A near miss of an out-of-scope family would keep its LooksLike but raise no anomaly
+        $stellariumScope = @($script:families | Where-Object AppConfigName -eq 'Stellarium')
+        $stellariumScoped = Get-AppInventoryAnalysis -Records $scopedRecords -Families $stellariumScope -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
+        ($stellariumScoped.Anomalies | Where-Object Type -eq 'NamingConventionMismatch') | Should -BeNullOrEmpty
+        ($stellariumScoped.Unmanaged | Where-Object DisplayName -eq 'Google Chrome Remote Desktop').LooksLike | Should -Be 'Chrome'
+    }
 }
 
 Describe 'Format-AppInventoryMarkdown' {
