@@ -47,8 +47,8 @@ Describe 'Read-IntuneAppInventory' {
     }
 
     It 'records failed assignment and relationship reads as unavailable, never as empty sets' {
-        Mock Get-InteropAppAssignmentDetail { if ($AppId -eq 'a1') { throw 'assignments down' }; @() }
-        Mock Get-InteropAppRelationship { if ($AppId -eq 'a2') { throw 'relationships down' }; @() }
+        Mock Get-InteropAppAssignmentDetail { param($AppId) if ($AppId -eq 'a1') { throw 'assignments down' }; @() }
+        Mock Get-InteropAppRelationship { param($AppId) if ($AppId -eq 'a2') { throw 'relationships down' }; @() }
         $result = Read-IntuneAppInventory -Families $script:families 6> $null
         ($result.Records | Where-Object Id -eq 'a1').AssignmentsUnavailable | Should -BeTrue
         ($result.Records | Where-Object Id -eq 'a1').RelationshipsUnavailable | Should -BeFalse
