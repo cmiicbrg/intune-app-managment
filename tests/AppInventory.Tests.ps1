@@ -184,10 +184,8 @@ Describe 'Get-AppInventoryAnalysis with incomplete relationship data' {
         $md | Should -Match 'Incomplete data'
     }
 
-    It 'only reports OlderVersionsStillAssigned for versions Intune actually links as superseded' {
-        # p-0 is older and assigned available but has no SupersededBy relationship (unlinked)
-        $older = $script:partialAnalysis.Anomalies | Where-Object Type -eq 'OlderVersionsStillAssigned'
-        ($older.AppIds | Sort-Object) | Should -Be @('p-1', 'p-2')
+    It 'does not call an app with unreadable relationships "unlinked" (unknown is not unlinked)' {
+        ($script:partialAnalysis.Anomalies | Where-Object Type -eq 'OlderVersionUnlinked') | Should -BeNullOrEmpty
     }
 
     It 'leaves the full fixture untouched' {
@@ -225,13 +223,10 @@ Describe 'Get-AppInventoryAnalysis' {
         ($script:analysis.Anomalies | Where-Object { $_.Type -eq 'SupersedenceGraphNearLimit' }).Family | Should -Be 'Chrome'
     }
 
-    It 'flags superseded versions still assigned available, with the Company Portal note for inflating families' {
-        $stel = $script:analysis.Anomalies | Where-Object { $_.Type -eq 'OlderVersionsStillAssigned' -and $_.Family -eq 'Stellarium' }
-        $stel | Should -Not -BeNullOrEmpty
-        ($stel.AppIds | Sort-Object) | Should -Be @('stel-1', 'stel-2') -Because 'both older versions still carry an available assignment'
-        $stel.Message | Should -Match 'Company Portal'
-        $zip = $script:analysis.Anomalies | Where-Object { $_.Type -eq 'OlderVersionsStillAssigned' -and $_.Family -eq 'SevenZip' }
-        $zip.Message | Should -Not -Match 'Company Portal' -Because 'product-code detection does not inflate'
+    It 'never flags superseded versions that keep their available assignment (that is how supersedence works)' {
+        ($script:analysis.Anomalies | Where-Object Type -eq 'OlderVersionsStillAssigned') | Should -BeNullOrEmpty
+        # Every older Chrome / Stellarium / 7-Zip version in the fixture is linked and assigned: nothing to report
+        ($script:analysis.Anomalies | Where-Object { $_.Type -eq 'OlderVersionUnlinked' -and $_.Family -in @('Chrome', 'Stellarium', 'SevenZip') }) | Should -BeNullOrEmpty
     }
 
     It 'flags superseding versions whose available assignment lacks auto-update' {
@@ -300,6 +295,45 @@ Describe 'Get-AppInventoryAnalysis' {
         $stellariumScoped = Get-AppInventoryAnalysis -Records $scopedRecords -Families $stellariumScope -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
         ($stellariumScoped.Anomalies | Where-Object Type -eq 'NamingConventionMismatch') | Should -BeNullOrEmpty
         ($stellariumScoped.Unmanaged | Where-Object DisplayName -eq 'Google Chrome Remote Desktop').LooksLike | Should -Be 'Chrome'
+    }
+}
+
+Describe 'Get-AppInventoryAnalysis: older versions outside the supersedence chain' {
+    BeforeAll {
+        $script:unlinked = [System.Collections.Generic.List[object]]::new()
+        # u-1 newest; u-2 linked and assigned (normal); u-3 assigned but nothing supersedes it
+        # (shows up as a separate Company Portal app); u-4 unlinked but unassigned (harmless)
+        # u-1 carries a proper auto-updating assignment plus an exclusion row (no settings on it)
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-1' -Name 'Stellarium 26' -Version '26.2' -WeeksOld 1) -Assignments @((New-Assignment -AutoUpdate $true), (New-Assignment -Target 'ExcludedGroup:g-excluded')) -Relationships @((New-Supersedes -TargetId 'u-2' -Version '25.1')) -InstallSummary $null -Families $script:families))
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-2' -Name 'Stellarium 25' -Version '25.1' -WeeksOld 30) -Assignments @((New-Assignment)) -Relationships @((New-SupersededBy -TargetId 'u-1' -Version '26.2')) -InstallSummary $null -Families $script:families))
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-3' -Name 'Stellarium 24' -Version '24.1' -WeeksOld 50) -Assignments @((New-Assignment)) -Relationships @() -InstallSummary $null -Families $script:families))
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-4' -Name 'Stellarium 23' -Version '23.1' -WeeksOld 60) -Assignments @() -Relationships @() -InstallSummary $null -Families $script:families))
+        # u-5 unlinked with a required-only assignment: not visible in the Company Portal, not flagged
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-5' -Name 'Stellarium 22' -Version '22.1' -WeeksOld 70) -Assignments @((New-Assignment -Intent 'required' -Target 'AllDevices')) -Relationships @() -InstallSummary $null -Families $script:families))
+        # u-6 unlinked with nothing but an exclusion row: available to nobody, not flagged
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-6' -Name 'Stellarium 21' -Version '21.1' -WeeksOld 80) -Assignments @((New-Assignment -Target 'ExcludedGroup:g-excluded')) -Relationships @() -InstallSummary $null -Families $script:families))
+        $script:unlinkedAnalysis = Get-AppInventoryAnalysis -Records @($script:unlinked) -Families $script:families -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
+    }
+
+    It 'flags only the assigned older version that nothing supersedes' {
+        $anomaly = @($script:unlinkedAnalysis.Anomalies | Where-Object Type -eq 'OlderVersionUnlinked')
+        $anomaly.Count | Should -Be 1
+        $anomaly[0].Family | Should -Be 'Stellarium'
+        $anomaly[0].AppIds | Should -Be @('u-3')
+        $anomaly[0].Message | Should -Match 'Stellarium 24 v24.1'
+        $anomaly[0].Message | Should -Match 'separate apps in the Company Portal'
+    }
+
+    It 'leaves the linked, the unassigned and the required-only older versions alone' {
+        $ids = @($script:unlinkedAnalysis.Anomalies | Where-Object Type -eq 'OlderVersionUnlinked' | ForEach-Object { $_.AppIds })
+        $ids | Should -Not -Contain 'u-2' -Because 'it is superseded - the portal hides it'
+        $ids | Should -Not -Contain 'u-4' -Because 'it is not assigned at all'
+        $ids | Should -Not -Contain 'u-5' -Because 'a required-only assignment is not visible in the Company Portal'
+        $ids | Should -Not -Contain 'u-6' -Because 'an exclusion row takes availability away, it does not grant it'
+    }
+
+    It 'does not mistake an exclusion row for an available assignment without auto-update' {
+        ($script:unlinkedAnalysis.Anomalies | Where-Object { $_.Type -eq 'AutoUpdateNotEnabled' -and $_.Family -eq 'Stellarium' }) | Should -BeNullOrEmpty -Because 'u-1 auto-updates on its real assignment; the exclusion row has no settings'
     }
 }
 

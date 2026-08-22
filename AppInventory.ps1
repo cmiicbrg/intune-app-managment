@@ -19,8 +19,7 @@ $script:SupersedenceGraphWarnAt = 9
 
 # Detection operators (file/registry rules) and script rules under which an older version keeps
 # "detecting" as installed once a newer one is present. Install counts on old versions of these
-# families are inflated, and each still-assigned old version shows up as its own Company Portal
-# "update available" row.
+# families are inflated (a reporting caveat only - it has no Company Portal effect).
 $script:InflatingOperators = @('greaterThanOrEqual', 'greaterThan', 'notEqual')
 
 # One normalized, JSON-friendly record per Intune app.
@@ -204,22 +203,27 @@ function Get-AppInventoryAnalysis {
             $anomalies.Add((New-Anomaly -Type 'DuplicateVersion' -Family $family.AppConfigName -Message "version $($group.Name) exists more than once - review manually, retention will not delete either copy" -AppIds @($group.Group.Id)))
         }
 
-        # Only versions Intune actually links as superseded: an older version without a
-        # SupersededBy relationship (hand-deployed, or a chain split at the graph limit) is not
-        # part of the supersedence/auto-update behavior this anomaly describes.
-        $olderAssignedAvailable = @($members | Where-Object {
-            @($_.SupersededBy).Count -gt 0 -and @($_.Assignments | Where-Object Intent -eq 'available').Count -gt 0
+        # A superseded version keeping its 'available' assignment is normal and required: the
+        # Company Portal hides it behind the newest version, and the assignment is what keeps
+        # supersedence/auto-update working - never flag that. What does show up as a separate
+        # app in the Company Portal is an older version with an 'available' assignment (the
+        # intent the portal lists) that is NOT superseded by anything - a chain split at the
+        # graph limit, or a version that was never linked. Required-only assignments are not
+        # visible in the portal and are left alone.
+        $unlinkedOlder = @($members | Where-Object {
+            $_.Retention.Rank -and $_.Retention.Rank -gt 1 -and
+            @($_.SupersededBy).Count -eq 0 -and -not $_.RelationshipsUnavailable -and
+            @(Select-AvailableAssignment -Assignments $_.Assignments).Count -gt 0
         })
-        if ($olderAssignedAvailable.Count -gt 0) {
-            $inflates = [bool]($members | Where-Object InflatingDetection | Select-Object -First 1)
-            $note = if ($inflates) { " With this family's version-comparison detection every one of them still detects as installed, so expect up to $($olderAssignedAvailable.Count) extra 'update available' row(s) in the Company Portal." } else { '' }
-            $anomalies.Add((New-Anomaly -Type 'OlderVersionsStillAssigned' -Family $family.AppConfigName -Message "$($olderAssignedAvailable.Count) superseded version(s) still carry an 'available' assignment.$note" -AppIds @($olderAssignedAvailable.Id)))
+        if ($unlinkedOlder.Count -gt 0) {
+            $names = ($unlinkedOlder | ForEach-Object { "$($_.DisplayName) v$($_.DisplayVersion)" }) -join ', '
+            $anomalies.Add((New-Anomaly -Type 'OlderVersionUnlinked' -Family $family.AppConfigName -Message "$($unlinkedOlder.Count) older version(s) are assigned 'available' but not superseded by any version ($names) - they show up as separate apps in the Company Portal instead of being hidden behind the newest one. Retention deletes them once they leave the keep window; until then, make the next newer version supersede them." -AppIds @($unlinkedOlder.Id)))
         }
 
         if ($appConfig -and $appConfig.AutoUpdate -eq $true) {
             $gaps = @($members | Where-Object {
                 @($_.Supersedes).Count -gt 0 -and
-                @($_.Assignments | Where-Object { $_.Intent -eq 'available' -and $_.AutoUpdateSuperseded -ne $true }).Count -gt 0
+                @(Select-AvailableAssignment -Assignments $_.Assignments | Where-Object { $_.AutoUpdateSuperseded -ne $true }).Count -gt 0
             })
             if ($gaps.Count -gt 0) {
                 $anomalies.Add((New-Anomaly -Type 'AutoUpdateNotEnabled' -Family $family.AppConfigName -Message "$($gaps.Count) superseding version(s) have an 'available' assignment without auto-update, although AutoUpdate is enabled in AppConfig - users see them as 'New' instead of updating automatically" -AppIds @($gaps.Id)))
@@ -283,6 +287,22 @@ function Get-AppInventoryAnalysis {
             AppsWithUnavailableRelationships = @($managedRecords | Where-Object RelationshipsUnavailable).Count
         }
     }
+}
+
+# The assignments that actually make an app available in the Company Portal: intent
+# 'available' with a positive target. Graph lists exclusions as rows of the same intent with an
+# exclusionGroupAssignmentTarget (normalized to 'ExcludedGroup:<id>'); those take availability
+# away and must never count as it.
+function Select-AvailableAssignment {
+    param(
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        $Assignments
+    )
+
+    return @($Assignments | Where-Object {
+        $null -ne $_ -and $_.Intent -eq 'available' -and -not "$($_.Target)".StartsWith('ExcludedGroup:', [System.StringComparison]::OrdinalIgnoreCase)
+    })
 }
 
 function New-Anomaly {

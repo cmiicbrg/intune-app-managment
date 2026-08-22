@@ -443,16 +443,18 @@ evaluates the retention policy above. Per family it reports the version count, t
 supersedence graph against Intune's limit of 11 nodes, and the retention verdict for every
 version (keep / delete candidate / review), plus anomalies:
 
-- superseded versions that still carry an *available* assignment — for families with
-  version-comparison detection (`greaterThanOrEqual`, script rules) every one of them still
-  detects as installed, which is what produces duplicate "update available" rows in the
-  Company Portal;
+- older versions assigned *available* but not superseded by any version (a chain split at the
+  graph limit, or a version that was never linked) — the Company Portal hides superseded
+  versions behind the newest one, but an unlinked one shows up as a separate app;
 - superseding versions assigned *available* without auto-update although `AutoUpdate` is on;
 - duplicate version numbers, unassigned newest versions, families near the graph limit;
 - apps that look like a family but break the naming convention (with a rename suggestion).
 
-Install counts on older versions of version-comparison families are inflated for the same
-reason and are marked as such in the report. Nothing is changed in Intune.
+Install counts on older versions of families with version-comparison detection
+(`greaterThanOrEqual`, script rules) are inflated — a device with a newer version also detects
+every older one — and are marked as such in the report. A superseded version keeping its
+*available* assignment is normal and required (it is what keeps supersedence and auto-update
+working); the report never flags that. Nothing is changed in Intune.
 
 ### Version Cleanup
 
