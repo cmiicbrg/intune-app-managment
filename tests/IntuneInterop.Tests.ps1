@@ -296,6 +296,19 @@ Describe 'Get-InteropAppInstallSummaryReport' {
     }
 }
 
+Describe 'Remove-InteropWin32App' {
+    It 'DELETEs the app resource' {
+        Mock Invoke-MgGraphRequest { $null }
+        Remove-InteropWin32App -AppId 'app-1'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' -and $Uri -like '*/deviceAppManagement/mobileApps/app-1' } -Times 1 -Exactly
+    }
+
+    It 'throws when the delete fails (callers decide how to continue)' {
+        Mock Invoke-MgGraphRequest { throw 'Forbidden' }
+        { Remove-InteropWin32App -AppId 'app-1' } | Should -Throw '*Forbidden*'
+    }
+}
+
 Describe 'Get-InteropAppAssignment (native Graph read + normalization)' {
     It 'normalizes all three target types' {
         Mock Invoke-MgGraphRequest {

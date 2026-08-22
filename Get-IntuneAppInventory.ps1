@@ -11,7 +11,7 @@
     limit, and flags anomalies - all without changing anything in Intune.
 
     Writes two files to -OutputPath (default: inventory/, git-ignored):
-      <Tenant>-<yyyyMMdd-HHmm>.json   full structured snapshot (source of truth for the cleanup tooling)
+      <Tenant>-<yyyyMMdd-HHmm>.json   full structured snapshot
       <Tenant>-<yyyyMMdd-HHmm>.md     human-readable report
 
 .PARAMETER TenantName
@@ -26,7 +26,7 @@
     Folder for the report files. Default: inventory/ next to this script.
 
 .PARAMETER SkipInstallSummary
-    Skip the per-app install summary (one extra Graph call per app).
+    Skip the install counts (one tenant-wide report request).
 
 .PARAMETER SkipInstallation
     Do not install missing PowerShell modules automatically.
@@ -70,7 +70,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
 . (Join-Path $PSScriptRoot "IntuneSession.ps1")
 . (Join-Path $PSScriptRoot "TenantDeployments.ps1")
-. (Join-Path $PSScriptRoot "AppInventory.ps1")
+. (Join-Path $PSScriptRoot "IntuneInventory.ps1")
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Intune Win32 App Inventory (read-only)" -ForegroundColor Cyan
@@ -132,78 +132,11 @@ foreach ($family in $families) {
     $appConfigs[$family.AppConfigName] = Get-AppConfiguration -AppName $family.AppConfigName
 }
 
-# Fetch
+# Fetch through the read path shared with the cleanup, so both see the same evaluation
 Write-Host "`nFetching Win32 apps..." -ForegroundColor Cyan
-$apps = @(Get-InteropWin32App)
-Write-Host "  $($apps.Count) Win32 app(s) in tenant" -ForegroundColor Gray
-
-# Group name resolution is best-effort: only when the Groups module is already available
-$groupNames = @{}
-$canResolveGroups = $false
-if (Get-Module -ListAvailable -Name Microsoft.Graph.Groups) {
-    try {
-        Import-Module Microsoft.Graph.Groups -ErrorAction Stop
-        $canResolveGroups = $true
-    }
-    catch {
-        Write-Host "  Microsoft.Graph.Groups could not be loaded - group assignments are reported by id" -ForegroundColor Yellow
-    }
-}
-
-# Install counts come from one tenant-wide report (getAppsInstallSummaryReport) rather than one
-# request per app. If the report fails, the inventory still runs - without counts.
-$installSummaries = $null
-if (-not $SkipInstallSummary) {
-    try {
-        $installSummaries = Get-InteropAppInstallSummaryReport
-        Write-Host "Read install summaries for $($installSummaries.Count) app(s)" -ForegroundColor Gray
-    }
-    catch {
-        Write-Host "  Warning: could not read the install summary report, the inventory will not include install counts: $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-}
-$includesInstallSummary = ($null -ne $installSummaries)
-
-$records = [System.Collections.Generic.List[object]]::new()
-$index = 0
-foreach ($app in $apps) {
-    $index++
-    Write-Progress -Activity 'Reading app details' -Status "$index of $($apps.Count): $($app.displayName)" -PercentComplete (100 * $index / [math]::Max($apps.Count, 1))
-
-    $assignments = $null
-    try {
-        $assignments = @(Get-InteropAppAssignmentDetail -AppId $app.id)
-    }
-    catch {
-        Write-Host "  Warning: could not read assignments for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-
-    foreach ($assignment in @($assignments)) {
-        if ($canResolveGroups -and $assignment.GroupId -and -not $groupNames.ContainsKey($assignment.GroupId)) {
-            try {
-                $groupNames[$assignment.GroupId] = (Get-MgGroup -GroupId $assignment.GroupId -Property displayName -ErrorAction Stop).DisplayName
-            }
-            catch {
-                $groupNames[$assignment.GroupId] = $null
-            }
-        }
-    }
-
-    # $null (not an empty set) on failure: the record is marked RelationshipsUnavailable and the
-    # analysis suppresses its deletion, because it might be a dependency target we cannot see.
-    $relationships = $null
-    try {
-        $relationships = @(Get-InteropAppRelationship -AppId $app.id)
-    }
-    catch {
-        Write-Host "  Warning: could not read relationships for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
-    }
-
-    $installSummary = if ($installSummaries) { $installSummaries["$($app.id)"] } else { $null }
-
-    $records.Add((ConvertTo-AppInventoryRecord -App $app -Assignments $assignments -Relationships $relationships -InstallSummary $installSummary -Families $allFamilies -GroupNames $groupNames))
-}
-Write-Progress -Activity 'Reading app details' -Completed
+$inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary:(-not $SkipInstallSummary) -ResolveGroupNames
+$records = @($inventory.Records)
+$includesInstallSummary = $inventory.IncludesInstallSummary
 
 # Analyze. With -AppName, scope the records to that family plus the unmanaged apps (so near-miss
 # names of the selected family are still reported); apps of other families are out of scope but

@@ -1018,6 +1018,25 @@ function Get-InteropAppInstallSummaryReport {
     return $result
 }
 
+function Remove-InteropWin32App {
+    <#
+    .SYNOPSIS
+    Deletes an app from Intune
+
+    .DESCRIPTION
+    DELETE /mobileApps/{id}. The service removes the app's assignments and its relationships
+    (a deleted superseded version simply disappears from its successor's supersedes list).
+    Throws on failure - callers decide how to continue.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    $null = Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -ErrorAction Stop
+}
+
 function Add-InteropAllUsersAssignment {
     <#
     .SYNOPSIS
