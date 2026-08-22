@@ -597,7 +597,13 @@ function New-InteropAssignmentBody {
 function Get-InteropAppRelationship {
     <#
     .SYNOPSIS
-    Internal: returns an app's relationship objects, optionally filtered by @odata.type
+    Returns an app's relationship objects (both directions), optionally filtered by @odata.type
+
+    .DESCRIPTION
+    Each mobileAppRelationship carries targetId/targetDisplayName/targetDisplayVersion and
+    targetType: 'child' means this app supersedes / depends on the target, 'parent' means the
+    target supersedes / depends on this app. Used by the relationship writers (read-merge-write)
+    and by the inventory.
     #>
     [CmdletBinding()]
     param(
@@ -836,6 +842,180 @@ function Get-InteropAppAssignment {
     # which also yields an empty array when there are no targets. Returning ", $targets"
     # here would make @(...) produce a nested single-element array and break -contains.
     return $targets
+}
+
+function Get-InteropAppAssignmentDetail {
+    <#
+    .SYNOPSIS
+    Returns the app's assignments with intent, normalized target, and the auto-update flag
+
+    .OUTPUTS
+    Objects with Id, Intent, Target ('AllUsers' | 'AllDevices' | 'Group:<groupId>' |
+    'ExcludedGroup:<groupId>' | 'Other:<type>'), GroupId ($null unless a group or excluded-group
+    target), AutoUpdateSuperseded ($true / $false / $null when the assignment carries no
+    autoUpdateSettings). Throws when the assignments cannot be read.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    $details = [System.Collections.Generic.List[object]]::new()
+    $uri = "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/assignments"
+    while ($uri) {
+        $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
+        foreach ($assignment in @($response.value)) {
+            $targetType = "$($assignment.target.'@odata.type')"
+            $groupId = $null
+            # Exclusion targets are checked before the plain group pattern, which they also match;
+            # the breaks matter because switch keeps evaluating cases after a match
+            $target = switch -Wildcard ($targetType) {
+                '*allLicensedUsersAssignmentTarget' { 'AllUsers'; break }
+                '*allDevicesAssignmentTarget'       { 'AllDevices'; break }
+                '*exclusionGroupAssignmentTarget'   { $groupId = $assignment.target.groupId; "ExcludedGroup:$groupId"; break }
+                '*groupAssignmentTarget'            { $groupId = $assignment.target.groupId; "Group:$groupId"; break }
+                default                             { "Other:$($targetType -replace '^#microsoft\.graph\.', '')" }
+            }
+
+            $autoUpdate = $null
+            $state = $assignment.settings.autoUpdateSettings.autoUpdateSupersededAppsState
+            if ($null -ne $state) {
+                $autoUpdate = ($state -eq 'enabled')
+            }
+
+            $details.Add([PSCustomObject]@{
+                Id                   = $assignment.id
+                Intent               = $assignment.intent
+                Target               = $target
+                GroupId              = $groupId
+                AutoUpdateSuperseded = $autoUpdate
+            })
+        }
+        $uri = $response.'@odata.nextLink'
+    }
+    return @($details)
+}
+
+# Runs one of the Intune reporting actions (POST /deviceManagement/reports/<action>) and returns
+# the parsed report: @{ TotalRowCount; Schema = @(@{Column}...); Values = @(@(row)...) }.
+# These endpoints deliver their JSON as an octet-stream download (with a Content-Disposition
+# header), which Invoke-MgGraphRequest refuses to parse inline - per its own guidance the
+# response is written to a temp file and parsed from there.
+function Invoke-InteropReport {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Action,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Body
+    )
+
+    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('InteropReport-{0}.json' -f [guid]::NewGuid().ToString('N'))
+    try {
+        $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceManagement/reports/$Action" -Body ($Body | ConvertTo-Json) -ContentType 'application/json' -OutputFilePath $tempPath -ErrorAction Stop
+        return Get-Content -Path $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Report '$Action' failed: $($_.Exception.Message)"
+    }
+    finally {
+        Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# Maps one report row onto an object whose property names are the report's Schema columns with
+# the first letter lowercased (InstalledDeviceCount -> installedDeviceCount), i.e. the property
+# names of the retired mobileApps/{id}/installSummary resource.
+function ConvertFrom-InteropReportRow {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)] $Schema,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] $Row
+    )
+
+    $result = [ordered]@{}
+    $columns = @($Schema)
+    for ($i = 0; $i -lt $columns.Count; $i++) {
+        $name = "$($columns[$i].Column)"
+        if ([string]::IsNullOrEmpty($name)) { continue }
+        $result[($name.Substring(0, 1).ToLowerInvariant() + $name.Substring(1))] = $Row[$i]
+    }
+    return [PSCustomObject]$result
+}
+
+function Get-InteropAppInstallSummary {
+    <#
+    .SYNOPSIS
+    Returns one app's install summary (device and user counts by state), or $null
+
+    .DESCRIPTION
+    Uses what the Intune admin center uses - POST /deviceManagement/reports/getAppStatusOverviewReport
+    with an ApplicationId filter - and exposes the row with camelCase property names
+    (installedDeviceCount, failedDeviceCount, pendingInstallDeviceCount, ...). The legacy
+    GET /mobileApps/{id}/installSummary resource is retired (returns 400) and is not used.
+    Returns $null when the report has no row for the app. For every app at once use
+    Get-InteropAppInstallSummaryReport instead of calling this per app.
+
+    Note for version-comparison detection rules ("greaterThanOrEqual" and >=-style scripts):
+    a device with a newer version installed also detects every older version, so
+    installedDeviceCount on old versions is inflated - it is only a reliable "still in use"
+    signal for product-code and equal-operator apps.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    $report = Invoke-InteropReport -Action 'getAppStatusOverviewReport' -Body @{ filter = "(ApplicationId eq '$AppId')" }
+    $row = @($report.Values) | Select-Object -First 1
+    if ($null -eq $row) {
+        return $null
+    }
+    return ConvertFrom-InteropReportRow -Schema $report.Schema -Row $row
+}
+
+function Get-InteropAppInstallSummaryReport {
+    <#
+    .SYNOPSIS
+    Returns the install summary of every app in the tenant as a hashtable keyed by app id
+
+    .DESCRIPTION
+    One paged POST /deviceManagement/reports/getAppsInstallSummaryReport instead of one request
+    per app. Each value has the same camelCase shape as Get-InteropAppInstallSummary
+    (installedDeviceCount, failedDeviceCount, ...). Apps without a row are simply absent.
+    #>
+    [CmdletBinding()]
+    param(
+        # Rows per request
+        [int]$PageSize = 500
+    )
+
+    $result = @{}
+    $skip = 0
+    while ($true) {
+        $report = Invoke-InteropReport -Action 'getAppsInstallSummaryReport' -Body @{ top = $PageSize; skip = $skip }
+        $rows = @($report.Values)
+        $idIndex = [array]::FindIndex(@($report.Schema), [Predicate[object]]{ param($c) "$($c.Column)" -eq 'ApplicationId' })
+        if ($rows.Count -gt 0 -and $idIndex -lt 0) {
+            throw "Report 'getAppsInstallSummaryReport' has no ApplicationId column (columns: $(@($report.Schema | ForEach-Object { $_.Column }) -join ', '))"
+        }
+        foreach ($row in $rows) {
+            $result["$($row[$idIndex])"] = ConvertFrom-InteropReportRow -Schema $report.Schema -Row $row
+        }
+        $skip += $rows.Count
+        # TotalRowCount is the completion condition: the service may cap a page below the
+        # requested size, so a short page alone does not mean the end. A zero-row page is the
+        # safety break (also covers a report without TotalRowCount).
+        if ($rows.Count -eq 0) { break }
+        if ($null -ne $report.TotalRowCount) {
+            if ($skip -ge [int]$report.TotalRowCount) { break }
+        }
+        elseif ($rows.Count -lt $PageSize) { break }
+    }
+    return $result
 }
 
 function Add-InteropAllUsersAssignment {

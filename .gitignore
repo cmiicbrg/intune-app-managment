@@ -7,6 +7,9 @@ intune-tenants.json
 # TenantDeployments.example.json is committed as the schema reference.
 TenantDeployments.json
 
+# Inventory reports written by Get-IntuneAppInventory.ps1 - tenant-specific snapshots
+/inventory/
+
 # Executables & binaries
 *.exe
 *.dll

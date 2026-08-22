@@ -264,6 +264,9 @@ intune-app-management/
 ├── IntuneInterop.ps1                      # Native Microsoft Graph Intune API layer
 ├── IntuneSession.ps1                      # Tenant session bootstrap (credentials, modules, connect)
 ├── AppRetention.ps1                       # Version retention evaluation (inventory/cleanup)
+├── AppInventory.ps1                       # Inventory assembly and analysis (pure)
+├── Get-IntuneAppInventory.ps1             # Read-only tenant inventory script
+├── inventory/                             # Inventory reports (git-ignored)
 ├── TenantConfig.ps1                       # Secure tenant credential management
 ├── TenantDeployments.ps1                  # Per-tenant deployment plan loader
 ├── TenantDeployments.json                 # Per-tenant app/assignment plans (git-ignored)
@@ -406,7 +409,9 @@ tenant's, which overrides the defaults. `KeepNewest` can never go below 2 — In
 drops Company Portal auto-update tracking for a superseded app whose assignment disappears, so the
 immediate predecessor must always survive. Always kept regardless of policy: dependency targets,
 unparseable versions, and versions with an unknown creation date. Duplicate version numbers are
-flagged for manual review, never deleted automatically.
+flagged for manual review, never deleted automatically — as is any version whose relationships
+could not be read from Graph (it might be a dependency target the tooling cannot see; re-run the
+inventory).
 
 A tenant-level `Retention` block is the opt-in for automated cleanup. `Deploy-ToIntune.ps1` only
 validates these values; the inventory and cleanup tooling evaluate and act on them.
@@ -417,6 +422,35 @@ that family. An app deployed by hand under a different name — a bare `Google C
 unrelated app that merely shares the prefix such as `Google Chrome Remote Desktop 2.0` — is not
 managed by this tooling: it is never superseded and never deleted. To bring a hand-deployed
 version under management, rename it in Intune to match the template.
+
+### App Inventory
+
+`Get-IntuneAppInventory.ps1` takes a **read-only** snapshot of a tenant's Win32 apps and writes
+it to `inventory/` (git-ignored) as JSON plus a Markdown report:
+
+```powershell
+.\Get-IntuneAppInventory.ps1 -TenantName "School"                       # full inventory
+.\Get-IntuneAppInventory.ps1 -TenantName "School" -AppName "Chrome"     # one family
+.\Get-IntuneAppInventory.ps1 -TenantName "School" -SkipInstallSummary   # skip the per-app install counts
+```
+
+For every app it records assignments (with the auto-update flag), supersedence and dependency
+relationships, and the install summary; maps the app to its AppConfig family and version; and
+evaluates the retention policy above. Per family it reports the version count, the size of the
+supersedence graph against Intune's limit of 11 nodes, and the retention verdict for every
+version (keep / delete candidate / review), plus anomalies:
+
+- superseded versions that still carry an *available* assignment — for families with
+  version-comparison detection (`greaterThanOrEqual`, script rules) every one of them still
+  detects as installed, which is what produces duplicate "update available" rows in the
+  Company Portal;
+- superseding versions assigned *available* without auto-update although `AutoUpdate` is on;
+- duplicate version numbers, unassigned newest versions, families near the graph limit;
+- apps that look like a family but break the naming convention (with a rename suggestion).
+
+Install counts on older versions of version-comparison families are inflated for the same
+reason and are marked as such in the report. Nothing is changed in Intune; the JSON is the
+input the cleanup tooling will act on.
 
 ### Version Cache
 

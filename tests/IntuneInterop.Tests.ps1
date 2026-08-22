@@ -17,7 +17,7 @@ BeforeAll {
     # wrappers pass (-ErrorAction).
     function Invoke-MgGraphRequest {
         [CmdletBinding()]
-        param($Method, $Uri, $OutputType, $Body, $ContentType)
+        param($Method, $Uri, $OutputType, $Body, $ContentType, $OutputFilePath)
         throw 'stub was not mocked'
     }
 
@@ -140,6 +140,159 @@ Describe 'Get-InteropWin32App (native Graph list + per-ID fetch)' {
 
     It 'returns an empty result when nothing matches the display name' {
         @(Get-InteropWin32App -DisplayName 'Nonexistent App').Count | Should -Be 0
+    }
+}
+
+Describe 'Get-InteropAppAssignmentDetail (native Graph read, full detail)' {
+    It 'returns intent, normalized target, group id and the auto-update flag, following paging' {
+        Mock Invoke-MgGraphRequest {
+            if ($Uri -like '*next-assign*') {
+                [PSCustomObject]@{
+                    value = @(
+                        [PSCustomObject]@{ id = 'a3'; intent = 'required'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g-1' }; settings = [PSCustomObject]@{} }
+                    )
+                }
+            }
+            else {
+                [PSCustomObject]@{
+                    value             = @(
+                        [PSCustomObject]@{ id = 'a1'; intent = 'available'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' }; settings = [PSCustomObject]@{ autoUpdateSettings = [PSCustomObject]@{ autoUpdateSupersededAppsState = 'enabled' } } },
+                        [PSCustomObject]@{ id = 'a2'; intent = 'available'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.allDevicesAssignmentTarget' }; settings = [PSCustomObject]@{ autoUpdateSettings = [PSCustomObject]@{ autoUpdateSupersededAppsState = 'notConfigured' } } }
+                    )
+                    '@odata.nextLink' = 'https://graph.microsoft.com/beta/next-assign'
+                }
+            }
+        }
+
+        $details = @(Get-InteropAppAssignmentDetail -AppId 'app-1')
+        $details.Count | Should -Be 3
+        $details[0].Target | Should -Be 'AllUsers'
+        $details[0].AutoUpdateSuperseded | Should -BeTrue
+        $details[1].Target | Should -Be 'AllDevices'
+        $details[1].AutoUpdateSuperseded | Should -BeFalse
+        $details[2].Target | Should -Be 'Group:g-1'
+        $details[2].GroupId | Should -Be 'g-1'
+        $details[2].Intent | Should -Be 'required'
+        $details[2].AutoUpdateSuperseded | Should -BeNullOrEmpty -Because 'no autoUpdateSettings on the assignment'
+    }
+
+    It 'distinguishes exclusion targets from group assignments' {
+        Mock Invoke-MgGraphRequest {
+            [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'a9'; intent = 'available'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.exclusionGroupAssignmentTarget'; groupId = 'g-x' }; settings = $null }) }
+        }
+        $detail = (Get-InteropAppAssignmentDetail -AppId 'app-1')[0]
+        $detail.Target | Should -Be 'ExcludedGroup:g-x'
+        $detail.GroupId | Should -Be 'g-x'
+    }
+
+    It 'labels unknown target types instead of dropping them' {
+        Mock Invoke-MgGraphRequest {
+            [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'a9'; intent = 'required'; target = [PSCustomObject]@{ '@odata.type' = '#microsoft.graph.configurationManagerCollectionAssignmentTarget'; collectionId = 'c-1' }; settings = $null }) }
+        }
+        (Get-InteropAppAssignmentDetail -AppId 'app-1')[0].Target | Should -Be 'Other:configurationManagerCollectionAssignmentTarget'
+    }
+
+    It 'throws when the read fails (callers decide how to degrade)' {
+        Mock Invoke-MgGraphRequest { throw 'Graph unavailable' }
+        { Get-InteropAppAssignmentDetail -AppId 'app-1' } | Should -Throw
+    }
+}
+
+Describe 'Get-InteropAppInstallSummary' {
+    It 'POSTs getAppStatusOverviewReport for the app and maps the report columns to camelCase' {
+        Mock Invoke-MgGraphRequest {
+            # The reports endpoints deliver the JSON as a file download; the implementation
+            # passes -OutputFilePath and parses the file
+            '{ "TotalRowCount": 1, "Schema": [ { "Column": "ApplicationId" }, { "Column": "InstalledDeviceCount" }, { "Column": "FailedDeviceCount" }, { "Column": "PendingInstallDeviceCount" } ], "Values": [ [ "app-1", 7, 1, 2 ] ] }' |
+                Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+
+        $summary = Get-InteropAppInstallSummary -AppId 'app-1'
+        $summary.installedDeviceCount | Should -Be 7
+        $summary.failedDeviceCount | Should -Be 1
+        $summary.pendingInstallDeviceCount | Should -Be 2
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            $Method -eq 'POST' -and
+            $Uri -like '*deviceManagement/reports/getAppStatusOverviewReport' -and
+            ($Body | ConvertFrom-Json).filter -eq "(ApplicationId eq 'app-1')" -and
+            -not [string]::IsNullOrEmpty($OutputFilePath)
+        } -Times 1 -Exactly
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Uri -like '*installSummary*' } -Times 0 -Exactly -Because 'the legacy resource is retired'
+    }
+
+    It 'returns $null when the report has no row for the app' {
+        Mock Invoke-MgGraphRequest { '{ "TotalRowCount": 0, "Schema": [], "Values": [] }' | Set-Content -Path $OutputFilePath -Encoding UTF8 }
+        Get-InteropAppInstallSummary -AppId 'app-1' | Should -BeNullOrEmpty
+    }
+
+    It 'throws when the response is not parseable JSON' {
+        Mock Invoke-MgGraphRequest { 'PK not json at all' | Set-Content -Path $OutputFilePath -Encoding UTF8 }
+        { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw '*getAppStatusOverviewReport*'
+    }
+
+    It 'throws with the Graph error when the report request fails' {
+        Mock Invoke-MgGraphRequest { throw 'report says 503' }
+        { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw '*report says 503*'
+    }
+}
+
+Describe 'Get-InteropAppInstallSummaryReport' {
+    It 'pages through getAppsInstallSummaryReport and keys the rows by ApplicationId' {
+        Mock Invoke-MgGraphRequest {
+            $request = $Body | ConvertFrom-Json
+            $page = switch ($request.skip) {
+                0 { '{ "TotalRowCount": 3, "Schema": [ { "Column": "ApplicationId" }, { "Column": "DisplayName" }, { "Column": "InstalledDeviceCount" } ], "Values": [ [ "app-1", "One", 7 ], [ "app-2", "Two", 0 ] ] }' }
+                2 { '{ "TotalRowCount": 3, "Schema": [ { "Column": "ApplicationId" }, { "Column": "DisplayName" }, { "Column": "InstalledDeviceCount" } ], "Values": [ [ "app-3", "Three", 4 ] ] }' }
+                default { throw "unexpected skip $($request.skip)" }
+            }
+            $page | Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+
+        $report = Get-InteropAppInstallSummaryReport -PageSize 2
+        $report.Count | Should -Be 3
+        $report['app-1'].installedDeviceCount | Should -Be 7
+        $report['app-3'].displayName | Should -Be 'Three'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
+            $Method -eq 'POST' -and $Uri -like '*deviceManagement/reports/getAppsInstallSummaryReport' -and ($Body | ConvertFrom-Json).top -eq 2
+        } -Times 2 -Exactly
+    }
+
+    It 'returns an empty table for an empty report' {
+        Mock Invoke-MgGraphRequest { '{ "TotalRowCount": 0, "Schema": [], "Values": [] }' | Set-Content -Path $OutputFilePath -Encoding UTF8 }
+        (Get-InteropAppInstallSummaryReport).Count | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
+    }
+
+    It 'keeps paging while TotalRowCount has unread rows, even when the service caps the page below the requested size' {
+        Mock Invoke-MgGraphRequest {
+            $request = $Body | ConvertFrom-Json
+            $page = switch ($request.skip) {
+                0 { '{ "TotalRowCount": 3, "Schema": [ { "Column": "ApplicationId" } ], "Values": [ [ "app-1" ], [ "app-2" ] ] }' }
+                2 { '{ "TotalRowCount": 3, "Schema": [ { "Column": "ApplicationId" } ], "Values": [ [ "app-3" ] ] }' }
+                default { throw "unexpected skip $($request.skip)" }
+            }
+            $page | Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+
+        # Requested 500 per page, served 2 - the short page must not end the read
+        (Get-InteropAppInstallSummaryReport -PageSize 500).Count | Should -Be 3
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    }
+
+    It 'stops on a zero-row page as the safety break when TotalRowCount is inconsistent' {
+        Mock Invoke-MgGraphRequest {
+            $request = $Body | ConvertFrom-Json
+            $page = if ($request.skip -eq 0) { '{ "TotalRowCount": 99, "Schema": [ { "Column": "ApplicationId" } ], "Values": [ [ "app-1" ] ] }' }
+                    else { '{ "TotalRowCount": 99, "Schema": [ { "Column": "ApplicationId" } ], "Values": [] }' }
+            $page | Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+        (Get-InteropAppInstallSummaryReport -PageSize 500).Count | Should -Be 1
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    }
+
+    It 'throws when the report has rows but no ApplicationId column' {
+        Mock Invoke-MgGraphRequest { '{ "TotalRowCount": 1, "Schema": [ { "Column": "DisplayName" } ], "Values": [ [ "One" ] ] }' | Set-Content -Path $OutputFilePath -Encoding UTF8 }
+        { Get-InteropAppInstallSummaryReport } | Should -Throw '*ApplicationId*'
     }
 }
 
