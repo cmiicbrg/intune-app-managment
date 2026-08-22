@@ -26,7 +26,7 @@ $script:InflatingOperators = @('greaterThanOrEqual', 'greaterThan', 'notEqual')
 # One normalized, JSON-friendly record per Intune app.
 #   -App            raw win32LobApp object (largeIcon is dropped)
 #   -Assignments    Get-InteropAppAssignmentDetail output (may be $null on read failure)
-#   -Relationships  Get-InteropAppRelationship output
+#   -Relationships  Get-InteropAppRelationship output (may be $null on read failure)
 #   -InstallSummary Get-InteropAppInstallSummary output or $null
 #   -Families       Get-AppFamilyCatalog output
 #   -GroupNames     optional hashtable groupId -> displayName
@@ -123,6 +123,7 @@ function ConvertTo-AppInventoryRecord {
         InflatingDetection    = $inflating
         Assignments           = $assignmentRecords
         AssignmentsUnavailable = ($null -eq $Assignments)
+        RelationshipsUnavailable = ($null -eq $Relationships)
         Supersedes            = $supersedes
         SupersededBy          = $supersededBy
         DependsOn             = $dependsOn
@@ -173,7 +174,19 @@ function Get-AppInventoryAnalysis {
         $plan = @(Get-AppRetentionPlan -Apps $retentionInput -Policy @{ KeepNewest = $policy.KeepNewest; KeepNewerThanWeeks = $policy.KeepNewerThanWeeks } -ProtectedAppIds $protectedIds -Now $Now)
         foreach ($verdict in $plan) {
             $record = $members | Where-Object Id -eq $verdict.Id | Select-Object -First 1
+            # An app whose relationships could not be read may be a dependency target we cannot
+            # see, and dependency targets are always kept - so it must not become a delete
+            # candidate (the cleanup consumes these verdicts). Downgrade to Review.
+            if ($record.RelationshipsUnavailable -and $verdict.Action -eq 'Delete') {
+                $verdict.Action = 'Review'
+                $verdict.Reasons = @($verdict.Reasons) + 'relationships could not be read - may be a dependency target; deletion suppressed, re-run the inventory'
+            }
             $record.Retention = [ordered]@{ Rank = $verdict.Rank; AgeWeeks = $verdict.AgeWeeks; Action = $verdict.Action; Reasons = @($verdict.Reasons) }
+        }
+
+        $relationshipsUnavailable = @($members | Where-Object RelationshipsUnavailable)
+        if ($relationshipsUnavailable.Count -gt 0) {
+            $anomalies.Add((New-Anomaly -Type 'RelationshipsUnavailable' -Family $family.AppConfigName -Message "relationships of $($relationshipsUnavailable.Count) version(s) could not be read - supersedence graph size and dependency protection are incomplete for this family and deletion of the affected version(s) is suppressed; re-run the inventory" -AppIds @($relationshipsUnavailable.Id)))
         }
 
         $newest = $plan | Where-Object Rank -eq 1 | Select-Object -First 1
@@ -186,8 +199,11 @@ function Get-AppInventoryAnalysis {
             $anomalies.Add((New-Anomaly -Type 'DuplicateVersion' -Family $family.AppConfigName -Message "version $dup exists more than once - review manually, retention will not delete either copy" -AppIds @(($plan | Where-Object { $_.Action -eq 'Review' -and $_.Version.ToString() -eq $dup }).Id)))
         }
 
+        # Only versions Intune actually links as superseded: an older version without a
+        # SupersededBy relationship (hand-deployed, or a chain split at the graph limit) is not
+        # part of the supersedence/auto-update behavior this anomaly describes.
         $olderAssignedAvailable = @($members | Where-Object {
-            $_.Retention.Rank -and $_.Retention.Rank -gt 1 -and @($_.Assignments | Where-Object Intent -eq 'available').Count -gt 0
+            @($_.SupersededBy).Count -gt 0 -and @($_.Assignments | Where-Object Intent -eq 'available').Count -gt 0
         })
         if ($olderAssignedAvailable.Count -gt 0) {
             $inflates = [bool]($members | Where-Object InflatingDetection | Select-Object -First 1)
@@ -259,6 +275,7 @@ function Get-AppInventoryAnalysis {
             DeleteCandidates      = ($familyReports | Measure-Object -Property DeleteCandidateCount -Sum).Sum
             ReviewItems           = ($familyReports | Measure-Object -Property ReviewCount -Sum).Sum
             FamiliesNearGraphLimit = @($familyReports | Where-Object { $_.SupersedenceGraphNodes -ge $script:SupersedenceGraphWarnAt }).Count
+            AppsWithUnavailableRelationships = @($managedRecords | Where-Object RelationshipsUnavailable).Count
         }
     }
 }
@@ -334,6 +351,9 @@ function Format-AppInventoryMarkdown {
     $lines.Add("- Win32 apps: **$($s.TotalWin32Apps)** ($($s.ManagedApps) managed by this tooling, $($s.UnmanagedApps) unmanaged)")
     $lines.Add("- Families present: **$($s.FamiliesPresent)**, near the supersedence graph limit: **$($s.FamiliesNearGraphLimit)**")
     $lines.Add("- Retention: **$($s.DeleteCandidates)** delete candidate(s), **$($s.ReviewItems)** item(s) to review")
+    if ($s.AppsWithUnavailableRelationships -gt 0) {
+        $lines.Add("- **Incomplete data**: relationships of **$($s.AppsWithUnavailableRelationships)** managed app(s) could not be read; their deletion is suppressed and graph sizes may be understated - re-run the inventory before a cleanup")
+    }
     $lines.Add('')
 
     $lines.Add('## Families')

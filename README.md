@@ -409,7 +409,9 @@ tenant's, which overrides the defaults. `KeepNewest` can never go below 2 — In
 drops Company Portal auto-update tracking for a superseded app whose assignment disappears, so the
 immediate predecessor must always survive. Always kept regardless of policy: dependency targets,
 unparseable versions, and versions with an unknown creation date. Duplicate version numbers are
-flagged for manual review, never deleted automatically.
+flagged for manual review, never deleted automatically — as is any version whose relationships
+could not be read from Graph (it might be a dependency target the tooling cannot see; re-run the
+inventory).
 
 A tenant-level `Retention` block is the opt-in for automated cleanup. `Deploy-ToIntune.ps1` only
 validates these values; the inventory and cleanup tooling evaluate and act on them.

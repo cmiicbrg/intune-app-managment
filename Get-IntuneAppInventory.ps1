@@ -175,7 +175,9 @@ foreach ($app in $apps) {
         }
     }
 
-    $relationships = @()
+    # $null (not an empty set) on failure: the record is marked RelationshipsUnavailable and the
+    # analysis suppresses its deletion, because it might be a dependency target we cannot see.
+    $relationships = $null
     try {
         $relationships = @(Get-InteropAppRelationship -AppId $app.id)
     }

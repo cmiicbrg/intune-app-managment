@@ -136,6 +136,57 @@ Describe 'ConvertTo-AppInventoryRecord' {
     It 'notes when assignments could not be read' {
         $r = ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'x' -Name 'GIMP 3' -Version '3.0' -WeeksOld 1) -Assignments $null -Relationships @() -InstallSummary $null -Families $script:families
         $r.AssignmentsUnavailable | Should -BeTrue
+        $r.RelationshipsUnavailable | Should -BeFalse
+    }
+
+    It 'distinguishes a failed relationship read from an empty relationship set' {
+        $r = ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'x' -Name 'GIMP 3' -Version '3.0' -WeeksOld 1) -Assignments @() -Relationships $null -InstallSummary $null -Families $script:families
+        $r.RelationshipsUnavailable | Should -BeTrue
+        $r.DependencyOf.Count | Should -Be 0
+    }
+}
+
+Describe 'Get-AppInventoryAnalysis with incomplete relationship data' {
+    BeforeAll {
+        # Four old Stellarium versions; under keep-3 the oldest would be deleted - but its
+        # relationship read failed, so it could be an invisible dependency target.
+        $script:partial = [System.Collections.Generic.List[object]]::new()
+        $script:partial.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'p-0' -Name 'Stellarium 24' -Version '24.1' -WeeksOld 60) -Assignments @((New-Assignment)) -Relationships $null -InstallSummary $null -Families $script:families))
+        $script:partial.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'p-1' -Name 'Stellarium 25' -Version '25.1' -WeeksOld 40) -Assignments @((New-Assignment)) -Relationships @((New-SupersededBy -TargetId 'p-2' -Version '26.1')) -InstallSummary $null -Families $script:families))
+        $script:partial.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'p-2' -Name 'Stellarium 26' -Version '26.1' -WeeksOld 30) -Assignments @((New-Assignment)) -Relationships @((New-Supersedes -TargetId 'p-1' -Version '25.1'), (New-SupersededBy -TargetId 'p-3' -Version '26.2')) -InstallSummary $null -Families $script:families))
+        $script:partial.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'p-3' -Name 'Stellarium 26' -Version '26.2' -WeeksOld 20) -Assignments @((New-Assignment)) -Relationships @((New-Supersedes -TargetId 'p-2' -Version '26.1')) -InstallSummary $null -Families $script:families))
+        $script:partialAnalysis = Get-AppInventoryAnalysis -Records @($script:partial) -Families $script:families -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
+    }
+
+    It 'never turns an app with unreadable relationships into a delete candidate' {
+        $oldest = $script:partial | Where-Object Id -eq 'p-0'
+        $oldest.Retention.Action | Should -Be 'Review'
+        $oldest.Retention.Reasons | Should -Contain 'relationships could not be read - may be a dependency target; deletion suppressed, re-run the inventory'
+        $family = $script:partialAnalysis.Families | Where-Object Family -eq 'Stellarium'
+        $family.DeleteCandidateCount | Should -Be 0
+        $family.DeleteCandidates.Count | Should -Be 0
+        $family.ReviewCount | Should -Be 1
+        $script:partialAnalysis.Summary.DeleteCandidates | Should -Be 0
+        $script:partialAnalysis.Summary.AppsWithUnavailableRelationships | Should -Be 1
+    }
+
+    It 'reports the incomplete data as an anomaly and in the markdown summary' {
+        $anomaly = $script:partialAnalysis.Anomalies | Where-Object Type -eq 'RelationshipsUnavailable'
+        $anomaly.Family | Should -Be 'Stellarium'
+        $anomaly.AppIds | Should -Be @('p-0')
+        $md = Format-AppInventoryMarkdown -TenantName 'Partial' -GeneratedUtc $script:now -Analysis $script:partialAnalysis -Records @($script:partial)
+        $md | Should -Match 'Incomplete data'
+    }
+
+    It 'only reports OlderVersionsStillAssigned for versions Intune actually links as superseded' {
+        # p-0 is older and assigned available but has no SupersededBy relationship (unlinked)
+        $older = $script:partialAnalysis.Anomalies | Where-Object Type -eq 'OlderVersionsStillAssigned'
+        ($older.AppIds | Sort-Object) | Should -Be @('p-1', 'p-2')
+    }
+
+    It 'leaves the full fixture untouched' {
+        $script:analysis.Summary.AppsWithUnavailableRelationships | Should -Be 0
+        ($script:analysis.Anomalies | Where-Object Type -eq 'RelationshipsUnavailable') | Should -BeNullOrEmpty
     }
 }
 
