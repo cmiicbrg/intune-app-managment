@@ -215,6 +215,22 @@ Describe 'Get-AppInventoryAnalysis' {
         ($script:records | Where-Object Id -eq 'chrome-0').Retention.Action | Should -Be 'Delete'
     }
 
+    It 'tells a deploy whether one more version fits into the graph (Test-SupersedenceHeadroom)' {
+        $full = Test-SupersedenceHeadroom -Records @($script:records) -AppId 'chrome-10'
+        $full.Nodes | Should -Be 11
+        $full.CanAddVersion | Should -BeFalse -Because 'the 11-node chain is at the limit'
+        $stellarium = Test-SupersedenceHeadroom -Records @($script:records) -AppId 'stel-3'
+        $stellarium.Nodes | Should -Be 3
+        $stellarium.NodesAfter | Should -Be 4
+        $stellarium.CanAddVersion | Should -BeTrue
+        $stellarium.WillFill | Should -BeFalse
+        (Test-SupersedenceHeadroom -Records @($script:records) -AppId 'stel-3' -Limit 4).WillFill | Should -BeTrue
+        (Test-SupersedenceHeadroom -Records @($script:records) -AppId 'stel-3' -Limit 3).CanAddVersion | Should -BeFalse
+        $fresh = Test-SupersedenceHeadroom -Records @($script:records) -AppId $null
+        $fresh.Nodes | Should -Be 0
+        $fresh.CanAddVersion | Should -BeTrue -Because 'a first version starts a chain of one'
+    }
+
     It 'sizes the supersedence graph and warns near the limit' {
         ($script:analysis.Families | Where-Object Family -eq 'Chrome').SupersedenceGraphNodes | Should -Be 11
         ($script:analysis.Families | Where-Object Family -eq 'Stellarium').SupersedenceGraphNodes | Should -Be 3

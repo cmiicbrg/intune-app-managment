@@ -24,6 +24,8 @@
         of a supersedence relationship - and then the app is deleted.
       - Every decision is written to <OutputPath>/<Tenant>-cleanup-<yyyyMMdd-HHmmss>.json
         (never overwritten - a second run in the same second gets a numbered suffix).
+      - Deploy-ToIntune.ps1 runs the same retention unattended after each deploy for opted-in
+        tenants (see -NoRetention there); this script is the interactive, tenant-wide pass.
 
 .PARAMETER TenantName
     Name of a pre-configured tenant from intune-tenants.json (see Add-IntuneTenant). The
@@ -67,7 +69,10 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot "IntuneSession.ps1")
 . (Join-Path $PSScriptRoot "TenantDeployments.ps1")
 . (Join-Path $PSScriptRoot "IntuneInventory.ps1")
-. (Join-Path $PSScriptRoot "AppCleanup.ps1")
+. (Join-Path $PSScriptRoot "IntuneCleanup.ps1")
+
+# The per-version confirmation (ShouldProcess) lives in the shared executor's decision hook
+$cleanupCmdlet = $PSCmdlet
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "Intune Win32 App Version Cleanup" -ForegroundColor Cyan
@@ -168,8 +173,8 @@ try {
         }
     }
 
-    # --- Execute ---------------------------------------------------------------------------------
-    $results = [System.Collections.Generic.List[object]]::new()
+    # --- Execute (shared executor; the decision is this script's ShouldProcess prompt) -------------
+    $results = @()
     if ($cleanup.DeletionCount -eq 0) {
         Write-Host "Nothing to delete." -ForegroundColor Green
     }
@@ -181,102 +186,19 @@ try {
         }
         Write-Host ""
 
-        foreach ($deletion in $cleanup.Deletions) {
-            $assignmentInfo = if ($null -ne $deletion.AssignmentCount) { "$($deletion.AssignmentCount) assignment(s)" } else { 'assignments unknown' }
-            $label = "$($deletion.DisplayName) v$($deletion.DisplayVersion) [$($deletion.Family)] - rank $($deletion.Rank), $($deletion.AgeWeeks) weeks old, $assignmentInfo"
-            $outcome = [ordered]@{
-                Id             = $deletion.Id
-                Family         = $deletion.Family
-                DisplayName    = $deletion.DisplayName
-                DisplayVersion = $deletion.DisplayVersion
-                Rank           = $deletion.Rank
-                AgeWeeks       = $deletion.AgeWeeks
-                Outcome        = $null
-                Detail         = $null
-            }
-
-            if ($PSCmdlet.ShouldProcess($label, 'Delete Win32 app from Intune')) {
-                # Everything below happens AFTER the confirmation, which may have sat open for a
-                # while: the relationships are read fresh now. Intune refuses to delete an app that
-                # is part of a supersedence relationship, so they are removed first (they would
-                # disappear with the app anyway) - unless the app has become a dependency target in
-                # the meantime, in which case nothing is touched.
-                $removal = $null
-                try {
-                    $removal = Remove-InteropAppRelationships -AppId $deletion.Id
-                }
-                catch {
-                    $outcome.Outcome = 'Skipped'
-                    $outcome.Detail = "could not re-read relationships: $($_.Exception.Message)"
-                    Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
-                    $results.Add([PSCustomObject]$outcome)
-                    continue
-                }
-                if ($removal.DependencyTargets.Count -gt 0) {
-                    $outcome.Outcome = 'Skipped'
-                    $outcome.Detail = "is now a dependency target of: $($removal.DependencyTargets -join ', ') - nothing was changed"
-                    Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
-                    $results.Add([PSCustomObject]$outcome)
-                    continue
-                }
-                if ($removal.Error) {
-                    $outcome.Outcome = 'Failed'
-                    $outcome.Detail = "$($removal.Error) ($($removal.Removed) of $($removal.Total) relationship(s) were removed before that - the app is partially unlinked and still in Intune; re-run the cleanup)"
-                    Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
-                    $results.Add([PSCustomObject]$outcome)
-                    continue
-                }
-
-                try {
-                    Remove-InteropWin32App -AppId $deletion.Id
-                    $outcome.Outcome = 'Deleted'
-                    $outcome.Detail = "$($removal.Removed) relationship(s) removed first"
-                    Write-Host "  Deleted $label" -ForegroundColor Green
-                }
-                catch {
-                    $outcome.Outcome = 'Failed'
-                    $outcome.Detail = $_.Exception.Message
-                    if ($removal.Removed -gt 0) {
-                        $outcome.Detail += " (its $($removal.Removed) relationship(s) were already removed, so the app is now unlinked and still in Intune - re-run the cleanup)"
-                    }
-                    Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
-                }
-            }
-            else {
-                $outcome.Outcome = if ($WhatIfPreference) { 'WouldDelete' } else { 'Declined' }
-            }
-            $results.Add([PSCustomObject]$outcome)
-        }
+        $results = @(Invoke-IntuneAppCleanup -Plan $cleanup `
+            -Decision { param($label) $cleanupCmdlet.ShouldProcess($label, 'Delete Win32 app from Intune') } `
+            -DeclinedOutcome $(if ($WhatIfPreference) { 'WouldDelete' } else { 'Declined' }))
     }
 
     # --- Log and summary -------------------------------------------------------------------------
     if (-not $OutputPath) {
         $OutputPath = Join-Path $PSScriptRoot 'inventory'
     }
-    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-    $safeName = ($TenantName -replace '[^\w\-\.]', '_')
-    # One audit log per run: second precision plus a suffix if a file with that name already exists
-    $stamp = $now.ToString('yyyyMMdd-HHmmss')
-    $logPath = Join-Path $OutputPath "$safeName-cleanup-$stamp.json"
-    $suffix = 1
-    while (Test-Path -LiteralPath $logPath) {
-        $suffix++
-        $logPath = Join-Path $OutputPath "$safeName-cleanup-$stamp-$suffix.json"
-    }
-    $document = [ordered]@{
-        Tenant       = $TenantName
-        GeneratedUtc = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
-        ToolVersion  = ((Get-Content (Join-Path $PSScriptRoot 'VERSION.txt') -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
-        Mode         = if ($WhatIfPreference) { 'WhatIf' } else { 'Live' }
-        AppName      = $AppName
-        TenantPolicy = [ordered]@{ KeepNewest = $tenantPolicy.KeepNewest; KeepNewerThanWeeks = $tenantPolicy.KeepNewerThanWeeks }
-        PlanApps     = $planAppNames
-        Summary      = $analysis.Summary
-        Families     = $cleanup.Families
-        Results      = @($results)
-    }
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    [System.IO.File]::WriteAllText($logPath, ($document | ConvertTo-Json -Depth 12), $utf8)
+    $logPath = Write-AppCleanupLog -Directory $OutputPath -TenantName $TenantName -Now $now `
+        -Mode $(if ($WhatIfPreference) { 'WhatIf' } else { 'Live' }) -Trigger 'Cleanup' -AppName $AppName `
+        -TenantPolicy $tenantPolicy -PlanAppNames $planAppNames -Summary $analysis.Summary `
+        -Families @($cleanup.Families) -Results @($results) -ToolVersionPath (Join-Path $PSScriptRoot 'VERSION.txt')
 
     $deleted = @($results | Where-Object Outcome -eq 'Deleted').Count
     $failed = @($results | Where-Object Outcome -eq 'Failed').Count
