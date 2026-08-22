@@ -17,11 +17,13 @@
       - The tenant must opt in with a tenant-level "Retention" block in TenantDeployments.json.
       - -WhatIf previews every deletion; without it, each deletion asks for confirmation
         (answer "Yes to All" to approve the rest, or pass -Confirm:$false for an unattended run).
-      - Right before each DELETE the app's relationships are re-read; an app that became a
-        dependency target in the meantime is skipped. The remaining relationships (its link to
-        the superseding version) are removed first - Intune refuses to delete an app that is
-        part of a supersedence relationship.
-      - Every decision is written to <OutputPath>/<Tenant>-cleanup-<yyyyMMdd-HHmm>.json.
+      - After the confirmation (which may have sat open for a while) the app's relationships
+        are re-read; an app that became a dependency target in the meantime is skipped and
+        nothing is touched. Otherwise its relationships (its link to the superseding version)
+        are removed first - Intune refuses to delete an app that is part of a supersedence
+        relationship - and then the app is deleted.
+      - Every decision is written to <OutputPath>/<Tenant>-cleanup-<yyyyMMdd-HHmmss>.json
+        (never overwritten - a second run in the same second gets a numbered suffix).
 
 .PARAMETER TenantName
     Name of a pre-configured tenant from intune-tenants.json (see Add-IntuneTenant). The
@@ -188,44 +190,49 @@ else {
             Detail         = $null
         }
 
-        # Re-check right before deleting: the app must still exist and must not have become a
-        # dependency target since the evaluation.
-        try {
-            $fresh = @(Get-InteropAppRelationship -AppId $deletion.Id)
-        }
-        catch {
-            $outcome.Outcome = 'Skipped'
-            $outcome.Detail = "could not re-read relationships: $($_.Exception.Message)"
-            Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
-            $results.Add([PSCustomObject]$outcome)
-            continue
-        }
-        $dependents = @($fresh | Where-Object { "$($_.'@odata.type')" -like '*mobileAppDependency' -and "$($_.targetType)" -eq 'parent' })
-        if ($dependents.Count -gt 0) {
-            $outcome.Outcome = 'Skipped'
-            $outcome.Detail = "is now a dependency target of: $(($dependents | ForEach-Object { $_.targetDisplayName }) -join ', ')"
-            Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
-            $results.Add([PSCustomObject]$outcome)
-            continue
-        }
-
         if ($PSCmdlet.ShouldProcess($label, 'Delete Win32 app from Intune')) {
-            # Intune refuses to delete an app that is part of a supersedence relationship, so
-            # the app's relationships (here: its link to the version that supersedes it) are
-            # removed first - they would disappear with the app anyway.
-            $removedRelationships = $null
+            # Everything below happens AFTER the confirmation, which may have sat open for a
+            # while: the relationships are read fresh now. Intune refuses to delete an app that
+            # is part of a supersedence relationship, so they are removed first (they would
+            # disappear with the app anyway) - unless the app has become a dependency target in
+            # the meantime, in which case nothing is touched.
+            $removal = $null
             try {
-                $removedRelationships = Remove-InteropAppRelationships -AppId $deletion.Id
+                $removal = Remove-InteropAppRelationships -AppId $deletion.Id
+            }
+            catch {
+                $outcome.Outcome = 'Skipped'
+                $outcome.Detail = "could not re-read relationships: $($_.Exception.Message)"
+                Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
+                $results.Add([PSCustomObject]$outcome)
+                continue
+            }
+            if ($removal.DependencyTargets.Count -gt 0) {
+                $outcome.Outcome = 'Skipped'
+                $outcome.Detail = "is now a dependency target of: $($removal.DependencyTargets -join ', ') - nothing was changed"
+                Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
+                $results.Add([PSCustomObject]$outcome)
+                continue
+            }
+            if ($removal.Error) {
+                $outcome.Outcome = 'Failed'
+                $outcome.Detail = "$($removal.Error) ($($removal.Removed) of $($removal.Total) relationship(s) were removed before that - the app is partially unlinked and still in Intune; re-run the cleanup)"
+                Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
+                $results.Add([PSCustomObject]$outcome)
+                continue
+            }
+
+            try {
                 Remove-InteropWin32App -AppId $deletion.Id
                 $outcome.Outcome = 'Deleted'
-                $outcome.Detail = "$removedRelationships relationship(s) removed first"
+                $outcome.Detail = "$($removal.Removed) relationship(s) removed first"
                 Write-Host "  Deleted $label" -ForegroundColor Green
             }
             catch {
                 $outcome.Outcome = 'Failed'
                 $outcome.Detail = $_.Exception.Message
-                if ($removedRelationships -gt 0) {
-                    $outcome.Detail += " (its $removedRelationships relationship(s) were already removed, so the app is now unlinked - re-run the cleanup)"
+                if ($removal.Removed -gt 0) {
+                    $outcome.Detail += " (its $($removal.Removed) relationship(s) were already removed, so the app is now unlinked and still in Intune - re-run the cleanup)"
                 }
                 Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
             }
@@ -243,7 +250,14 @@ if (-not $OutputPath) {
 }
 New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 $safeName = ($TenantName -replace '[^\w\-\.]', '_')
-$logPath = Join-Path $OutputPath "$safeName-cleanup-$($now.ToString('yyyyMMdd-HHmm')).json"
+# One audit log per run: second precision plus a suffix if a file with that name already exists
+$stamp = $now.ToString('yyyyMMdd-HHmmss')
+$logPath = Join-Path $OutputPath "$safeName-cleanup-$stamp.json"
+$suffix = 1
+while (Test-Path -LiteralPath $logPath) {
+    $suffix++
+    $logPath = Join-Path $OutputPath "$safeName-cleanup-$stamp-$suffix.json"
+}
 $document = [ordered]@{
     Tenant       = $TenantName
     GeneratedUtc = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')

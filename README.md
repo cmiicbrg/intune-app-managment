@@ -477,9 +477,10 @@ Guard rails, none of which a parameter can override:
   convention are not even considered;
 - never deleted: the newest version, anything within the keep window, dependency targets,
   duplicate version numbers (`Review`), and versions whose relationships could not be read;
-- right before each `DELETE` the app's relationships are re-read, and an app that became a
-  dependency target in the meantime is skipped;
-- every decision is logged to `inventory/<Tenant>-cleanup-<timestamp>.json`.
+- after each confirmation the app's relationships are re-read, and an app that became a
+  dependency target in the meantime is skipped untouched;
+- every decision is logged to `inventory/<Tenant>-cleanup-<timestamp>.json` (one file per run,
+  never overwritten).
 
 Intune refuses to delete an app that is still part of a supersedence relationship, so the
 script first removes the version's relationships (its link to the version that supersedes it —

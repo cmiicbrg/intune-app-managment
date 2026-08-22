@@ -1075,13 +1075,19 @@ function Remove-InteropAppRelationship {
 function Remove-InteropAppRelationships {
     <#
     .SYNOPSIS
-    Removes every relationship of an app; returns how many were removed
+    Removes every relationship of an app in preparation for deleting it
 
     .DESCRIPTION
     Intune refuses to delete an app that is part of a supersedence relationship, so the cleanup
     removes an app's relationships (both directions) right before deleting it - they would
-    disappear with the app anyway. The caller is responsible for not calling this on a
-    dependency target.
+    disappear with the app anyway. The relationships are read fresh here; if the app is a
+    dependency target (another app depends on it), NOTHING is removed and DependencyTargets
+    names the dependents - a dependency target is never unlinked by this tooling.
+
+    Returns @{ Total; Removed; DependencyTargets = @(names); Error } - Error is the message of
+    the first relationship that could not be removed (Removed tells how many were removed
+    before it, i.e. the partial state the caller must log). Throws only when the relationships
+    could not be read.
     #>
     [CmdletBinding()]
     param(
@@ -1090,10 +1096,30 @@ function Remove-InteropAppRelationships {
     )
 
     $relationships = @(Get-InteropAppRelationship -AppId $AppId)
-    foreach ($relationship in $relationships) {
-        Remove-InteropAppRelationship -AppId $AppId -RelationshipId $relationship.id
+    $result = [PSCustomObject]@{
+        Total             = $relationships.Count
+        Removed           = 0
+        DependencyTargets = @()
+        Error             = $null
     }
-    return $relationships.Count
+
+    $dependents = @($relationships | Where-Object { "$($_.'@odata.type')" -like '*mobileAppDependency' -and "$($_.targetType)" -eq 'parent' })
+    if ($dependents.Count -gt 0) {
+        $result.DependencyTargets = @($dependents | ForEach-Object { "$($_.targetDisplayName)" })
+        return $result
+    }
+
+    foreach ($relationship in $relationships) {
+        try {
+            Remove-InteropAppRelationship -AppId $AppId -RelationshipId $relationship.id
+            $result.Removed++
+        }
+        catch {
+            $result.Error = $_.Exception.Message
+            break
+        }
+    }
+    return $result
 }
 
 function Remove-InteropWin32App {
