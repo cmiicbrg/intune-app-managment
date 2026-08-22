@@ -213,7 +213,7 @@ function Get-AppInventoryAnalysis {
         $unlinkedOlder = @($members | Where-Object {
             $_.Retention.Rank -and $_.Retention.Rank -gt 1 -and
             @($_.SupersededBy).Count -eq 0 -and -not $_.RelationshipsUnavailable -and
-            @($_.Assignments | Where-Object Intent -eq 'available').Count -gt 0
+            @(Select-AvailableAssignment -Assignments $_.Assignments).Count -gt 0
         })
         if ($unlinkedOlder.Count -gt 0) {
             $names = ($unlinkedOlder | ForEach-Object { "$($_.DisplayName) v$($_.DisplayVersion)" }) -join ', '
@@ -223,7 +223,7 @@ function Get-AppInventoryAnalysis {
         if ($appConfig -and $appConfig.AutoUpdate -eq $true) {
             $gaps = @($members | Where-Object {
                 @($_.Supersedes).Count -gt 0 -and
-                @($_.Assignments | Where-Object { $_.Intent -eq 'available' -and $_.AutoUpdateSuperseded -ne $true }).Count -gt 0
+                @(Select-AvailableAssignment -Assignments $_.Assignments | Where-Object { $_.AutoUpdateSuperseded -ne $true }).Count -gt 0
             })
             if ($gaps.Count -gt 0) {
                 $anomalies.Add((New-Anomaly -Type 'AutoUpdateNotEnabled' -Family $family.AppConfigName -Message "$($gaps.Count) superseding version(s) have an 'available' assignment without auto-update, although AutoUpdate is enabled in AppConfig - users see them as 'New' instead of updating automatically" -AppIds @($gaps.Id)))
@@ -287,6 +287,22 @@ function Get-AppInventoryAnalysis {
             AppsWithUnavailableRelationships = @($managedRecords | Where-Object RelationshipsUnavailable).Count
         }
     }
+}
+
+# The assignments that actually make an app available in the Company Portal: intent
+# 'available' with a positive target. Graph lists exclusions as rows of the same intent with an
+# exclusionGroupAssignmentTarget (normalized to 'ExcludedGroup:<id>'); those take availability
+# away and must never count as it.
+function Select-AvailableAssignment {
+    param(
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        $Assignments
+    )
+
+    return @($Assignments | Where-Object {
+        $null -ne $_ -and $_.Intent -eq 'available' -and -not "$($_.Target)".StartsWith('ExcludedGroup:', [System.StringComparison]::OrdinalIgnoreCase)
+    })
 }
 
 function New-Anomaly {

@@ -303,12 +303,15 @@ Describe 'Get-AppInventoryAnalysis: older versions outside the supersedence chai
         $script:unlinked = [System.Collections.Generic.List[object]]::new()
         # u-1 newest; u-2 linked and assigned (normal); u-3 assigned but nothing supersedes it
         # (shows up as a separate Company Portal app); u-4 unlinked but unassigned (harmless)
-        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-1' -Name 'Stellarium 26' -Version '26.2' -WeeksOld 1) -Assignments @((New-Assignment)) -Relationships @((New-Supersedes -TargetId 'u-2' -Version '25.1')) -InstallSummary $null -Families $script:families))
+        # u-1 carries a proper auto-updating assignment plus an exclusion row (no settings on it)
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-1' -Name 'Stellarium 26' -Version '26.2' -WeeksOld 1) -Assignments @((New-Assignment -AutoUpdate $true), (New-Assignment -Target 'ExcludedGroup:g-excluded')) -Relationships @((New-Supersedes -TargetId 'u-2' -Version '25.1')) -InstallSummary $null -Families $script:families))
         $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-2' -Name 'Stellarium 25' -Version '25.1' -WeeksOld 30) -Assignments @((New-Assignment)) -Relationships @((New-SupersededBy -TargetId 'u-1' -Version '26.2')) -InstallSummary $null -Families $script:families))
         $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-3' -Name 'Stellarium 24' -Version '24.1' -WeeksOld 50) -Assignments @((New-Assignment)) -Relationships @() -InstallSummary $null -Families $script:families))
         $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-4' -Name 'Stellarium 23' -Version '23.1' -WeeksOld 60) -Assignments @() -Relationships @() -InstallSummary $null -Families $script:families))
         # u-5 unlinked with a required-only assignment: not visible in the Company Portal, not flagged
         $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-5' -Name 'Stellarium 22' -Version '22.1' -WeeksOld 70) -Assignments @((New-Assignment -Intent 'required' -Target 'AllDevices')) -Relationships @() -InstallSummary $null -Families $script:families))
+        # u-6 unlinked with nothing but an exclusion row: available to nobody, not flagged
+        $script:unlinked.Add((ConvertTo-AppInventoryRecord -App (New-GraphApp -Id 'u-6' -Name 'Stellarium 21' -Version '21.1' -WeeksOld 80) -Assignments @((New-Assignment -Target 'ExcludedGroup:g-excluded')) -Relationships @() -InstallSummary $null -Families $script:families))
         $script:unlinkedAnalysis = Get-AppInventoryAnalysis -Records @($script:unlinked) -Families $script:families -PolicyResolver $script:policyResolver -PlanAppNames $null -AppConfigs $script:appConfigs -Now $script:now
     }
 
@@ -326,6 +329,11 @@ Describe 'Get-AppInventoryAnalysis: older versions outside the supersedence chai
         $ids | Should -Not -Contain 'u-2' -Because 'it is superseded - the portal hides it'
         $ids | Should -Not -Contain 'u-4' -Because 'it is not assigned at all'
         $ids | Should -Not -Contain 'u-5' -Because 'a required-only assignment is not visible in the Company Portal'
+        $ids | Should -Not -Contain 'u-6' -Because 'an exclusion row takes availability away, it does not grant it'
+    }
+
+    It 'does not mistake an exclusion row for an available assignment without auto-update' {
+        ($script:unlinkedAnalysis.Anomalies | Where-Object { $_.Type -eq 'AutoUpdateNotEnabled' -and $_.Family -eq 'Stellarium' }) | Should -BeNullOrEmpty -Because 'u-1 auto-updates on its real assignment; the exclusion row has no settings'
     }
 }
 
