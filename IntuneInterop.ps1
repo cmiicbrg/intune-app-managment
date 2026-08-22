@@ -1006,8 +1006,14 @@ function Get-InteropAppInstallSummaryReport {
             $result["$($row[$idIndex])"] = ConvertFrom-InteropReportRow -Schema $report.Schema -Row $row
         }
         $skip += $rows.Count
-        if ($rows.Count -lt $PageSize -or $rows.Count -eq 0) { break }
-        if ($null -ne $report.TotalRowCount -and $skip -ge [int]$report.TotalRowCount) { break }
+        # TotalRowCount is the completion condition: the service may cap a page below the
+        # requested size, so a short page alone does not mean the end. A zero-row page is the
+        # safety break (also covers a report without TotalRowCount).
+        if ($rows.Count -eq 0) { break }
+        if ($null -ne $report.TotalRowCount) {
+            if ($skip -ge [int]$report.TotalRowCount) { break }
+        }
+        elseif ($rows.Count -lt $PageSize) { break }
     }
     return $result
 }

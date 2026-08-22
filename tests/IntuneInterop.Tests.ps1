@@ -263,6 +263,33 @@ Describe 'Get-InteropAppInstallSummaryReport' {
         Should -Invoke Invoke-MgGraphRequest -Times 1 -Exactly
     }
 
+    It 'keeps paging while TotalRowCount has unread rows, even when the service caps the page below the requested size' {
+        Mock Invoke-MgGraphRequest {
+            $request = $Body | ConvertFrom-Json
+            $page = switch ($request.skip) {
+                0 { '{ "TotalRowCount": 3, "Schema": [ { "Column": "ApplicationId" } ], "Values": [ [ "app-1" ], [ "app-2" ] ] }' }
+                2 { '{ "TotalRowCount": 3, "Schema": [ { "Column": "ApplicationId" } ], "Values": [ [ "app-3" ] ] }' }
+                default { throw "unexpected skip $($request.skip)" }
+            }
+            $page | Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+
+        # Requested 500 per page, served 2 - the short page must not end the read
+        (Get-InteropAppInstallSummaryReport -PageSize 500).Count | Should -Be 3
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    }
+
+    It 'stops on a zero-row page as the safety break when TotalRowCount is inconsistent' {
+        Mock Invoke-MgGraphRequest {
+            $request = $Body | ConvertFrom-Json
+            $page = if ($request.skip -eq 0) { '{ "TotalRowCount": 99, "Schema": [ { "Column": "ApplicationId" } ], "Values": [ [ "app-1" ] ] }' }
+                    else { '{ "TotalRowCount": 99, "Schema": [ { "Column": "ApplicationId" } ], "Values": [] }' }
+            $page | Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+        (Get-InteropAppInstallSummaryReport -PageSize 500).Count | Should -Be 1
+        Should -Invoke Invoke-MgGraphRequest -Times 2 -Exactly
+    }
+
     It 'throws when the report has rows but no ApplicationId column' {
         Mock Invoke-MgGraphRequest { '{ "TotalRowCount": 1, "Schema": [ { "Column": "DisplayName" } ], "Values": [ [ "One" ] ] }' | Set-Content -Path $OutputFilePath -Encoding UTF8 }
         { Get-InteropAppInstallSummaryReport } | Should -Throw '*ApplicationId*'

@@ -170,6 +170,11 @@ Describe 'Get-AppInventoryAnalysis with incomplete relationship data' {
         $script:partialAnalysis.Summary.AppsWithUnavailableRelationships | Should -Be 1
     }
 
+    It 'does not mistake the suppressed (Review) app for a duplicate version' {
+        ($script:partialAnalysis.Anomalies | Where-Object Type -eq 'DuplicateVersion') | Should -BeNullOrEmpty
+        $script:partialAnalysis.Summary.ReviewItems | Should -Be 1
+    }
+
     It 'reports the incomplete data as an anomaly and in the markdown summary' {
         $anomaly = $script:partialAnalysis.Anomalies | Where-Object Type -eq 'RelationshipsUnavailable'
         $anomaly.Family | Should -Be 'Stellarium'

@@ -194,9 +194,11 @@ function Get-AppInventoryAnalysis {
         if ($null -eq $graphNodes) { $graphNodes = 0 }
 
         # Anomalies
-        $duplicateVersions = @($plan | Where-Object Action -eq 'Review' | Group-Object { $_.Version.ToString() } | ForEach-Object { $_.Name })
-        foreach ($dup in $duplicateVersions) {
-            $anomalies.Add((New-Anomaly -Type 'DuplicateVersion' -Family $family.AppConfigName -Message "version $dup exists more than once - review manually, retention will not delete either copy" -AppIds @(($plan | Where-Object { $_.Action -eq 'Review' -and $_.Version.ToString() -eq $dup }).Id)))
+        # Duplicates are detected by version number, not by the Review action - Review is also
+        # the verdict for an app whose relationships could not be read.
+        $duplicateGroups = @($plan | Where-Object { $null -ne $_.Version } | Group-Object { $_.Version.ToString() } | Where-Object Count -gt 1)
+        foreach ($group in $duplicateGroups) {
+            $anomalies.Add((New-Anomaly -Type 'DuplicateVersion' -Family $family.AppConfigName -Message "version $($group.Name) exists more than once - review manually, retention will not delete either copy" -AppIds @($group.Group.Id)))
         }
 
         # Only versions Intune actually links as superseded: an older version without a
