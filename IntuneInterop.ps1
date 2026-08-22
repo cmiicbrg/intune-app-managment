@@ -1031,63 +1031,124 @@ function Get-InteropErrorMessage {
     $message = $ErrorRecord.Exception.Message
     $details = $ErrorRecord.ErrorDetails.Message
     if (-not [string]::IsNullOrWhiteSpace($details)) {
-        try {
-            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
-            if ($parsed.error.message) {
-                $details = if ($parsed.error.code) { "$($parsed.error.code): $($parsed.error.message)" } else { "$($parsed.error.message)" }
+        # The module's ErrorDetails is the whole HTTP exchange (request line, response headers,
+        # body); the Graph error object is the JSON body at the end of it
+        $jsonStart = $details.IndexOf('{')
+        if ($jsonStart -ge 0) {
+            try {
+                $parsed = $details.Substring($jsonStart) | ConvertFrom-Json -ErrorAction Stop
+                if ($parsed.error.message) {
+                    $details = if ($parsed.error.code) { "$($parsed.error.code): $($parsed.error.message)" } else { "$($parsed.error.message)" }
+                }
             }
-        }
-        catch {
-            # not JSON - use the raw body
+            catch {
+                # not JSON - use the raw details
+            }
         }
         $message = "$message | $details"
     }
     return $message
 }
 
-function Remove-InteropAppRelationship {
-    <#
-    .SYNOPSIS
-    Deletes one relationship (supersedence or dependency) of an app
-
-    .DESCRIPTION
-    DELETE /mobileApps/{id}/relationships/{relationshipId} - removes exactly that relationship
-    (visible from both apps afterwards), unlike updateRelationships which replaces the app's
-    whole set. Throws on failure with Graph's error message.
-    #>
+# Maps an app's relationships as read from Graph to the body shape updateRelationships expects:
+# only the child-direction entries (the ones this app owns - it supersedes / depends on the
+# target; the composite relationship id is "{sourceId}_{targetId}"), reduced to type, target and
+# the supersedence/dependency kind. Parent-direction entries belong to the other app and are
+# never re-submitted.
+function ConvertTo-InteropRelationshipBody {
     [CmdletBinding()]
     param(
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [array]$Relationships
+    )
+
+    $entries = @(foreach ($relationship in @($Relationships)) {
+        if ($null -eq $relationship -or "$($relationship.targetType)" -ne 'child') { continue }
+        switch -Wildcard ("$($relationship.'@odata.type')") {
+            '*mobileAppSupersedence' {
+                [ordered]@{ '@odata.type' = '#microsoft.graph.mobileAppSupersedence'; targetId = "$($relationship.targetId)"; supersedenceType = "$($relationship.supersedenceType)" }
+                break
+            }
+            '*mobileAppDependency' {
+                [ordered]@{ '@odata.type' = '#microsoft.graph.mobileAppDependency'; targetId = "$($relationship.targetId)"; dependencyType = "$($relationship.dependencyType)" }
+                break
+            }
+        }
+    })
+    return $entries
+}
+
+function Remove-InteropSupersedence {
+    <#
+    .SYNOPSIS
+    Removes supersedence relationships owned by an app (the app that supersedes)
+
+    .DESCRIPTION
+    The per-relationship DELETE that the Graph reference documents is not implemented by the
+    Intune service ("No OData route exists ... with http verb DELETE"), so removal works the way
+    the admin center does it: POST /mobileApps/{id}/updateRelationships on the SUPERSEDING app
+    with its remaining child-direction relationships - every supersedence except the removed
+    one(s), plus the app's own dependencies. Relationships owned by other apps (the ones that
+    supersede or depend on this app) are not part of that set and stay untouched.
+
+    -SupersededAppId removes the link to one superseded app; -All removes every supersedence
+    the app owns (its dependencies are kept). Returns the number of supersedence links removed
+    (0 when there was nothing to remove - no request is made then).
+    #>
+    [CmdletBinding(DefaultParameterSetName = 'One')]
+    param(
+        # The superseding app - the owner of the relationship
         [Parameter(Mandatory = $true)]
         [string]$AppId,
 
-        [Parameter(Mandatory = $true)]
-        [string]$RelationshipId
+        [Parameter(Mandatory = $true, ParameterSetName = 'One')]
+        [string]$SupersededAppId,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'All')]
+        [switch]$All
     )
 
+    $current = @(Get-InteropAppRelationship -AppId $AppId)
+    $owned = @($current | Where-Object { "$($_.targetType)" -eq 'child' })
+    $remaining = @($owned | Where-Object {
+        -not ("$($_.'@odata.type')" -like '*mobileAppSupersedence' -and ($All -or "$($_.targetId)" -eq $SupersededAppId))
+    })
+    $removed = $owned.Count - $remaining.Count
+    if ($removed -eq 0) {
+        Write-Verbose "App '$AppId' owns no matching supersedence relationship - nothing to remove"
+        return 0
+    }
+
+    $body = [ordered]@{ relationships = @(ConvertTo-InteropRelationshipBody -Relationships $remaining) }
     try {
-        $null = Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/relationships/$RelationshipId" -ErrorAction Stop
+        $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
     }
     catch {
-        throw "Could not remove relationship '$RelationshipId' of app '$AppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+        throw "Could not update the relationships of app '$AppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
     }
+    return $removed
 }
 
 function Remove-InteropAppRelationships {
     <#
     .SYNOPSIS
-    Removes every relationship of an app in preparation for deleting it
+    Removes every supersedence relationship an app takes part in, in preparation for deleting it
 
     .DESCRIPTION
     Intune refuses to delete an app that is part of a supersedence relationship, so the cleanup
-    removes an app's relationships (both directions) right before deleting it - they would
-    disappear with the app anyway. The relationships are read fresh here; if the app is a
-    dependency target (another app depends on it), NOTHING is removed and DependencyTargets
-    names the dependents - a dependency target is never unlinked by this tooling.
+    unlinks an app right before deleting it. The relationships are read fresh here. For each app
+    that supersedes this one, that app's relationship set is updated without this app
+    (Remove-InteropSupersedence on the owner); if this app itself supersedes older apps, its own
+    supersedence links are dropped too. Its own dependencies (apps it depends on) disappear with
+    it and are left alone. If the app is a dependency target (another app depends on it),
+    NOTHING is removed and DependencyTargets names the dependents - a dependency target is never
+    unlinked by this tooling.
 
-    Returns @{ Total; Removed; DependencyTargets = @(names); Error } - Error is the message of
-    the first relationship that could not be removed (Removed tells how many were removed
-    before it, i.e. the partial state the caller must log). Throws only when the relationships
-    could not be read.
+    Returns @{ Total; Removed; DependencyTargets = @(names); Error } - Total/Removed count
+    supersedence links; Error is the message of the first update that failed (Removed tells how
+    many links were removed before it, i.e. the partial state the caller must log). Throws only
+    when the app's relationships could not be read.
     #>
     [CmdletBinding()]
     param(
@@ -1097,7 +1158,7 @@ function Remove-InteropAppRelationships {
 
     $relationships = @(Get-InteropAppRelationship -AppId $AppId)
     $result = [PSCustomObject]@{
-        Total             = $relationships.Count
+        Total             = 0
         Removed           = 0
         DependencyTargets = @()
         Error             = $null
@@ -1109,14 +1170,28 @@ function Remove-InteropAppRelationships {
         return $result
     }
 
-    foreach ($relationship in $relationships) {
+    $supersededBy = @($relationships | Where-Object { "$($_.'@odata.type')" -like '*mobileAppSupersedence' -and "$($_.targetType)" -eq 'parent' })
+    $supersedes = @($relationships | Where-Object { "$($_.'@odata.type')" -like '*mobileAppSupersedence' -and "$($_.targetType)" -eq 'child' })
+    $result.Total = $supersededBy.Count + $supersedes.Count
+
+    # Links owned by the apps that supersede this one: one update per owner
+    foreach ($owner in $supersededBy) {
         try {
-            Remove-InteropAppRelationship -AppId $AppId -RelationshipId $relationship.id
-            $result.Removed++
+            $result.Removed += Remove-InteropSupersedence -AppId "$($owner.targetId)" -SupersededAppId $AppId
         }
         catch {
             $result.Error = $_.Exception.Message
-            break
+            return $result
+        }
+    }
+
+    # Links this app owns (it supersedes older apps): one update on the app itself
+    if ($supersedes.Count -gt 0) {
+        try {
+            $result.Removed += Remove-InteropSupersedence -AppId $AppId -All
+        }
+        catch {
+            $result.Error = $_.Exception.Message
         }
     }
     return $result

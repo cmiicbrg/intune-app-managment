@@ -483,10 +483,11 @@ Guard rails, none of which a parameter can override:
   never overwritten).
 
 Intune refuses to delete an app that is still part of a supersedence relationship, so the
-script first removes the version's relationships (its link to the version that supersedes it —
-they would disappear with the app anyway) and then deletes it. The successor's chain shrinks to
-the kept versions. Re-run the inventory afterwards to verify. Recommended first run: `-WhatIf`,
-then one family, then the full tenant.
+script first unlinks the version — the version that supersedes it gets its relationship set
+updated without it, exactly what "Remove relationship" in the admin center does — and then
+deletes it. Nothing else in the chain is touched; it shrinks to the kept versions. Re-run the
+inventory afterwards to verify. Recommended first run: `-WhatIf`, then one family, then the
+full tenant.
 
 ### Version Cache
 

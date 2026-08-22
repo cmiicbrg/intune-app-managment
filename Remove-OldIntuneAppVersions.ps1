@@ -19,9 +19,9 @@
         (answer "Yes to All" to approve the rest, or pass -Confirm:$false for an unattended run).
       - After the confirmation (which may have sat open for a while) the app's relationships
         are re-read; an app that became a dependency target in the meantime is skipped and
-        nothing is touched. Otherwise its relationships (its link to the superseding version)
-        are removed first - Intune refuses to delete an app that is part of a supersedence
-        relationship - and then the app is deleted.
+        nothing is touched. Otherwise the version is unlinked first - the superseding version's
+        relationship set is updated without it, as Intune refuses to delete an app that is part
+        of a supersedence relationship - and then the app is deleted.
       - Every decision is written to <OutputPath>/<Tenant>-cleanup-<yyyyMMdd-HHmmss>.json
         (never overwritten - a second run in the same second gets a numbered suffix).
 
