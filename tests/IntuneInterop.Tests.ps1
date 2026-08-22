@@ -307,6 +307,48 @@ Describe 'Remove-InteropWin32App' {
         Mock Invoke-MgGraphRequest { throw 'Forbidden' }
         { Remove-InteropWin32App -AppId 'app-1' } | Should -Throw '*Forbidden*'
     }
+
+    It "surfaces Graph's error body, not just the HTTP status" {
+        Mock Invoke-MgGraphRequest {
+            $record = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('Response status code does not indicate success: BadRequest (Bad Request).'), 'Graph', 'InvalidOperation', $null)
+            $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new('{"error":{"code":"BadRequest","message":"App cannot be deleted because it has supersedence relationships"}}')
+            throw $record
+        }
+        { Remove-InteropWin32App -AppId 'app-1' } | Should -Throw '*BadRequest (Bad Request)*BadRequest: App cannot be deleted because it has supersedence relationships*'
+    }
+}
+
+Describe 'Remove-InteropAppRelationships' {
+    It 'DELETEs every relationship of the app by id and returns the count' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') {
+                return [PSCustomObject]@{ value = @(
+                    [PSCustomObject]@{ id = 'rel-parent'; '@odata.type' = '#microsoft.graph.mobileAppSupersedence'; targetId = 'newer'; targetType = 'parent' },
+                    [PSCustomObject]@{ id = 'rel-child'; '@odata.type' = '#microsoft.graph.mobileAppSupersedence'; targetId = 'older'; targetType = 'child' }
+                ) }
+            }
+            $null
+        }
+        Remove-InteropAppRelationships -AppId 'app-1' | Should -Be 2
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' -and $Uri -like '*/mobileApps/app-1/relationships/rel-parent' } -Times 1 -Exactly
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' -and $Uri -like '*/mobileApps/app-1/relationships/rel-child' } -Times 1 -Exactly
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 2 -Exactly
+    }
+
+    It 'issues no DELETE for an app without relationships' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ value = @() } }
+        Remove-InteropAppRelationships -AppId 'app-1' | Should -Be 0
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 0 -Exactly
+    }
+
+    It 'stops at the first relationship that cannot be removed, naming it' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { return [PSCustomObject]@{ value = @([PSCustomObject]@{ id = 'rel-1'; targetType = 'parent' }, [PSCustomObject]@{ id = 'rel-2'; targetType = 'child' }) } }
+            throw 'Forbidden'
+        }
+        { Remove-InteropAppRelationships -AppId 'app-1' } | Should -Throw "*relationship 'rel-1' of app 'app-1'*Forbidden*"
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 1 -Exactly
+    }
 }
 
 Describe 'Get-InteropAppAssignment (native Graph read + normalization)' {

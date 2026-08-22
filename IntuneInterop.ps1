@@ -1018,15 +1018,70 @@ function Get-InteropAppInstallSummaryReport {
     return $result
 }
 
-function Remove-InteropWin32App {
+# Invoke-MgGraphRequest's exception message is only the HTTP status ("Response status code does
+# not indicate success: BadRequest"); Graph's actual reason is in the response body, which the
+# module exposes as ErrorDetails. Returns the status message with the body's error appended.
+function Get-InteropErrorMessage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    $message = $ErrorRecord.Exception.Message
+    $details = $ErrorRecord.ErrorDetails.Message
+    if (-not [string]::IsNullOrWhiteSpace($details)) {
+        try {
+            $parsed = $details | ConvertFrom-Json -ErrorAction Stop
+            if ($parsed.error.message) {
+                $details = if ($parsed.error.code) { "$($parsed.error.code): $($parsed.error.message)" } else { "$($parsed.error.message)" }
+            }
+        }
+        catch {
+            # not JSON - use the raw body
+        }
+        $message = "$message | $details"
+    }
+    return $message
+}
+
+function Remove-InteropAppRelationship {
     <#
     .SYNOPSIS
-    Deletes an app from Intune
+    Deletes one relationship (supersedence or dependency) of an app
 
     .DESCRIPTION
-    DELETE /mobileApps/{id}. The service removes the app's assignments and its relationships
-    (a deleted superseded version simply disappears from its successor's supersedes list).
-    Throws on failure - callers decide how to continue.
+    DELETE /mobileApps/{id}/relationships/{relationshipId} - removes exactly that relationship
+    (visible from both apps afterwards), unlike updateRelationships which replaces the app's
+    whole set. Throws on failure with Graph's error message.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId,
+
+        [Parameter(Mandatory = $true)]
+        [string]$RelationshipId
+    )
+
+    try {
+        $null = Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/relationships/$RelationshipId" -ErrorAction Stop
+    }
+    catch {
+        throw "Could not remove relationship '$RelationshipId' of app '$AppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+    }
+}
+
+function Remove-InteropAppRelationships {
+    <#
+    .SYNOPSIS
+    Removes every relationship of an app; returns how many were removed
+
+    .DESCRIPTION
+    Intune refuses to delete an app that is part of a supersedence relationship, so the cleanup
+    removes an app's relationships (both directions) right before deleting it - they would
+    disappear with the app anyway. The caller is responsible for not calling this on a
+    dependency target.
     #>
     [CmdletBinding()]
     param(
@@ -1034,7 +1089,35 @@ function Remove-InteropWin32App {
         [string]$AppId
     )
 
-    $null = Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -ErrorAction Stop
+    $relationships = @(Get-InteropAppRelationship -AppId $AppId)
+    foreach ($relationship in $relationships) {
+        Remove-InteropAppRelationship -AppId $AppId -RelationshipId $relationship.id
+    }
+    return $relationships.Count
+}
+
+function Remove-InteropWin32App {
+    <#
+    .SYNOPSIS
+    Deletes an app from Intune
+
+    .DESCRIPTION
+    DELETE /mobileApps/{id}. The service removes the app's assignments with it, but refuses
+    (400) while the app is part of a supersedence relationship - remove those first
+    (Remove-InteropAppRelationships). Throws on failure with Graph's error message.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    try {
+        $null = Invoke-MgGraphRequest -Method DELETE -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -ErrorAction Stop
+    }
+    catch {
+        throw "Could not delete app '$AppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+    }
 }
 
 function Add-InteropAllUsersAssignment {

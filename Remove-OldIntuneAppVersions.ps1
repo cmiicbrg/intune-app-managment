@@ -18,7 +18,9 @@
       - -WhatIf previews every deletion; without it, each deletion asks for confirmation
         (answer "Yes to All" to approve the rest, or pass -Confirm:$false for an unattended run).
       - Right before each DELETE the app's relationships are re-read; an app that became a
-        dependency target in the meantime is skipped.
+        dependency target in the meantime is skipped. The remaining relationships (its link to
+        the superseding version) are removed first - Intune refuses to delete an app that is
+        part of a supersedence relationship.
       - Every decision is written to <OutputPath>/<Tenant>-cleanup-<yyyyMMdd-HHmm>.json.
 
 .PARAMETER TenantName
@@ -168,7 +170,7 @@ else {
     Write-Host "$($cleanup.DeletionCount) version(s) to delete:" -ForegroundColor Cyan
     foreach ($d in $cleanup.Deletions) {
         $installed = if ($null -ne $d.InstalledDeviceCount) { "$($d.InstalledDeviceCount) device(s)" } else { 'unknown' }
-        Write-Host ("  {0,-45} v{1,-18} rank {2,2}  {3,6} weeks  installed: {4}" -f $d.DisplayName, $d.DisplayVersion, $d.Rank, $d.AgeWeeks, $installed) -ForegroundColor Gray
+        Write-Host ("  {0,-45} v{1,-18} rank {2,2}  {3,6} weeks  installed: {4}" -f $d.DisplayName, $d.DisplayVersion, $d.Rank, ([string]$d.AgeWeeks), $installed) -ForegroundColor Gray
     }
     Write-Host ""
 
@@ -208,14 +210,23 @@ else {
         }
 
         if ($PSCmdlet.ShouldProcess($label, 'Delete Win32 app from Intune')) {
+            # Intune refuses to delete an app that is part of a supersedence relationship, so
+            # the app's relationships (here: its link to the version that supersedes it) are
+            # removed first - they would disappear with the app anyway.
+            $removedRelationships = $null
             try {
+                $removedRelationships = Remove-InteropAppRelationships -AppId $deletion.Id
                 Remove-InteropWin32App -AppId $deletion.Id
                 $outcome.Outcome = 'Deleted'
+                $outcome.Detail = "$removedRelationships relationship(s) removed first"
                 Write-Host "  Deleted $label" -ForegroundColor Green
             }
             catch {
                 $outcome.Outcome = 'Failed'
                 $outcome.Detail = $_.Exception.Message
+                if ($removedRelationships -gt 0) {
+                    $outcome.Detail += " (its $removedRelationships relationship(s) were already removed, so the app is now unlinked - re-run the cleanup)"
+                }
                 Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
             }
         }
