@@ -289,6 +289,34 @@ function Get-AppInventoryAnalysis {
     }
 }
 
+# Pre-flight for a deploy: can one more version be linked into the supersedence graph that the
+# app to be superseded belongs to? Intune caps a graph at $script:SupersedenceGraphNodeLimit
+# nodes; the new version would be one more. Records are ConvertTo-AppInventoryRecord output.
+function Test-SupersedenceHeadroom {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [array]$Records,
+
+        # The app the new version will supersede (the newest existing one); $null/unknown = a new
+        # chain of one node
+        [AllowNull()]
+        [string]$AppId,
+
+        [int]$Limit = $script:SupersedenceGraphNodeLimit
+    )
+
+    $sizes = Get-SupersedenceComponentSizes -Records $Records
+    $nodes = if ($AppId -and $sizes.ContainsKey($AppId)) { [int]$sizes[$AppId] } else { 0 }
+    return [PSCustomObject]@{
+        Nodes         = $nodes
+        NodesAfter    = $nodes + 1
+        Limit         = $Limit
+        CanAddVersion = ($nodes + 1) -le $Limit
+        WillFill      = ($nodes + 1) -eq $Limit
+    }
+}
+
 # The assignments that actually make an app available in the Company Portal: intent
 # 'available' with a positive target. Graph lists exclusions as rows of the same intent with an
 # exclusionGroupAssignmentTarget (normalized to 'ExcludedGroup:<id>'); those take availability

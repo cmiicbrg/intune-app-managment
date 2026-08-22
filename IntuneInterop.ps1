@@ -1372,7 +1372,13 @@ function Add-InteropSupersedence {
     $dependencies = @(Get-InteropAppRelationship -AppId $AppId -ODataType '#microsoft.graph.mobileAppDependency')
 
     $body = [ordered]@{ 'relationships' = @(@($supersedence) + $dependencies) }
-    $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
+    try {
+        $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
+    }
+    catch {
+        # Surface Graph's reason (e.g. "The total supersedence limit was reached"), not just the status
+        throw "Could not set supersedence of app '$AppId' over '$SupersededAppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+    }
 }
 
 function Add-InteropDependency {

@@ -267,6 +267,7 @@ intune-app-management/
 ├── AppInventory.ps1                       # Inventory assembly and analysis (pure)
 ├── IntuneInventory.ps1                    # Graph read path shared by inventory and cleanup
 ├── AppCleanup.ps1                         # Cleanup planner (pure)
+├── IntuneCleanup.ps1                      # Cleanup executor + audit log (shared by cleanup and deploy)
 ├── Get-IntuneAppInventory.ps1             # Read-only tenant inventory script
 ├── Remove-OldIntuneAppVersions.ps1        # Retention-based cleanup script
 ├── inventory/                             # Inventory reports and cleanup logs (git-ignored)
@@ -416,8 +417,11 @@ flagged for manual review, never deleted automatically — as is any version who
 could not be read from Graph (it might be a dependency target the tooling cannot see; re-run the
 inventory).
 
-A tenant-level `Retention` block is the opt-in for automated cleanup. `Deploy-ToIntune.ps1` only
-validates these values; the inventory and cleanup tooling evaluate and act on them.
+A tenant-level `Retention` block is the opt-in for automated cleanup: `Remove-OldIntuneAppVersions.ps1`
+applies the policy to the whole tenant interactively, and `Deploy-ToIntune.ps1` applies it to
+each family it deploys, unattended, right after the new version is in place (`-NoRetention` skips
+that for a run). Without the block nothing is ever deleted; the inventory still reports what the
+policy would do.
 
 Only apps whose display name follows the family's naming convention (`DisplayNameTemplate` in
 `AppConfig.ps1`, e.g. `Google Chrome 151` or `Mozilla Firefox 153 (German)`) count as versions of
@@ -490,6 +494,20 @@ updated without it, exactly what "Remove relationship" in the admin center does 
 deletes it. Nothing else in the chain is touched; it shrinks to the kept versions. Re-run the
 inventory afterwards to verify. Recommended first run: `-WhatIf`, then one family, then the
 full tenant.
+
+#### Retention after deploy
+
+For an opted-in tenant, `Deploy-ToIntune.ps1` runs the same evaluation and executor for each
+family right after deploying it (new version created, or an existing one reconciled): the
+family is re-read, and versions outside the policy are removed unattended — typically the one
+that was rank 3 before the deploy and is rank 4 now. The deployment summary reports what was
+removed and every pass — also one that found nothing to remove — writes the same
+`inventory/<Tenant>-cleanup-<timestamp>.json` log with `Trigger: Deploy`. `-NoRetention`
+skips the step; `-ShowPlan` shows whether it would run. The deploy
+also checks the supersedence graph *before* uploading: if the version to be superseded already
+sits in a full graph (11 nodes), the app is not uploaded and the run tells you to clean up
+first — and a supersedence that fails after the upload now fails the deployment loudly (the new
+version is left unassigned, never as an unlinked Company Portal entry).
 
 ### Version Cache
 
