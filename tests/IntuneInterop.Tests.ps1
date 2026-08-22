@@ -243,9 +243,12 @@ Describe 'Get-InteropAppInstallSummary' {
         { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw
     }
 
-    It 'throws when both the legacy endpoint and the report fail' {
-        Mock Invoke-MgGraphRequest { throw 'Graph unavailable' }
-        { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw
+    It 'throws with BOTH error messages when the legacy endpoint and the report fail' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { throw 'legacy says 400' }
+            throw 'report says 503'
+        }
+        { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw '*legacy says 400*report says 503*'
     }
 }
 

@@ -922,11 +922,16 @@ function Get-InteropAppInstallSummary {
         [string]$AppId
     )
 
+    # The fallback is deliberately broad (any legacy-GET failure, not just 400): the endpoint is
+    # decaying and its failure mode may change again. To keep real problems diagnosable, the
+    # original error is preserved and both errors are thrown together when the fallback fails too.
+    $legacyError = $null
     try {
         return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -OutputType PSObject -ErrorAction Stop
     }
     catch {
-        Write-Verbose "installSummary GET failed for app '$AppId' ($($_.Exception.Message)); falling back to getAppStatusOverviewReport"
+        $legacyError = $_.Exception.Message
+        Write-Verbose "installSummary GET failed for app '$AppId' ($legacyError); falling back to getAppStatusOverviewReport"
     }
 
     $body = @{ filter = "(ApplicationId eq '$AppId')" } | ConvertTo-Json
@@ -937,6 +942,9 @@ function Get-InteropAppInstallSummary {
     try {
         $null = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppStatusOverviewReport' -Body $body -ContentType 'application/json' -OutputFilePath $tempPath -ErrorAction Stop
         $report = Get-Content -Path $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Install summary unavailable for app '$AppId'. Legacy installSummary GET failed: $legacyError | getAppStatusOverviewReport fallback failed: $($_.Exception.Message)"
     }
     finally {
         Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
