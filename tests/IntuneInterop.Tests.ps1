@@ -17,7 +17,7 @@ BeforeAll {
     # wrappers pass (-ErrorAction).
     function Invoke-MgGraphRequest {
         [CmdletBinding()]
-        param($Method, $Uri, $OutputType, $Body, $ContentType)
+        param($Method, $Uri, $OutputType, $Body, $ContentType, $OutputFilePath)
         throw 'stub was not mocked'
     }
 
@@ -209,16 +209,10 @@ Describe 'Get-InteropAppInstallSummary' {
     It 'falls back to getAppStatusOverviewReport when the legacy GET returns 400, mapping columns to camelCase' {
         Mock Invoke-MgGraphRequest {
             if ($Method -eq 'GET') { throw 'Response status code does not indicate success: BadRequest (Bad Request).' }
-            [PSCustomObject]@{
-                TotalRowCount = 1
-                Schema        = @(
-                    [PSCustomObject]@{ Column = 'ApplicationId' },
-                    [PSCustomObject]@{ Column = 'InstalledDeviceCount' },
-                    [PSCustomObject]@{ Column = 'FailedDeviceCount' },
-                    [PSCustomObject]@{ Column = 'PendingInstallDeviceCount' }
-                )
-                Values        = @(, @('app-1', 7, 1, 2))
-            }
+            # The reports endpoint delivers the JSON as a file download; the implementation
+            # passes -OutputFilePath and parses the file
+            '{ "TotalRowCount": 1, "Schema": [ { "Column": "ApplicationId" }, { "Column": "InstalledDeviceCount" }, { "Column": "FailedDeviceCount" }, { "Column": "PendingInstallDeviceCount" } ], "Values": [ [ "app-1", 7, 1, 2 ] ] }' |
+                Set-Content -Path $OutputFilePath -Encoding UTF8
         }
 
         $summary = Get-InteropAppInstallSummary -AppId 'app-1'
@@ -228,16 +222,25 @@ Describe 'Get-InteropAppInstallSummary' {
         Should -Invoke Invoke-MgGraphRequest -ParameterFilter {
             $Method -eq 'POST' -and
             $Uri -like '*deviceManagement/reports/getAppStatusOverviewReport' -and
-            ($Body | ConvertFrom-Json).filter -eq "(ApplicationId eq 'app-1')"
+            ($Body | ConvertFrom-Json).filter -eq "(ApplicationId eq 'app-1')" -and
+            -not [string]::IsNullOrEmpty($OutputFilePath)
         } -Times 1 -Exactly
     }
 
     It 'returns $null when the fallback report has no row for the app' {
         Mock Invoke-MgGraphRequest {
             if ($Method -eq 'GET') { throw 'BadRequest' }
-            [PSCustomObject]@{ TotalRowCount = 0; Schema = @(); Values = @() }
+            '{ "TotalRowCount": 0, "Schema": [], "Values": [] }' | Set-Content -Path $OutputFilePath -Encoding UTF8
         }
         Get-InteropAppInstallSummary -AppId 'app-1' | Should -BeNullOrEmpty
+    }
+
+    It 'throws when the fallback response is not parseable JSON' {
+        Mock Invoke-MgGraphRequest {
+            if ($Method -eq 'GET') { throw 'BadRequest' }
+            'PK not json at all' | Set-Content -Path $OutputFilePath -Encoding UTF8
+        }
+        { Get-InteropAppInstallSummary -AppId 'app-1' } | Should -Throw
     }
 
     It 'throws when both the legacy endpoint and the report fail' {

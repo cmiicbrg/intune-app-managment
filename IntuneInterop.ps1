@@ -906,9 +906,10 @@ function Get-InteropAppInstallSummary {
     Tries the documented GET /mobileApps/{id}/installSummary first; that legacy endpoint has
     started returning 400 in current service releases, so on failure it falls back to what the
     Intune admin center uses - POST /deviceManagement/reports/getAppStatusOverviewReport with an
-    ApplicationId filter - and maps the report's Schema/Values table onto the same camelCase
-    property names (installedDeviceCount, ...), so callers see one shape either way. Returns
-    $null when the report has no row for the app; throws when both paths fail.
+    ApplicationId filter (the response is an octet-stream JSON download, materialized via a temp
+    file) - and maps the report's Schema/Values table onto the same camelCase property names
+    (installedDeviceCount, ...), so callers see one shape either way. Returns $null when the
+    report has no row for the app; throws when both paths fail.
 
     Note for version-comparison detection rules ("greaterThanOrEqual" and >=-style scripts):
     a device with a newer version installed also detects every older version, so
@@ -929,7 +930,17 @@ function Get-InteropAppInstallSummary {
     }
 
     $body = @{ filter = "(ApplicationId eq '$AppId')" } | ConvertTo-Json
-    $report = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppStatusOverviewReport' -Body $body -ContentType 'application/json' -OutputType PSObject -ErrorAction Stop
+    # The reports endpoints deliver their JSON as an octet-stream download (with a
+    # Content-Disposition header), which Invoke-MgGraphRequest refuses to parse inline -
+    # per its own guidance the response is written to a temp file and parsed from there.
+    $tempPath = Join-Path ([System.IO.Path]::GetTempPath()) ('InteropReport-{0}.json' -f [guid]::NewGuid().ToString('N'))
+    try {
+        $null = Invoke-MgGraphRequest -Method POST -Uri 'https://graph.microsoft.com/beta/deviceManagement/reports/getAppStatusOverviewReport' -Body $body -ContentType 'application/json' -OutputFilePath $tempPath -ErrorAction Stop
+        $report = Get-Content -Path $tempPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    finally {
+        Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+    }
 
     $row = @($report.Values) | Select-Object -First 1
     if ($null -eq $row) {
