@@ -96,119 +96,124 @@ if (-not (Connect-IntuneTenantSession -TenantId $TenantId -ClientId $ClientId -C
     exit 1
 }
 
-# Families, plan scope, retention policy resolver. Classification always uses the FULL catalog
-# so apps of other families are recognized as managed (not misreported as unmanaged) even when
-# -AppName narrows the analysis scope to one family.
-$allFamilies = @(Get-AppFamilyCatalog)
-$families = $allFamilies
-if ($AppName) {
-    $selected = $allFamilies | Where-Object { $_.AppConfigName -eq $AppName }
-    if (-not $selected) {
-        Write-Host "Error: App '$AppName' not found in AppConfig.ps1. Known apps: $($allFamilies.AppConfigName -join ', ')" -ForegroundColor Red
-        exit 1
+# Connected from here on: the finally block disconnects on every exit path
+try {
+    # Families, plan scope, retention policy resolver. Classification always uses the FULL catalog
+    # so apps of other families are recognized as managed (not misreported as unmanaged) even when
+    # -AppName narrows the analysis scope to one family.
+    $allFamilies = @(Get-AppFamilyCatalog)
+    $families = $allFamilies
+    if ($AppName) {
+        $selected = $allFamilies | Where-Object { $_.AppConfigName -eq $AppName }
+        if (-not $selected) {
+            Write-Host "Error: App '$AppName' not found in AppConfig.ps1. Known apps: $($allFamilies.AppConfigName -join ', ')" -ForegroundColor Red
+            exit 1
+        }
+        $families = @($selected)
     }
-    $families = @($selected)
-}
 
-$planAppNames = $null
-$policyResolver = { param($appConfigName) Get-TenantRetentionPolicy -TenantName $reportName -AppName $appConfigName }
-if ($PSCmdlet.ParameterSetName -eq 'TenantName') {
-    $plan = Get-TenantDeploymentPlan -TenantName $TenantName
-    if ($plan) {
-        $planAppNames = @($plan.Keys)
-        Write-Host "Deployment plan for '$TenantName': $($planAppNames.Count) app(s)" -ForegroundColor Gray
+    $planAppNames = $null
+    $policyResolver = { param($appConfigName) Get-TenantRetentionPolicy -TenantName $reportName -AppName $appConfigName }
+    if ($PSCmdlet.ParameterSetName -eq 'TenantName') {
+        $plan = Get-TenantDeploymentPlan -TenantName $TenantName
+        if ($plan) {
+            $planAppNames = @($plan.Keys)
+            Write-Host "Deployment plan for '$TenantName': $($planAppNames.Count) app(s)" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "No deployment plan for '$TenantName' - all AppConfig families are treated as in scope" -ForegroundColor Gray
+        }
     }
     else {
-        Write-Host "No deployment plan for '$TenantName' - all AppConfig families are treated as in scope" -ForegroundColor Gray
+        # No tenant name -> no plan lookup possible; policy falls back to the built-in defaults
+        $policyResolver = { param($appConfigName) Get-TenantRetentionPolicy -TenantName '__direct__' -AppName $appConfigName }
     }
-}
-else {
-    # No tenant name -> no plan lookup possible; policy falls back to the built-in defaults
-    $policyResolver = { param($appConfigName) Get-TenantRetentionPolicy -TenantName '__direct__' -AppName $appConfigName }
-}
 
-$appConfigs = @{}
-foreach ($family in $families) {
-    $appConfigs[$family.AppConfigName] = Get-AppConfiguration -AppName $family.AppConfigName
-}
-
-# Fetch through the read path shared with the cleanup, so both see the same evaluation
-Write-Host "`nFetching Win32 apps..." -ForegroundColor Cyan
-$inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary:(-not $SkipInstallSummary) -ResolveGroupNames
-$records = @($inventory.Records)
-$includesInstallSummary = $inventory.IncludesInstallSummary
-
-# Analyze. With -AppName, scope the records to that family plus the unmanaged apps (so near-miss
-# names of the selected family are still reported); apps of other families are out of scope but
-# correctly classified, not "unmanaged".
-$recordsForAnalysis = @($records)
-if ($AppName) {
-    $recordsForAnalysis = @($records | Where-Object { $_.Family -eq $AppName -or $null -eq $_.Family })
-}
-$now = [datetime]::UtcNow
-$analysis = Get-AppInventoryAnalysis -Records $recordsForAnalysis -Families $families -PolicyResolver $policyResolver -PlanAppNames $planAppNames -AppConfigs $appConfigs -Now $now
-
-# Write
-if (-not $OutputPath) {
-    $OutputPath = Join-Path $PSScriptRoot 'inventory'
-}
-New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
-$stamp = $now.ToString('yyyyMMdd-HHmm')
-$safeName = ($reportName -replace '[^\w\-\.]', '_')
-$jsonPath = Join-Path $OutputPath "$safeName-$stamp.json"
-$mdPath = Join-Path $OutputPath "$safeName-$stamp.md"
-
-$document = [ordered]@{
-    Tenant                 = $reportName
-    GeneratedUtc           = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    ToolVersion            = ((Get-Content (Join-Path $PSScriptRoot 'VERSION.txt') -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
-    IncludesInstallSummary = $includesInstallSummary
-    PlanApps               = $planAppNames
-    Summary                = $analysis.Summary
-    Families               = $analysis.Families
-    Anomalies              = $analysis.Anomalies
-    Unmanaged              = $analysis.Unmanaged
-    Apps                   = @($recordsForAnalysis | Select-Object -Property * -ExcludeProperty ParsedVersion)
-}
-$utf8 = New-Object System.Text.UTF8Encoding($false)
-[System.IO.File]::WriteAllText($jsonPath, ($document | ConvertTo-Json -Depth 12), $utf8)
-[System.IO.File]::WriteAllText($mdPath, (Format-AppInventoryMarkdown -TenantName $reportName -GeneratedUtc $now -Analysis $analysis -Records $recordsForAnalysis -IncludesInstallSummary $includesInstallSummary), $utf8)
-
-# Console summary
-$s = $analysis.Summary
-Write-Host ""
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Inventory summary - $reportName" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ("  Win32 apps: {0} ({1} managed, {2} unmanaged)" -f $s.TotalWin32Apps, $s.ManagedApps, $s.UnmanagedApps)
-Write-Host ("  Families present: {0}, near supersedence graph limit: {1}" -f $s.FamiliesPresent, $s.FamiliesNearGraphLimit)
-Write-Host ("  Retention: {0} delete candidate(s), {1} to review" -f $s.DeleteCandidates, $s.ReviewItems)
-Write-Host ""
-$analysis.Families | Sort-Object Family | ForEach-Object {
-    [PSCustomObject]@{
-        Family   = $_.Family
-        InPlan   = $_.InPlan
-        Versions = $_.VersionCount
-        Newest   = if ($_.Newest) { $_.Newest.Version } else { '-' }
-        Graph    = $_.SupersedenceGraphNodes
-        Policy   = "$($_.Policy.KeepNewest)/$($_.Policy.KeepNewerThanWeeks)w"
-        Keep     = $_.KeepCount
-        Delete   = $_.DeleteCandidateCount
-        Review   = $_.ReviewCount
+    $appConfigs = @{}
+    foreach ($family in $families) {
+        $appConfigs[$family.AppConfigName] = Get-AppConfiguration -AppName $family.AppConfigName
     }
-} | Format-Table -AutoSize | Out-Host
 
-if ($analysis.Anomalies.Count -gt 0) {
-    Write-Host "Anomalies:" -ForegroundColor Yellow
-    foreach ($a in ($analysis.Anomalies | Sort-Object Type, Family)) {
-        Write-Host "  [$($a.Type)] $($a.Family): $($a.Message)" -ForegroundColor Yellow
+    # Fetch through the read path shared with the cleanup, so both see the same evaluation
+    Write-Host "`nFetching Win32 apps..." -ForegroundColor Cyan
+    $inventory = Read-IntuneAppInventory -Families $allFamilies -IncludeInstallSummary:(-not $SkipInstallSummary) -ResolveGroupNames
+    $records = @($inventory.Records)
+    $includesInstallSummary = $inventory.IncludesInstallSummary
+
+    # Analyze. With -AppName, scope the records to that family plus the unmanaged apps (so near-miss
+    # names of the selected family are still reported); apps of other families are out of scope but
+    # correctly classified, not "unmanaged".
+    $recordsForAnalysis = @($records)
+    if ($AppName) {
+        $recordsForAnalysis = @($records | Where-Object { $_.Family -eq $AppName -or $null -eq $_.Family })
     }
+    $now = [datetime]::UtcNow
+    $analysis = Get-AppInventoryAnalysis -Records $recordsForAnalysis -Families $families -PolicyResolver $policyResolver -PlanAppNames $planAppNames -AppConfigs $appConfigs -Now $now
+
+    # Write
+    if (-not $OutputPath) {
+        $OutputPath = Join-Path $PSScriptRoot 'inventory'
+    }
+    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    $stamp = $now.ToString('yyyyMMdd-HHmm')
+    $safeName = ($reportName -replace '[^\w\-\.]', '_')
+    $jsonPath = Join-Path $OutputPath "$safeName-$stamp.json"
+    $mdPath = Join-Path $OutputPath "$safeName-$stamp.md"
+
+    $document = [ordered]@{
+        Tenant                 = $reportName
+        GeneratedUtc           = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        ToolVersion            = ((Get-Content (Join-Path $PSScriptRoot 'VERSION.txt') -Raw -ErrorAction SilentlyContinue) ?? '').Trim()
+        IncludesInstallSummary = $includesInstallSummary
+        PlanApps               = $planAppNames
+        Summary                = $analysis.Summary
+        Families               = $analysis.Families
+        Anomalies              = $analysis.Anomalies
+        Unmanaged              = $analysis.Unmanaged
+        Apps                   = @($recordsForAnalysis | Select-Object -Property * -ExcludeProperty ParsedVersion)
+    }
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($jsonPath, ($document | ConvertTo-Json -Depth 12), $utf8)
+    [System.IO.File]::WriteAllText($mdPath, (Format-AppInventoryMarkdown -TenantName $reportName -GeneratedUtc $now -Analysis $analysis -Records $recordsForAnalysis -IncludesInstallSummary $includesInstallSummary), $utf8)
+
+    # Console summary
+    $s = $analysis.Summary
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Inventory summary - $reportName" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ("  Win32 apps: {0} ({1} managed, {2} unmanaged)" -f $s.TotalWin32Apps, $s.ManagedApps, $s.UnmanagedApps)
+    Write-Host ("  Families present: {0}, near supersedence graph limit: {1}" -f $s.FamiliesPresent, $s.FamiliesNearGraphLimit)
+    Write-Host ("  Retention: {0} delete candidate(s), {1} to review" -f $s.DeleteCandidates, $s.ReviewItems)
+    Write-Host ""
+    $analysis.Families | Sort-Object Family | ForEach-Object {
+        [PSCustomObject]@{
+            Family   = $_.Family
+            InPlan   = $_.InPlan
+            Versions = $_.VersionCount
+            Newest   = if ($_.Newest) { $_.Newest.Version } else { '-' }
+            Graph    = $_.SupersedenceGraphNodes
+            Policy   = "$($_.Policy.KeepNewest)/$($_.Policy.KeepNewerThanWeeks)w"
+            Keep     = $_.KeepCount
+            Delete   = $_.DeleteCandidateCount
+            Review   = $_.ReviewCount
+        }
+    } | Format-Table -AutoSize | Out-Host
+
+    if ($analysis.Anomalies.Count -gt 0) {
+        Write-Host "Anomalies:" -ForegroundColor Yellow
+        foreach ($a in ($analysis.Anomalies | Sort-Object Type, Family)) {
+            Write-Host "  [$($a.Type)] $($a.Family): $($a.Message)" -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+
+    Write-Host "Report written:" -ForegroundColor Green
+    Write-Host "  $jsonPath" -ForegroundColor Gray
+    Write-Host "  $mdPath" -ForegroundColor Gray
     Write-Host ""
 }
-
-Write-Host "Report written:" -ForegroundColor Green
-Write-Host "  $jsonPath" -ForegroundColor Gray
-Write-Host "  $mdPath" -ForegroundColor Gray
-Write-Host ""
-
-Disconnect-IntuneSession -Force
+finally {
+    # Every exit path - success, exit 1, terminating error - drops the privileged Graph session
+    Disconnect-IntuneSession -Force
+}
