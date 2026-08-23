@@ -323,6 +323,9 @@ function Publish-App {
         $baseDisplayName = Get-AppFamilyBaseName -DisplayName $AppConfig.DisplayName
         Write-Host "  Searching for existing versions of '$baseDisplayName' (names following the family's naming convention)" -ForegroundColor Gray
 
+        # Inventory records carry DisplayName/DisplayVersion/Id (PascalCase); the .displayName /
+        # .displayVersion / .id access below and in Get-IntuneAppVersion resolves them all the same
+        # (PowerShell property access is case-insensitive; pinned by a SharedFunctions test).
         $allExistingApps = @($ExistingApps)
         
         if ($allExistingApps) {
