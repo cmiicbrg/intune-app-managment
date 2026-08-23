@@ -295,11 +295,15 @@ function Get-InteropWin32App {
     microsoft.graph.mobileApp type - derived win32LobApp properties (displayVersion)
     cannot be $select-ed there and list items are not guaranteed to carry them.
     -DisplayName keeps the module's contains-match semantics (filtered before the
-    per-ID fetches).
+    per-ID fetches). -DisplayNameFilter is a predicate over the display name applied at the
+    same point, so a caller interested in one app family fetches only that family's objects.
     #>
     [CmdletBinding()]
     param(
-        [string]$DisplayName
+        [string]$DisplayName,
+
+        # { param($displayName) <bool> } - evaluated per list item before the per-ID fetch
+        [scriptblock]$DisplayNameFilter
     )
 
     # Forward an explicitly passed -ErrorAction (e.g. SilentlyContinue from the
@@ -328,6 +332,9 @@ function Get-InteropWin32App {
         # metacharacters (e.g. '[') would otherwise fail to match themselves
         $summaries = @($summaries | Where-Object { $_.displayName -and $_.displayName.Contains($DisplayName, [System.StringComparison]::OrdinalIgnoreCase) })
     }
+    if ($DisplayNameFilter) {
+        $summaries = @($summaries | Where-Object { [bool](& $DisplayNameFilter "$($_.displayName)") })
+    }
 
     $apps = [System.Collections.Generic.List[object]]::new()
     foreach ($summary in $summaries) {
@@ -337,6 +344,30 @@ function Get-InteropWin32App {
         }
     }
     return $apps
+}
+
+function Get-InteropWin32AppById {
+    <#
+    .SYNOPSIS
+    Retrieves one app by id (GET /mobileApps/{id})
+
+    .DESCRIPTION
+    The per-ID GET is consistent immediately after a creation, while the mobileApps list lags
+    a few seconds behind - callers that just created an app use this to make sure it is part of
+    what they evaluate next. Throws (404) when the app does not exist.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AppId
+    )
+
+    try {
+        return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -OutputType PSObject -ErrorAction Stop
+    }
+    catch {
+        throw "Could not read app '$AppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+    }
 }
 
 function Publish-InteropWin32App {
@@ -1372,7 +1403,13 @@ function Add-InteropSupersedence {
     $dependencies = @(Get-InteropAppRelationship -AppId $AppId -ODataType '#microsoft.graph.mobileAppDependency')
 
     $body = [ordered]@{ 'relationships' = @(@($supersedence) + $dependencies) }
-    $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
+    try {
+        $null = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/updateRelationships" -Body ($body | ConvertTo-Json -Depth 10) -ContentType 'application/json' -ErrorAction Stop
+    }
+    catch {
+        # Surface Graph's reason (e.g. "The total supersedence limit was reached"), not just the status
+        throw "Could not set supersedence of app '$AppId' over '$SupersededAppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+    }
 }
 
 function Add-InteropDependency {

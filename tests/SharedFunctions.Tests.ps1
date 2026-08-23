@@ -242,6 +242,17 @@ Describe 'Get-IntuneAppVersion' {
         $info.Source | Should -Be 'displayVersion'
     }
 
+    It 'accepts an inventory record (PascalCase properties) as well as a raw Graph app' {
+        # Deploy-ToIntune hands Publish-App inventory records (ConvertTo-AppInventoryRecord:
+        # DisplayName/DisplayVersion/Id); property access is case-insensitive in PowerShell, and
+        # this pins that the version helper - and therefore the existing-version detection and
+        # supersedence target - works on that shape
+        $info = Get-IntuneAppVersion -App ([PSCustomObject]@{ Id = 'app-1'; DisplayName = 'Google Chrome 151'; DisplayVersion = '151.0.7922.109' })
+        $info.Version | Should -Be ([version]'151.0.7922.109')
+        $info.Source | Should -Be 'displayVersion'
+        (Get-IntuneAppVersion -App ([PSCustomObject]@{ Id = 'app-2'; DisplayName = 'Some App 2.5.1'; DisplayVersion = $null })).Version | Should -Be ([version]'2.5.1')
+    }
+
     It 'falls back to the first dotted number in the display name' {
         $info = Get-IntuneAppVersion -App ([PSCustomObject]@{ displayName = 'Some App 2.5.1 (x64)'; displayVersion = '' })
         $info.Raw | Should -Be '2.5.1'

@@ -7,15 +7,24 @@
 # evaluation drives both the report and the deletions.
 #
 # Policy (see TenantDeployments.ps1 for how it is configured):
-#   a version is KEPT when it is among the newest KeepNewest versions, or was created within the
-#   last KeepNewerThanWeeks weeks; otherwise it is a DELETE candidate.
+#   a version is KEPT when it is among the newest KeepNewest versions, or was still the CURRENT
+#   (newest) version at some point within the last KeepNewerThanWeeks weeks - i.e. the first
+#   newer version was created less than that many weeks ago; otherwise it is a DELETE candidate.
+#   The window is about devices, not about the version's own age: a device that last checked in
+#   N weeks ago runs whatever was current back then, and that version must still exist in Intune
+#   for supersedence/auto-update to pick the device up. (A fast-moving family can have three
+#   builds younger than the window and still need last month's build kept.)
 # Always kept regardless of policy: the newest version, versions whose id is in ProtectedAppIds
-# (dependency targets), versions with an unparseable version or unknown creation date.
+# (dependency targets), versions with an unparseable version or unknown creation date, and
+# versions superseded at an unknown time (a newer version without creation date).
 # Versions that share a version number with another app are marked REVIEW - never deleted
 # automatically, because it is not knowable which duplicate carries the live assignments.
 
 # Evaluates one family. Returns one object per input app, newest first:
-#     Id, DisplayName, Version, CreatedDateTime, Rank, AgeWeeks, Action ('Keep'|'Delete'|'Review'), Reasons
+#     Id, DisplayName, Version, CreatedDateTime, Rank, AgeWeeks, SupersededAt, SupersededWeeks,
+#     Action ('Keep'|'Delete'|'Review'), Reasons
+# SupersededAt is the creation time of the first newer version ($null for the newest);
+# SupersededWeeks the weeks since then - the number the window rule is about.
 # Rank counts distinct version numbers (duplicates share a rank), so a duplicate never consumes a
 # KeepNewest slot. Unparseable versions have no rank.
 function Get-AppRetentionPlan {
@@ -41,7 +50,7 @@ function Get-AppRetentionPlan {
     }
 
     $keepNewest = [int]$Policy.KeepNewest
-    $ageCutoff = $Now.AddDays(-7 * [int]$Policy.KeepNewerThanWeeks)
+    $windowStart = $Now.AddDays(-7 * [int]$Policy.KeepNewerThanWeeks)
 
     $parseable = @($Apps | Where-Object { $null -ne $_.Version })
     $unparseable = @($Apps | Where-Object { $null -eq $_.Version })
@@ -83,8 +92,24 @@ function Get-AppRetentionPlan {
         }
         else {
             $ageWeeks = [math]::Round(($Now - [datetime]$app.CreatedDateTime).TotalDays / 7, 1)
-            if ([datetime]$app.CreatedDateTime -ge $ageCutoff) {
-                $reasons.Add("newer than $($Policy.KeepNewerThanWeeks) weeks")
+        }
+
+        # When did this version stop being the newest? At the creation of the first newer
+        # version. A device that last checked in before that moment may still run this version,
+        # so it stays as long as that moment lies inside the window.
+        $supersededAt = $null
+        $supersededWeeks = $null
+        if ($appRank -gt 1) {
+            $newerDates = @($ordered | Where-Object { $_.Version -gt $app.Version } | ForEach-Object { $_.CreatedDateTime })
+            if (@($newerDates | Where-Object { $null -eq $_ }).Count -gt 0) {
+                $reasons.Add('superseded at an unknown time (a newer version has no creation date)')
+            }
+            else {
+                $supersededAt = ($newerDates | ForEach-Object { [datetime]$_ } | Measure-Object -Minimum).Minimum
+                $supersededWeeks = [math]::Round(($Now - $supersededAt).TotalDays / 7, 1)
+                if ($supersededAt -ge $windowStart) {
+                    $reasons.Add("current until $supersededWeeks weeks ago (within $($Policy.KeepNewerThanWeeks) weeks)")
+                }
             }
         }
 
@@ -94,7 +119,7 @@ function Get-AppRetentionPlan {
 
         $action = if ($reasons.Count -gt 0) { 'Keep' } else { 'Delete' }
         if ($action -eq 'Delete') {
-            $reasons.Add("older than $($Policy.KeepNewerThanWeeks) weeks and outside newest $keepNewest")
+            $reasons.Add("superseded $supersededWeeks weeks ago (more than $($Policy.KeepNewerThanWeeks) weeks) and outside newest $keepNewest")
         }
 
         if ($countByVersion[$key] -gt 1) {
@@ -109,6 +134,8 @@ function Get-AppRetentionPlan {
             CreatedDateTime = $app.CreatedDateTime
             Rank            = $appRank
             AgeWeeks        = $ageWeeks
+            SupersededAt    = $supersededAt
+            SupersededWeeks = $supersededWeeks
             Action          = $action
             Reasons         = @($reasons)
         })
@@ -138,6 +165,8 @@ function Get-AppRetentionPlan {
             CreatedDateTime = $app.CreatedDateTime
             Rank            = $null
             AgeWeeks        = $ageWeeks
+            SupersededAt    = $null
+            SupersededWeeks = $null
             Action          = 'Keep'
             Reasons         = @($reasons)
         })

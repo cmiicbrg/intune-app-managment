@@ -26,7 +26,7 @@ Describe 'Get-AppRetentionPlan' {
         @(Get-AppRetentionPlan -Apps @() -Policy $defaultPolicy -Now $now).Count | Should -Be 0
     }
 
-    It 'keeps the newest N by rank and deletes older versions past the age cutoff' {
+    It 'keeps the newest N by rank and deletes versions that were superseded before the window' {
         $apps = @(
             (New-TestApp -Id 'a' -Version '5.0' -WeeksOld 1),
             (New-TestApp -Id 'b' -Version '4.0' -WeeksOld 12),
@@ -45,7 +45,9 @@ Describe 'Get-AppRetentionPlan' {
         ($plan | Where-Object Id -eq 'e').Action | Should -Be 'Delete'
     }
 
-    It 'keeps versions newer than the age cutoff even beyond the newest N' {
+    It 'keeps every version that was still current within the window, beyond the newest N' {
+        # e (11 weeks old) was the current version until d was created 4 weeks ago: a device that
+        # last checked in 5 weeks ago runs e, so e stays - its own age is irrelevant
         $apps = @(
             (New-TestApp -Id 'a' -Version '5.0' -WeeksOld 1),
             (New-TestApp -Id 'b' -Version '4.0' -WeeksOld 2),
@@ -56,8 +58,47 @@ Describe 'Get-AppRetentionPlan' {
         $plan = Get-AppRetentionPlan -Apps $apps -Policy $defaultPolicy -Now $now
 
         ($plan | Where-Object Id -eq 'd').Action | Should -Be 'Keep'
-        ($plan | Where-Object Id -eq 'd').Reasons | Should -Contain 'newer than 10 weeks'
-        ($plan | Where-Object Id -eq 'e').Action | Should -Be 'Delete'
+        ($plan | Where-Object Id -eq 'd').Reasons | Should -Contain 'current until 3 weeks ago (within 10 weeks)'
+        ($plan | Where-Object Id -eq 'e').Action | Should -Be 'Keep'
+        ($plan | Where-Object Id -eq 'e').SupersededWeeks | Should -Be 4
+        ($plan | Where-Object Id -eq 'e').SupersededAt | Should -Be $now.AddDays(-28)
+        ($plan | Where-Object Id -eq 'a').SupersededAt | Should -BeNullOrEmpty -Because 'the newest version is current'
+    }
+
+    It 'keeps the build a device lapsed three weeks ago still runs, in a fast-moving family' {
+        # Three Chrome builds inside three weeks: the build before them (147, created 19 weeks
+        # ago) was current until 2.2 weeks ago and must stay; the one before that was superseded
+        # 19 weeks ago and goes
+        $apps = @(
+            (New-TestApp -Id 'c174' -Version '151.0.7922.174' -WeeksOld 0.2),
+            (New-TestApp -Id 'c138' -Version '151.0.7922.138' -WeeksOld 1.8),
+            (New-TestApp -Id 'c109' -Version '151.0.7922.109' -WeeksOld 2.2),
+            (New-TestApp -Id 'c147' -Version '147.0.7727.56' -WeeksOld 19),
+            (New-TestApp -Id 'c146' -Version '146.0.7680.165' -WeeksOld 22)
+        )
+        $plan = Get-AppRetentionPlan -Apps $apps -Policy $defaultPolicy -Now $now
+
+        ($plan | Where-Object Id -eq 'c147').Action | Should -Be 'Keep'
+        ($plan | Where-Object Id -eq 'c147').SupersededWeeks | Should -Be 2.2
+        ($plan | Where-Object Id -eq 'c147').Reasons | Should -Contain 'current until 2.2 weeks ago (within 10 weeks)'
+        ($plan | Where-Object Id -eq 'c146').Action | Should -Be 'Delete'
+        ($plan | Where-Object Id -eq 'c146').SupersededWeeks | Should -Be 19
+        ($plan | Where-Object Id -eq 'c146').Reasons | Should -Contain 'superseded 19 weeks ago (more than 10 weeks) and outside newest 3'
+    }
+
+    It 'keeps a version superseded at an unknown time' {
+        $apps = @(
+            (New-TestApp -Id 'a' -Version '5.0' -WeeksOld 1),
+            (New-TestApp -Id 'b' -Version '4.0' -WeeksOld 20),
+            (New-TestApp -Id 'c' -Version '3.0' -WeeksOld 30),
+            [PSCustomObject]@{ Id = 'nodate'; DisplayName = 'App 3.5'; Version = [version]'3.5'; CreatedDateTime = $null },
+            (New-TestApp -Id 'd' -Version '2.0' -WeeksOld 40)
+        )
+        $plan = Get-AppRetentionPlan -Apps $apps -Policy $defaultPolicy -Now $now
+        # d is rank 5; its newer set includes the undated 3.5, so the moment it was superseded is unknown
+        ($plan | Where-Object Id -eq 'd').Action | Should -Be 'Keep'
+        ($plan | Where-Object Id -eq 'd').Reasons | Should -Contain 'superseded at an unknown time (a newer version has no creation date)'
+        ($plan | Where-Object Id -eq 'd').SupersededWeeks | Should -BeNullOrEmpty
     }
 
     It 'orders results newest first with distinct-version ranks' {

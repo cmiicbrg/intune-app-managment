@@ -120,9 +120,12 @@ function Get-TenantDeploymentEntry {
 
 #region Version retention policy
 
-# Built-in defaults: keep the newest 3 versions of every app family, plus everything created in
-# the last 10 weeks. Runs are at most weekly, and a client that has not updated in 10 weeks is
-# outdated by any measure. Tenants may override both, and apps may override the tenant.
+# Built-in defaults: keep the newest 3 versions of every app family, plus every version that was
+# still the current one at some point in the last 10 weeks (the first newer version is younger
+# than that). The window is about devices: one that last checked in 10 weeks ago runs whatever
+# was current back then, and that version must still exist for supersedence to pick it up. A
+# client that has not checked in for 10 weeks is outdated by any measure; schools with long
+# holidays set a longer window. Tenants may override both, and apps may override the tenant.
 $script:DefaultRetentionPolicy = @{ KeepNewest = 3; KeepNewerThanWeeks = 10 }
 
 # The immediate predecessor of the newest version must always survive: Intune drops the

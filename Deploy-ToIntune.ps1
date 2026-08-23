@@ -39,6 +39,11 @@
     Prints the apps and assignments that would be deployed for this tenant, then exits without
     connecting to Intune. Requires no credentials.
 
+.PARAMETER NoRetention
+    Skip the version retention that otherwise runs after each deployed app when the tenant has
+    opted in (tenant-level "Retention" block in TenantDeployments.json): old versions outside the
+    policy are removed unattended, so the supersedence graph never grows towards Intune's limit.
+
 .EXAMPLE
     .\Deploy-ToIntune.ps1 -TenantName "School"
     Deploys the tenant's apps from TenantDeployments.json with their configured assignments.
@@ -105,7 +110,9 @@ param(
     [switch]$ForceUpdate,
 
     [Parameter(Mandatory = $false)]
-    [switch]$ShowPlan
+    [switch]$ShowPlan,
+
+    [switch]$NoRetention
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,6 +123,8 @@ $BaseDir = $PSScriptRoot
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
 . (Join-Path $PSScriptRoot "IntuneSession.ps1")
 . (Join-Path $PSScriptRoot "TenantDeployments.ps1")
+. (Join-Path $PSScriptRoot "IntuneInventory.ps1")   # shared tenant read (existing versions, graph pre-flight, retention)
+. (Join-Path $PSScriptRoot "IntuneCleanup.ps1")     # retention after deploy
 
 # Resolve TenantName to credentials if using that parameter set.
 # Skipped for -ShowPlan, which never connects and so must not prompt for the master password.
@@ -299,13 +308,13 @@ function Publish-App {
         [bool]$AssignAllDevices,
         [array]$AssignGroups = @(),
 
-        # The family's naming convention (Get-AppFamilyNamePattern). Only apps whose display name
-        # follows it count as existing versions - the same classifier the inventory and cleanup
-        # tooling use, so an unrelated app sharing the base name (e.g. "Google Chrome Remote
-        # Desktop 2.0") is never superseded, and a hand-deployed same-family app under a
-        # non-conforming name is left alone until it is renamed to the convention.
-        [Parameter(Mandatory = $true)]
-        [string]$FamilyNamePattern
+        # The family's existing versions as inventory records (Read-IntuneAppInventory), read once
+        # per run and classified by the family naming convention - the same classifier the
+        # inventory and cleanup tooling use, so an unrelated app sharing the base name (e.g.
+        # "Google Chrome Remote Desktop 2.0") is never superseded, and a hand-deployed same-family
+        # app under a non-conforming name is left alone until it is renamed to the convention.
+        [AllowEmptyCollection()]
+        [array]$ExistingApps = @()
     )
 
     Write-Host "`n  Checking for existing apps..." -ForegroundColor Cyan
@@ -314,7 +323,10 @@ function Publish-App {
         $baseDisplayName = Get-AppFamilyBaseName -DisplayName $AppConfig.DisplayName
         Write-Host "  Searching for existing versions of '$baseDisplayName' (names following the family's naming convention)" -ForegroundColor Gray
 
-        $allExistingApps = Get-InteropWin32App | Where-Object { $_.displayName -match $FamilyNamePattern }
+        # Inventory records carry DisplayName/DisplayVersion/Id (PascalCase); the .displayName /
+        # .displayVersion / .id access below and in Get-IntuneAppVersion resolves them all the same
+        # (PowerShell property access is case-insensitive; pinned by a SharedFunctions test).
+        $allExistingApps = @($ExistingApps)
         
         if ($allExistingApps) {
             Write-Host "  Found $($allExistingApps.Count) existing app(s) for '$AppName'" -ForegroundColor Yellow
@@ -403,6 +415,22 @@ function Publish-App {
             Write-Host "  No existing apps found - creating new..." -ForegroundColor Cyan
         }
             
+        # Pre-flight: Intune caps a supersedence graph at 11 nodes. If the version to be superseded
+        # already sits in a full graph, the upload would succeed but the supersedence would fail,
+        # leaving an unlinked version - stop before uploading anything.
+        if ($null -ne $newestOlderApp) {
+            $headroom = Test-SupersedenceHeadroom -Records $allExistingApps -AppId $newestOlderApp.Id
+            if ($headroom.Unknown) {
+                throw "Cannot verify that the new version can supersede $($newestOlderApp.displayName): $($headroom.Reason). Nothing was uploaded - retry the deployment."
+            }
+            if (-not $headroom.CanAddVersion) {
+                throw "The supersedence graph of '$AppName' already has $($headroom.Nodes) node(s) - Intune's limit is $($headroom.Limit), so the new version could not supersede $($newestOlderApp.displayName). Run .\Remove-OldIntuneAppVersions.ps1 for this tenant (or loosen its retention policy) and deploy again."
+            }
+            if ($headroom.WillFill) {
+                Write-Host "  Warning: this version fills the supersedence graph of '$AppName' ($($headroom.NodesAfter) of $($headroom.Limit) nodes); the next one will fail unless old versions are removed first" -ForegroundColor Yellow
+            }
+        }
+
         # Create new app
         $appParams = @{
             FilePath             = $IntuneWinPath
@@ -483,10 +511,13 @@ function Publish-App {
                         -SupersededAppId $oldApp.id `
                         -SupersedenceType $supersedenceType
                         
-                    Write-Host "    [OK] Supersedence configured (Update): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
+                    Write-Host "    [OK] Supersedence configured ($supersedenceType): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
                 }
                 catch {
-                    Write-Host "    [Err] Failed to set supersedence for $($oldApp.displayName): $_" -ForegroundColor Red
+                    # The app exists in Intune now but is not linked into the chain and has no
+                    # assignments yet. Assigning it anyway would put an unlinked version into the
+                    # Company Portal, so this deployment fails loudly instead.
+                    throw "Failed to set supersedence for $($oldApp.displayName): $($_.Exception.Message) '$($AppConfig.DisplayName)' v$($AppConfig.AppVersion) (ID $($Win32App.id)) exists without supersedence and without assignments - delete it in Intune, fix the chain (cleanup / retention), then deploy again."
                 }
             }
         }
@@ -735,6 +766,20 @@ if ($ShowPlan) {
         Write-Host ("  {0,-18} {1}" -f $entry.AppConfigName, $suffix) -ForegroundColor White
     }
 
+    if ($deploymentPlan) {
+        $planPolicy = Get-TenantRetentionPolicy -TenantName $TenantName
+        Write-Host ""
+        if (-not $planPolicy.OptIn) {
+            Write-Host "Version retention after deploy: off (no tenant-level Retention block in TenantDeployments.json)" -ForegroundColor Gray
+        }
+        elseif ($NoRetention) {
+            Write-Host "Version retention after deploy: off (-NoRetention)" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "Version retention after deploy: keep the newest $($planPolicy.KeepNewest) version(s) plus every version that was still current within the last $($planPolicy.KeepNewerThanWeeks) week(s); versions superseded longer ago are removed (per-app overrides apply)" -ForegroundColor Gray
+        }
+    }
+
     Write-Host ""
     Write-Host "$($appsToProcess.Count) app(s). Nothing was deployed (-ShowPlan)." -ForegroundColor Yellow
     exit 0
@@ -745,189 +790,280 @@ if (-not (Connect-IntuneTenantSession -TenantId $TenantId -ClientId $ClientId -C
     exit 1
 }
 
-$deployedApps = @()
-$failedApps = @()
+# Version retention after each deployed app: only with a deployment plan whose tenant opted in
+# (tenant-level Retention block) and without -NoRetention. Direct-credential runs have no plan.
+$retentionPolicy = $null
+if ($deploymentPlan -and -not $NoRetention) {
+    $candidatePolicy = Get-TenantRetentionPolicy -TenantName $TenantName
+    if ($candidatePolicy.OptIn) {
+        $retentionPolicy = $candidatePolicy
+        Write-Host "Version retention after deploy: keep the newest $($retentionPolicy.KeepNewest) version(s) plus every version that was still current within the last $($retentionPolicy.KeepNewerThanWeeks) week(s) (per-app overrides apply)" -ForegroundColor Gray
+    }
+}
+$retentionResults = [System.Collections.Generic.List[object]]::new()
+$retentionFamilies = [System.Collections.Generic.List[object]]::new()
+$runStartedUtc = [datetime]::UtcNow
 
-foreach ($appItem in $appsToProcess) {
-    $app = $appItem[0]
-    $assignmentSpec = $appItem[1]
-    # Validate connection before each app deployment
-    if (-not (Test-IntuneConnection)) {
-        Write-Host "`n  Connection lost, attempting to reconnect..." -ForegroundColor Yellow
-        if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret)) {
-            Write-Host "  Reconnection failed, skipping remaining apps" -ForegroundColor Red
-            break
-        }
-        Write-Host "  Reconnected successfully!" -ForegroundColor Green
-    }
-    
-    Write-Host "`n[Deploying $($app.Name)]" -ForegroundColor Magenta
-    
-    $appFolder = Join-Path (Join-Path $BaseDir "packages") $app.Folder
-    if (-not (Test-Path $appFolder)) {
-        Write-Host "  Folder not found: $appFolder" -ForegroundColor Red
-        $failedApps += $app.Name
-        continue
-    }
-    
-    # Find the latest intunewin package
-    Write-Host "  Looking for pattern: $($app.Pattern)" -ForegroundColor Gray
-    $intunewinFiles = Get-ChildItem -Path $appFolder -File | 
-    Where-Object { $_.Name -like $app.Pattern -and $_.Extension -eq ".intunewin" } | 
-    Sort-Object LastWriteTime -Descending
-    
-    if ($intunewinFiles.Count -eq 0) {
-        Write-Host "  No IntuneWin package found matching pattern: $($app.Pattern)" -ForegroundColor Red
-        Write-Host "  Files in folder:" -ForegroundColor Gray
-        Get-ChildItem -Path $appFolder -File | ForEach-Object { Write-Host "    - $($_.Name)" -ForegroundColor Gray }
-        $failedApps += $app.Name
-        continue
-    }
-    
-    Write-Host "  Found $($intunewinFiles.Count) matching package(s)" -ForegroundColor Gray
-    
-    $intunewinFile = $intunewinFiles[0]
-    Write-Host "  Package: $($intunewinFile.Name)" -ForegroundColor Cyan
-    
-    # Extract version from filename
-    $version = "Latest"
-    if ($intunewinFile.BaseName -match '(\d+\.[\d\.]+)') {
-        $version = $matches[1].TrimEnd('.')  # Remove trailing dot if present
-    }
-    Write-Host "  Version: $version" -ForegroundColor Cyan
-    
-    # Get the original setup file name from .intunewin metadata (preserves .exe/.msi extension)
-    Write-Host "  Reading package metadata..." -ForegroundColor Gray
-    $IntuneWinMetaData = Get-InteropPackageMetadata -FilePath $intunewinFile.FullName
-    $setupFileName = $IntuneWinMetaData.ApplicationInfo.SetupFile
-    Write-Host "  Setup file: $setupFileName" -ForegroundColor Gray
-    
-    # Get app configuration using the appropriate generic function
-    $appConfigFromFile = Get-AppConfiguration -AppName $app.AppConfigName
-    
-    # Check if this app uses script-based detection (like GeoGebra)
-    if ($appConfigFromFile.DetectionType -eq "Script") {
-        Write-Host "  Using script-based detection..." -ForegroundColor Gray
-        $appConfig = Get-ScriptAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName -IntuneWinPath $intunewinFile.FullName
-    }
-    elseif ($app.PackageType -eq "MSI") {
-        $appConfig = Get-MsiAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName -IntuneWinPath $intunewinFile.FullName
-    }
-    else {
-        # For EXE files, try to get the actual file version if detection is "equal"
-        if ($appConfigFromFile.DetectionOperator -eq "equal") {
-            # Find the actual setup file in the folder to get its real version
-            $actualSetupFile = Get-ChildItem -Path $appFolder -File | Where-Object { $_.Name -eq $setupFileName } | Select-Object -First 1
-            if ($actualSetupFile) {
-                try {
-                    $fileVersion = (Get-Item $actualSetupFile.FullName).VersionInfo.FileVersion
-                    if ($fileVersion) {
-                        # Trim any whitespace from the version string
-                        $fileVersion = $fileVersion.Trim()
-                        Write-Host "  Detected file version: $fileVersion" -ForegroundColor Gray
-                        $version = $fileVersion
-                    }
-                }
-                catch {
-                    Write-Host "  Warning: Could not read file version, using filename version" -ForegroundColor Yellow
-                }
+# Connected from here on: the finally block disconnects on every exit path
+try {
+    $deployedApps = @()
+    $failedApps = @()
+
+    foreach ($appItem in $appsToProcess) {
+        $app = $appItem[0]
+        $assignmentSpec = $appItem[1]
+        # Validate connection before each app deployment
+        if (-not (Test-IntuneConnection)) {
+            Write-Host "`n  Connection lost, attempting to reconnect..." -ForegroundColor Yellow
+            if (-not (Initialize-IntuneAuthentication -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret)) {
+                Write-Host "  Reconnection failed, skipping remaining apps" -ForegroundColor Red
+                break
             }
+            Write-Host "  Reconnected successfully!" -ForegroundColor Green
         }
-        $appConfig = Get-FileAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName
-    }
     
-    # Check for icon file
-    $iconPath = $null
-    $appConfigFromFile = Get-AppConfiguration -AppName $app.AppConfigName
-    if ($appConfigFromFile.IconFile) {
-        $possibleIconPath = Join-Path $appFolder $appConfigFromFile.IconFile
-        if (Test-Path $possibleIconPath) {
-            $iconPath = $possibleIconPath
+        Write-Host "`n[Deploying $($app.Name)]" -ForegroundColor Magenta
+    
+        $appFolder = Join-Path (Join-Path $BaseDir "packages") $app.Folder
+        if (-not (Test-Path $appFolder)) {
+            Write-Host "  Folder not found: $appFolder" -ForegroundColor Red
+            $failedApps += $app.Name
+            continue
+        }
+    
+        # Find the latest intunewin package
+        Write-Host "  Looking for pattern: $($app.Pattern)" -ForegroundColor Gray
+        $intunewinFiles = Get-ChildItem -Path $appFolder -File | 
+        Where-Object { $_.Name -like $app.Pattern -and $_.Extension -eq ".intunewin" } | 
+        Sort-Object LastWriteTime -Descending
+    
+        if ($intunewinFiles.Count -eq 0) {
+            Write-Host "  No IntuneWin package found matching pattern: $($app.Pattern)" -ForegroundColor Red
+            Write-Host "  Files in folder:" -ForegroundColor Gray
+            Get-ChildItem -Path $appFolder -File | ForEach-Object { Write-Host "    - $($_.Name)" -ForegroundColor Gray }
+            $failedApps += $app.Name
+            continue
+        }
+    
+        Write-Host "  Found $($intunewinFiles.Count) matching package(s)" -ForegroundColor Gray
+    
+        $intunewinFile = $intunewinFiles[0]
+        Write-Host "  Package: $($intunewinFile.Name)" -ForegroundColor Cyan
+    
+        # Extract version from filename
+        $version = "Latest"
+        if ($intunewinFile.BaseName -match '(\d+\.[\d\.]+)') {
+            $version = $matches[1].TrimEnd('.')  # Remove trailing dot if present
+        }
+        Write-Host "  Version: $version" -ForegroundColor Cyan
+    
+        # Get the original setup file name from .intunewin metadata (preserves .exe/.msi extension)
+        Write-Host "  Reading package metadata..." -ForegroundColor Gray
+        $IntuneWinMetaData = Get-InteropPackageMetadata -FilePath $intunewinFile.FullName
+        $setupFileName = $IntuneWinMetaData.ApplicationInfo.SetupFile
+        Write-Host "  Setup file: $setupFileName" -ForegroundColor Gray
+    
+        # Get app configuration using the appropriate generic function
+        $appConfigFromFile = Get-AppConfiguration -AppName $app.AppConfigName
+    
+        # Check if this app uses script-based detection (like GeoGebra)
+        if ($appConfigFromFile.DetectionType -eq "Script") {
+            Write-Host "  Using script-based detection..." -ForegroundColor Gray
+            $appConfig = Get-ScriptAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName -IntuneWinPath $intunewinFile.FullName
+        }
+        elseif ($app.PackageType -eq "MSI") {
+            $appConfig = Get-MsiAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName -IntuneWinPath $intunewinFile.FullName
         }
         else {
-            Write-Host "  Icon file not found: $($appConfigFromFile.IconFile)" -ForegroundColor Yellow
+            # For EXE files, try to get the actual file version if detection is "equal"
+            if ($appConfigFromFile.DetectionOperator -eq "equal") {
+                # Find the actual setup file in the folder to get its real version
+                $actualSetupFile = Get-ChildItem -Path $appFolder -File | Where-Object { $_.Name -eq $setupFileName } | Select-Object -First 1
+                if ($actualSetupFile) {
+                    try {
+                        $fileVersion = (Get-Item $actualSetupFile.FullName).VersionInfo.FileVersion
+                        if ($fileVersion) {
+                            # Trim any whitespace from the version string
+                            $fileVersion = $fileVersion.Trim()
+                            Write-Host "  Detected file version: $fileVersion" -ForegroundColor Gray
+                            $version = $fileVersion
+                        }
+                    }
+                    catch {
+                        Write-Host "  Warning: Could not read file version, using filename version" -ForegroundColor Yellow
+                    }
+                }
+            }
+            $appConfig = Get-FileAppConfig -AppName $app.AppConfigName -Version $version -SetupFile $setupFileName
+        }
+    
+        # Check for icon file
+        $iconPath = $null
+        $appConfigFromFile = Get-AppConfiguration -AppName $app.AppConfigName
+        if ($appConfigFromFile.IconFile) {
+            $possibleIconPath = Join-Path $appFolder $appConfigFromFile.IconFile
+            if (Test-Path $possibleIconPath) {
+                $iconPath = $possibleIconPath
+            }
+            else {
+                Write-Host "  Icon file not found: $($appConfigFromFile.IconFile)" -ForegroundColor Yellow
+            }
+        }
+    
+        # Add SupersedenceType to appConfig if specified in config file
+        if ($appConfigFromFile.SupersedenceType) {
+            $appConfig.SupersedenceType = $appConfigFromFile.SupersedenceType
+        }
+    
+        # Forward AutoUpdate flag ($false is falsy, so use ContainsKey to forward both $true and $false)
+        if ($appConfigFromFile.ContainsKey('AutoUpdate')) {
+            $appConfig.AutoUpdate = $appConfigFromFile.AutoUpdate
+        }
+    
+        # Forward Dependencies array
+        if ($appConfigFromFile.Dependencies) {
+            $appConfig.Dependencies = $appConfigFromFile.Dependencies
+        }
+    
+        # Forward HideFromPortal flag
+        if ($appConfigFromFile.HideFromPortal -eq $true) {
+            $appConfig.HideFromPortal = $true
+        }
+
+        # Compare existing versions against the version Intune will actually store as displayVersion:
+        # $appConfig.AppVersion - the MSI ProductVersion read from the package, the EXE file version,
+        # or the filename version when nothing better exists. The filename is only a hint: it may be
+        # unparseable (7-Zip ships as 7z2602-x64.msi - "Latest" - and every comparison threw) or less
+        # precise than the package (LibreOffice_25.8.7_*.msi carries ProductVersion 25.8.7.3; compared
+        # as "25.8.7" the existing 25.8.7.3 looked newer, no same-version match was found, and a
+        # duplicate app was created). Either way the result was a duplicate per run.
+        $packageVersion = $null
+        if ($appConfig.AppVersion -and [version]::TryParse($appConfig.AppVersion, [ref]$packageVersion)) {
+            if ($version -ne $appConfig.AppVersion) {
+                Write-Host "  Using package version $($appConfig.AppVersion) for the version comparison (filename: '$version')" -ForegroundColor Gray
+                $version = $appConfig.AppVersion
+            }
+        }
+        else {
+            $parsedVersion = $null
+            if (-not [version]::TryParse($version, [ref]$parsedVersion)) {
+                Write-Host "  Warning: neither the package version ('$($appConfig.AppVersion)') nor the filename version ('$version') is comparable - existing versions cannot be matched" -ForegroundColor Yellow
+            }
+        }
+
+        Write-Host "  Assignments: $(Format-AssignmentSpec -Spec $assignmentSpec)" -ForegroundColor Gray
+
+        # The family's existing versions, read fresh right before publishing (not once per run): a
+        # dependency auto-deployed by an earlier app of this run - VCRedist created while deploying
+        # KeePassXC - must count as existing when its own turn comes. Only this family's apps are
+        # fetched, classified by the naming convention.
+        Write-Host "  Reading existing versions of $($app.AppConfigName)..." -ForegroundColor Gray
+        $familyRecords = @((Read-IntuneAppInventory -Families $script:appsToDeploy -OnlyFamilies @($app.AppConfigName)).Records)
+
+        # Deploy the app with version info for supersedence
+        $result = Publish-App `
+            -AppName $app.Name `
+            -IntuneWinPath $intunewinFile.FullName `
+            -SetupFileName $setupFileName `
+            -AppConfig $appConfig `
+            -NewVersion $version `
+            -IconPath $iconPath `
+            -ForceUpdate:$ForceUpdate `
+            -AssignAllUsers $assignmentSpec.AllUsers `
+            -AssignAllDevices $assignmentSpec.AllDevices `
+            -AssignGroups $assignmentSpec.Groups `
+            -ExistingApps $familyRecords
+
+        if ($result) {
+            $deployedApps += $app.Name
+        }
+        else {
+            $failedApps += $app.Name
+            continue
+        }
+
+        # Version retention for this family (opted-in tenants): the same evaluation and executor as
+        # Remove-OldIntuneAppVersions.ps1, unattended. The family is re-read so the version just
+        # created (or reconciled) and its supersedence are part of the picture; the version that was
+        # rank 3 before the deploy is rank 4 now and goes once it was superseded longer ago than the
+        # policy's window (i.e. no device that checked in within the window can still run it).
+        # The tenant list lags a creation by a few seconds, so the deployed app's id is ensured.
+        if ($retentionPolicy) {
+            Write-Host "`n  Version retention for $($app.AppConfigName)..." -ForegroundColor Cyan
+            try {
+                $familyRecords = @((Read-IntuneAppInventory -Families $script:appsToDeploy -OnlyFamilies @($app.AppConfigName) -EnsureAppIds @("$($result.id)")).Records)
+                $familyEntry = @($script:appsToDeploy | Where-Object { $_.AppConfigName -eq $app.AppConfigName })
+                $familyAnalysis = Get-AppInventoryAnalysis -Records $familyRecords -Families $familyEntry `
+                    -PolicyResolver { param($appConfigName) Get-TenantRetentionPolicy -TenantName $TenantName -AppName $appConfigName } `
+                    -PlanAppNames @($deploymentPlan.Keys) -AppConfigs @{ $app.AppConfigName = $appConfigFromFile } -Now ([datetime]::UtcNow)
+                $familyPlan = Get-AppCleanupPlan -Analysis $familyAnalysis -Records $familyRecords
+                $retentionFamilies.AddRange(@($familyPlan.Families))
+                $familyReport = $familyPlan.Families | Select-Object -First 1
+                if ($familyPlan.DeletionCount -eq 0) {
+                    Write-Host "  Nothing to remove ($($familyReport.VersionCount) version(s); policy $($familyReport.Policy.KeepNewest)/$($familyReport.Policy.KeepNewerThanWeeks)w)" -ForegroundColor Gray
+                }
+                else {
+                    Write-Host "  Removing $($familyPlan.DeletionCount) old version(s) (policy $($familyReport.Policy.KeepNewest)/$($familyReport.Policy.KeepNewerThanWeeks)w, $($familyReport.RemainingAfterCleanup) remain):" -ForegroundColor Cyan
+                    $retentionResults.AddRange(@(Invoke-IntuneAppCleanup -Plan $familyPlan))
+                }
+                foreach ($skipped in @($familyReport.Skipped)) {
+                    Write-Host "  Skipped: $($skipped.DisplayName) v$($skipped.DisplayVersion) - $($skipped.Reason)" -ForegroundColor Yellow
+                }
+            }
+            catch {
+                Write-Host "  Warning: retention step failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                $retentionResults.Add([PSCustomObject]@{ Id = $null; Family = $app.AppConfigName; DisplayName = $null; DisplayVersion = $null; Rank = $null; AgeWeeks = $null; Outcome = 'Failed'; Detail = "retention step failed: $($_.Exception.Message)" })
+            }
         }
     }
-    
-    # Add SupersedenceType to appConfig if specified in config file
-    if ($appConfigFromFile.SupersedenceType) {
-        $appConfig.SupersedenceType = $appConfigFromFile.SupersedenceType
-    }
-    
-    # Forward AutoUpdate flag ($false is falsy, so use ContainsKey to forward both $true and $false)
-    if ($appConfigFromFile.ContainsKey('AutoUpdate')) {
-        $appConfig.AutoUpdate = $appConfigFromFile.AutoUpdate
-    }
-    
-    # Forward Dependencies array
-    if ($appConfigFromFile.Dependencies) {
-        $appConfig.Dependencies = $appConfigFromFile.Dependencies
-    }
-    
-    # Forward HideFromPortal flag
-    if ($appConfigFromFile.HideFromPortal -eq $true) {
-        $appConfig.HideFromPortal = $true
+
+    # Summary
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "Deployment Summary" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "Successfully deployed: $($deployedApps.Count)" -ForegroundColor Green
+    foreach ($app in $deployedApps) {
+        Write-Host "  [OK] $app" -ForegroundColor Green
     }
 
-    # Fall back to the version read out of the package when the filename has no dotted version
-    # to parse. 7-Zip ships as 7z2602-x64.msi, so $version stayed "Latest", every comparison in
-    # Publish-App threw, no existing version ever matched, and each run created another duplicate
-    # app in Intune. $appConfig.AppVersion holds the real version (MSI ProductVersion, or the
-    # file version) by this point.
-    $parsedVersion = $null
-    if (-not [version]::TryParse($version, [ref]$parsedVersion) -and $appConfig.AppVersion) {
-        $fallbackVersion = $null
-        if ([version]::TryParse($appConfig.AppVersion, [ref]$fallbackVersion)) {
-            Write-Host "  Version '$version' is not comparable - using package version $($appConfig.AppVersion)" -ForegroundColor Gray
-            $version = $appConfig.AppVersion
+    if ($failedApps.Count -gt 0) {
+        Write-Host "`nFailed to deploy: $($failedApps.Count)" -ForegroundColor Red
+        foreach ($app in $failedApps) {
+            Write-Host "  [FAILED] $app" -ForegroundColor Red
         }
     }
 
-    Write-Host "  Assignments: $(Format-AssignmentSpec -Spec $assignmentSpec)" -ForegroundColor Gray
-
-    # Deploy the app with version info for supersedence
-    $result = Publish-App `
-        -AppName $app.Name `
-        -IntuneWinPath $intunewinFile.FullName `
-        -SetupFileName $setupFileName `
-        -AppConfig $appConfig `
-        -NewVersion $version `
-        -IconPath $iconPath `
-        -ForceUpdate:$ForceUpdate `
-        -AssignAllUsers $assignmentSpec.AllUsers `
-        -AssignAllDevices $assignmentSpec.AllDevices `
-        -AssignGroups $assignmentSpec.Groups `
-        -FamilyNamePattern $app.NamePattern
-
-    if ($result) {
-        $deployedApps += $app.Name
+    if ($retentionPolicy) {
+        $retentionRemoved = @($retentionResults | Where-Object Outcome -eq 'Deleted').Count
+        $retentionFailed = @($retentionResults | Where-Object Outcome -eq 'Failed').Count
+        $retentionSkipped = @($retentionResults | Where-Object Outcome -eq 'Skipped').Count
+        Write-Host "`nVersion retention: $retentionRemoved old version(s) removed$(if ($retentionSkipped) { ", $retentionSkipped skipped" })$(if ($retentionFailed) { ", $retentionFailed FAILED" })" -ForegroundColor $(if ($retentionFailed) { 'Red' } elseif ($retentionRemoved) { 'Green' } else { 'Gray' })
+        # The audit log itself is written in the finally block, on every exit path
     }
-    else {
-        $failedApps += $app.Name
+
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "Deployment complete!" -ForegroundColor Green
+    Write-Host "Check the Intune portal to verify deployments" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Cyan
+}
+finally {
+    # The retention audit log is written on every exit path: a terminating error in a later app
+    # must not lose the record of versions already removed for earlier families. Every pass that
+    # evaluated a family leaves a log, also one that found nothing to remove. Guarded so a log
+    # failure can never mask the error that brought us here.
+    if ($retentionPolicy -and ($retentionFamilies.Count -gt 0 -or $retentionResults.Count -gt 0)) {
+        try {
+            $retentionLog = Write-AppCleanupLog -Directory (Join-Path $BaseDir 'inventory') -TenantName $TenantName -Now $runStartedUtc `
+                -Mode 'Live' -Trigger 'Deploy' -AppName $AppName -TenantPolicy $retentionPolicy -PlanAppNames @($deploymentPlan.Keys) `
+                -Families @($retentionFamilies) -Results @($retentionResults) -ToolVersionPath (Join-Path $BaseDir 'VERSION.txt')
+            Write-Host "Retention log: $retentionLog" -ForegroundColor Gray
+        }
+        catch {
+            Write-Host "Warning: the retention log could not be written: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
+
+    # Every exit path - success, terminating error - drops the privileged Graph session
+    Write-Host "`nDisconnecting from Microsoft Graph..." -ForegroundColor Gray
+    Disconnect-IntuneSession -Force
 }
-
-# Summary
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "Deployment Summary" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "Successfully deployed: $($deployedApps.Count)" -ForegroundColor Green
-foreach ($app in $deployedApps) {
-    Write-Host "  [OK] $app" -ForegroundColor Green
-}
-
-if ($failedApps.Count -gt 0) {
-    Write-Host "`nFailed to deploy: $($failedApps.Count)" -ForegroundColor Red
-    foreach ($app in $failedApps) {
-        Write-Host "  [FAILED] $app" -ForegroundColor Red
-    }
-}
-
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "Deployment complete!" -ForegroundColor Green
-Write-Host "Check the Intune portal to verify deployments" -ForegroundColor Yellow
-Write-Host "========================================" -ForegroundColor Cyan
-
-# Clean up connection
-Write-Host "`nDisconnecting from Microsoft Graph..." -ForegroundColor Gray
-Disconnect-IntuneSession -Force

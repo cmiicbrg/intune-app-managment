@@ -141,6 +141,30 @@ Describe 'Get-InteropWin32App (native Graph list + per-ID fetch)' {
     It 'returns an empty result when nothing matches the display name' {
         @(Get-InteropWin32App -DisplayName 'Nonexistent App').Count | Should -Be 0
     }
+
+    It 'applies -DisplayNameFilter on the list items, before the per-ID fetches' {
+        $result = @(Get-InteropWin32App -DisplayNameFilter { param($name) $name -like 'Mozilla*' -or $name -like '7-Zip*' })
+        ($result.id | Sort-Object) | Should -Be @('2', '3')
+        # 2 list pages + 2 per-ID fetches: Chrome is never fetched
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Uri -match '/mobileApps/[^/?]+$' } -Times 2 -Exactly
+    }
+}
+
+Describe 'Get-InteropWin32AppById' {
+    It 'GETs the app resource directly' {
+        Mock Invoke-MgGraphRequest { [PSCustomObject]@{ id = 'app-1'; displayName = 'Google Chrome 151' } }
+        (Get-InteropWin32AppById -AppId 'app-1').displayName | Should -Be 'Google Chrome 151'
+        Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'GET' -and $Uri -like '*/deviceAppManagement/mobileApps/app-1' } -Times 1 -Exactly
+    }
+
+    It "throws with Graph's reason when the app does not exist" {
+        Mock Invoke-MgGraphRequest {
+            $record = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('Response status code does not indicate success: NotFound (Not Found).'), 'Graph', 'InvalidOperation', $null)
+            $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new('{"error":{"code":"ResourceNotFound","message":"Resource Not Found - MobileApp with id nope"}}')
+            throw $record
+        }
+        { Get-InteropWin32AppById -AppId 'nope' } | Should -Throw "*read app 'nope'*ResourceNotFound: Resource Not Found*"
+    }
 }
 
 Describe 'Get-InteropAppAssignmentDetail (native Graph read, full detail)' {
