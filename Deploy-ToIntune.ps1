@@ -511,7 +511,7 @@ function Publish-App {
                         -SupersededAppId $oldApp.id `
                         -SupersedenceType $supersedenceType
                         
-                    Write-Host "    [OK] Supersedence configured (Update): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
+                    Write-Host "    [OK] Supersedence configured ($supersedenceType): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
                 }
                 catch {
                     # The app exists in Intune now but is not linked into the chain and has no
