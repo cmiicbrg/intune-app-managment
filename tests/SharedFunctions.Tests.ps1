@@ -304,6 +304,25 @@ Installers:
             -AllowedUrlPrefixes @('', 'https://download.othervendor.example/') | Should -BeNullOrEmpty
     }
 
+    It 'refuses a filename that decodes to path components (encoded traversal)' {
+        # %2F survives canonicalization inside a single segment; decoding it must not let
+        # "../../payload.msi" reach Join-Path or the version cache
+        $traversalYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/..%2F..%2Fpayload.msi
+  InstallerSha256: $('C' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $traversalYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/') | Should -BeNullOrEmpty
+    }
+
     It 'fails closed when the manifest declares a different PackageVersion than its directory' {
         $mismatchYaml = @"
 PackageVersion: 9.9.9

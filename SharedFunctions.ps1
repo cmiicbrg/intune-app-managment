@@ -597,7 +597,19 @@ function Get-WingetInstallerInfo {
         return $null
     }
 
+    # The decoded leaf must be a plain file name: encoded separators or traversal tokens
+    # (%2F, %5C, %2E%2E) survive URI canonicalization inside a single segment, and letting
+    # them through would smuggle path components into Join-Path targets and the version cache
     $filename = [System.Uri]::UnescapeDataString($parsedUri.Segments[-1])
+    if ([string]::IsNullOrWhiteSpace($filename) -or
+        $filename -in @('.', '..') -or
+        $filename -ne [System.IO.Path]::GetFileName($filename) -or
+        $filename.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) does not end in a usable file name" -ForegroundColor Red
+        Write-Host "  Decoded leaf: $filename" -ForegroundColor Red
+        return $null
+    }
+
     Write-Host "Winget manifest resolved: $PackageId $($latest.Name) (SHA-256 pinned)" -ForegroundColor Green
 
     return [PSCustomObject]@{
