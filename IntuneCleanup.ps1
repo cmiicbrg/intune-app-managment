@@ -18,8 +18,9 @@ function Invoke-IntuneAppCleanup {
     For every deletion in the plan (already ordered: family by name, oldest version first) the
     -Decision scriptblock is asked with a descriptive label; when it returns $true the version is
     unlinked (Remove-InteropAppRelationships - reads the relationships fresh, refuses an app
-    that has become a dependency target) and then deleted (Remove-InteropWin32App). Every step
-    is reported on the console and in the returned outcome objects:
+    that has become a dependency target) and then deleted (Remove-InteropWin32App). Every outcome
+    is reported on the console (a declined version too, except under -WhatIf where ShouldProcess
+    prints its own "What if" line) and returned as an outcome object:
       Deleted | Skipped (could not re-read, or dependency target - nothing changed)
       | Failed (with the partial-unlink state spelled out) | <DeclinedOutcome>
 
@@ -59,6 +60,10 @@ function Invoke-IntuneAppCleanup {
 
         if (-not (& $Decision $label)) {
             $outcome.Outcome = $DeclinedOutcome
+            # Under -WhatIf, ShouldProcess has already printed its "What if" line for this label
+            if ($DeclinedOutcome -ne 'WouldDelete') {
+                Write-Host "  Declined $label" -ForegroundColor Yellow
+            }
             $results.Add([PSCustomObject]$outcome)
             continue
         }

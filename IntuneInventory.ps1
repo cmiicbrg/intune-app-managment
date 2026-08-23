@@ -53,9 +53,12 @@ function Read-IntuneAppInventory {
 
     if ($OnlyFamilies) {
         # Classify on the list items' display names so only the selected apps are fetched in full.
-        # Plain script block, not a closure: Get-InteropWin32App invokes it from a scope below this
-        # one, so $Families/$OnlyFamilies/$IncludeUnmanaged resolve dynamically - a closure would
-        # run in its own module scope and not see the dot-sourced Resolve-AppFamily.
+        # Deliberately a plain script block: it is only ever invoked from inside Get-InteropWin32App,
+        # i.e. from a scope below this one, so $Families/$OnlyFamilies/$IncludeUnmanaged resolve
+        # through PowerShell's dynamic scoping. Do NOT turn it into a closure (.GetNewClosure()):
+        # a closure is bound to a new dynamic module whose command lookup skips the scope the
+        # scripts dot-source into, and Resolve-AppFamily is then not found (observed:
+        # CommandNotFoundException in both the tests and a script-scope run).
         $familyFilter = {
             param($displayName)
             $family = Resolve-AppFamily -DisplayName "$displayName" -Families $Families
