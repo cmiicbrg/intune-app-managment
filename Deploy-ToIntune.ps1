@@ -930,17 +930,24 @@ try {
             $appConfig.HideFromPortal = $true
         }
 
-        # Fall back to the version read out of the package when the filename has no dotted version
-        # to parse. 7-Zip ships as 7z2602-x64.msi, so $version stayed "Latest", every comparison in
-        # Publish-App threw, no existing version ever matched, and each run created another duplicate
-        # app in Intune. $appConfig.AppVersion holds the real version (MSI ProductVersion, or the
-        # file version) by this point.
-        $parsedVersion = $null
-        if (-not [version]::TryParse($version, [ref]$parsedVersion) -and $appConfig.AppVersion) {
-            $fallbackVersion = $null
-            if ([version]::TryParse($appConfig.AppVersion, [ref]$fallbackVersion)) {
-                Write-Host "  Version '$version' is not comparable - using package version $($appConfig.AppVersion)" -ForegroundColor Gray
+        # Compare existing versions against the version Intune will actually store as displayVersion:
+        # $appConfig.AppVersion - the MSI ProductVersion read from the package, the EXE file version,
+        # or the filename version when nothing better exists. The filename is only a hint: it may be
+        # unparseable (7-Zip ships as 7z2602-x64.msi - "Latest" - and every comparison threw) or less
+        # precise than the package (LibreOffice_25.8.7_*.msi carries ProductVersion 25.8.7.3; compared
+        # as "25.8.7" the existing 25.8.7.3 looked newer, no same-version match was found, and a
+        # duplicate app was created). Either way the result was a duplicate per run.
+        $packageVersion = $null
+        if ($appConfig.AppVersion -and [version]::TryParse($appConfig.AppVersion, [ref]$packageVersion)) {
+            if ($version -ne $appConfig.AppVersion) {
+                Write-Host "  Using package version $($appConfig.AppVersion) for the version comparison (filename: '$version')" -ForegroundColor Gray
                 $version = $appConfig.AppVersion
+            }
+        }
+        else {
+            $parsedVersion = $null
+            if (-not [version]::TryParse($version, [ref]$parsedVersion)) {
+                Write-Host "  Warning: neither the package version ('$($appConfig.AppVersion)') nor the filename version ('$version') is comparable - existing versions cannot be matched" -ForegroundColor Yellow
             }
         }
 
