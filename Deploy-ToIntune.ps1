@@ -1038,13 +1038,7 @@ try {
         $retentionFailed = @($retentionResults | Where-Object Outcome -eq 'Failed').Count
         $retentionSkipped = @($retentionResults | Where-Object Outcome -eq 'Skipped').Count
         Write-Host "`nVersion retention: $retentionRemoved old version(s) removed$(if ($retentionSkipped) { ", $retentionSkipped skipped" })$(if ($retentionFailed) { ", $retentionFailed FAILED" })" -ForegroundColor $(if ($retentionFailed) { 'Red' } elseif ($retentionRemoved) { 'Green' } else { 'Gray' })
-        # Every retention pass leaves its audit log, also one that found nothing to remove
-        if ($retentionFamilies.Count -gt 0 -or $retentionResults.Count -gt 0) {
-            $retentionLog = Write-AppCleanupLog -Directory (Join-Path $BaseDir 'inventory') -TenantName $TenantName -Now $runStartedUtc `
-                -Mode 'Live' -Trigger 'Deploy' -AppName $AppName -TenantPolicy $retentionPolicy -PlanAppNames @($deploymentPlan.Keys) `
-                -Families @($retentionFamilies) -Results @($retentionResults) -ToolVersionPath (Join-Path $BaseDir 'VERSION.txt')
-            Write-Host "  Log: $retentionLog" -ForegroundColor Gray
-        }
+        # The audit log itself is written in the finally block, on every exit path
     }
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -1053,6 +1047,22 @@ try {
     Write-Host "========================================" -ForegroundColor Cyan
 }
 finally {
+    # The retention audit log is written on every exit path: a terminating error in a later app
+    # must not lose the record of versions already removed for earlier families. Every pass that
+    # evaluated a family leaves a log, also one that found nothing to remove. Guarded so a log
+    # failure can never mask the error that brought us here.
+    if ($retentionPolicy -and ($retentionFamilies.Count -gt 0 -or $retentionResults.Count -gt 0)) {
+        try {
+            $retentionLog = Write-AppCleanupLog -Directory (Join-Path $BaseDir 'inventory') -TenantName $TenantName -Now $runStartedUtc `
+                -Mode 'Live' -Trigger 'Deploy' -AppName $AppName -TenantPolicy $retentionPolicy -PlanAppNames @($deploymentPlan.Keys) `
+                -Families @($retentionFamilies) -Results @($retentionResults) -ToolVersionPath (Join-Path $BaseDir 'VERSION.txt')
+            Write-Host "Retention log: $retentionLog" -ForegroundColor Gray
+        }
+        catch {
+            Write-Host "Warning: the retention log could not be written: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
     # Every exit path - success, terminating error - drops the privileged Graph session
     Write-Host "`nDisconnecting from Microsoft Graph..." -ForegroundColor Gray
     Disconnect-IntuneSession -Force
