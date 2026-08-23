@@ -130,6 +130,293 @@ Describe 'Test-DownloadedFileIntegrity' {
     }
 }
 
+Describe 'ConvertFrom-WingetInstallerManifest' {
+    BeforeAll {
+        # Mirrors the real manifest shapes: root-level defaults (7-Zip/Inkscape put Scope
+        # there), per-entry keys, and a nested AppsAndFeaturesEntries list whose InstallerType
+        # must NOT leak into the installer entry.
+        $script:wingetYaml = @'
+PackageIdentifier: Fixture.App
+PackageVersion: 3.0.10
+Scope: machine
+Installers:
+- Architecture: x86
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/fixture-3.0.10-x86.msi
+  InstallerSha256: 1111111111111111111111111111111111111111111111111111111111111111
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/fixture%203.0.10-x64.msi
+  InstallerSha256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+  AppsAndFeaturesEntries:
+  - DisplayName: Fixture App
+    ProductCode: '{AAAAAAAA-0000-0000-0000-000000000000}'
+    InstallerType: burn
+- Architecture: x64
+  InstallerType: nullsoft
+  InstallerUrl: https://vendor.example/files/fixture-3.0.10-x64.exe
+  InstallerSha256: BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+ManifestType: installer
+ManifestVersion: 1.6.0
+'@
+    }
+
+    It 'parses root defaults and every installer entry' {
+        $manifest = ConvertFrom-WingetInstallerManifest -Yaml $script:wingetYaml
+        $manifest.Defaults['Scope'] | Should -Be 'machine'
+        $manifest.Defaults['PackageVersion'] | Should -Be '3.0.10'
+        $manifest.Installers.Count | Should -Be 3
+    }
+
+    It 'keeps entry keys and ignores nested structures like AppsAndFeaturesEntries' {
+        $manifest = ConvertFrom-WingetInstallerManifest -Yaml $script:wingetYaml
+        $x64msi = $manifest.Installers | Where-Object { $_['InstallerUrl'] -like '*x64.msi' }
+        $x64msi['InstallerType'] | Should -Be 'wix' -Because 'the nested burn InstallerType must not overwrite the entry value'
+        $x64msi['InstallerSha256'] | Should -Be ('A' * 64)
+    }
+
+    It 'lets installer entries inherit root-level defaults' {
+        $yaml = "InstallerType: wix`nInstallers:`n- Architecture: x64`n  InstallerUrl: https://v.example/a.msi`n  InstallerSha256: $('C' * 64)"
+        $manifest = ConvertFrom-WingetInstallerManifest -Yaml $yaml
+        $manifest.Defaults['InstallerType'] | Should -Be 'wix'
+        $manifest.Installers[0].ContainsKey('InstallerType') | Should -BeFalse
+    }
+}
+
+Describe 'Get-WingetInstallerInfo' {
+    BeforeAll {
+        $script:wingetListing = @(
+            [PSCustomObject]@{ name = '3.0.9'; type = 'dir' },
+            [PSCustomObject]@{ name = '3.0.10'; type = 'dir' },
+            [PSCustomObject]@{ name = 'Nightly'; type = 'dir' },
+            [PSCustomObject]@{ name = '.validation'; type = 'file' }
+        )
+    }
+
+    BeforeEach {
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $script:wingetYaml
+        }
+    }
+
+    It 'picks the highest version by [version] sort (not string sort) and skips Nightly' {
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/')
+        $info.Version | Should -Be '3.0.10' -Because 'a string sort would rank 3.0.9 above 3.0.10'
+        Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*/3.0.10/Fixture.App.installer.yaml' } -Times 1
+    }
+
+    It 'returns the URL, hash and decoded filename of the uniquely matching installer' {
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/')
+        $info.Url | Should -Be 'https://vendor.example/files/fixture%203.0.10-x64.msi'
+        $info.Sha256 | Should -Be ('A' * 64)
+        $info.Filename | Should -Be 'fixture 3.0.10-x64.msi'
+    }
+
+    It 'fails closed without any network call when no allowlist is provided' {
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' | Should -BeNullOrEmpty
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('', '  ') |
+            Should -BeNullOrEmpty -Because 'blank-only entries are no allowlist at all'
+        Should -Invoke Invoke-RestMethod -Times 0
+    }
+
+    It 'rejects a prefix without a trailing slash, which could cross an authority boundary' {
+        # "https://vendor.example" would StartsWith-match "https://vendor.example.evil.com/..."
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example') | Should -BeNullOrEmpty
+        Should -Invoke Invoke-RestMethod -Times 0
+    }
+
+    It 'never lets a lookalike domain match a properly slash-terminated prefix' {
+        $evilYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example.evil.com/files/payload.msi
+  InstallerSha256: $('F' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $evilYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'fails closed when the selector matches more than one installer' {
+        # x64 without an InstallerType matches both the wix and the nullsoft entry
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'fails closed when the selector matches nothing' {
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -Architecture 'arm64' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'refuses an InstallerUrl outside the allowed prefixes' {
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://download.othervendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'accepts an InstallerUrl matching an allowed prefix' {
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/')
+        $info.Sha256 | Should -Be ('A' * 64)
+    }
+
+    It 'returns $null when the version listing cannot be fetched' {
+        Mock Invoke-RestMethod { throw 'API rate limit exceeded' }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'builds the manifest path from a multi-segment package id' {
+        Get-WingetInstallerInfo -PackageId 'The.Document.Foundation' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/') | Out-Null
+        Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*/manifests/t/The/Document/Foundation' } -Times 1
+    }
+
+    It 'canonicalizes dot-segment URLs before the allowlist check' {
+        # Raw-string StartsWith would pass this URL, but the HTTP client fetches the
+        # canonical form, which points outside the allowed prefix
+        $dotSegmentYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/../evil/payload.msi
+  InstallerSha256: $('D' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $dotSegmentYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/') | Should -BeNullOrEmpty
+    }
+
+    It 'returns the canonical URL so the fetch matches what was allowlisted' {
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/')
+        $info.Url | Should -Be ([System.Uri]$info.Url).AbsoluteUri
+    }
+
+    It 'never lets a blank allowlist entry match every URL' {
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('', 'https://download.othervendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'refuses a filename that decodes to path components (encoded traversal)' {
+        # %2F survives canonicalization inside a single segment; decoding it must not let
+        # "../../payload.msi" reach Join-Path or the version cache
+        $traversalYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/..%2F..%2Fpayload.msi
+  InstallerSha256: $('C' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $traversalYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/') | Should -BeNullOrEmpty
+    }
+
+    It 'refuses a malformed InstallerSha256 before attempting any download' {
+        $badHashYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/app.msi
+  InstallerSha256: not-a-real-hash
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $badHashYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'fails closed when the manifest declares a different PackageVersion than its directory' {
+        $mismatchYaml = @"
+PackageVersion: 9.9.9
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/old.msi
+  InstallerSha256: $('E' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $mismatchYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Invoke-FileDownload' {
+    It 'refuses non-HTTPS URLs before any network call' {
+        Mock Invoke-WebRequest { }
+        Invoke-FileDownload -Url 'http://vendor.example/app.exe' -OutputPath (Join-Path $TestDrive 'app.exe') |
+            Should -BeFalse
+        Should -Invoke Invoke-WebRequest -Times 0
+    }
+
+    It 'deletes the download and returns $false when the pinned SHA-256 does not match' {
+        Mock Invoke-WebRequest { Set-Content -Path $OutFile -Value 'tampered payload' -NoNewline }
+        $out = Join-Path $TestDrive 'tampered.exe'
+        Invoke-FileDownload -Url 'https://vendor.example/app.exe' -OutputPath $out -ExpectedSha256 ('A' * 64) |
+            Should -BeFalse
+        Test-Path $out | Should -BeFalse -Because 'an unverified download must not stay on disk for packaging'
+    }
+
+    It 'removes the partial file when the transfer itself fails' {
+        Mock Invoke-WebRequest {
+            Set-Content -Path $OutFile -Value 'half a payload' -NoNewline
+            throw 'connection reset'
+        }
+        $out = Join-Path $TestDrive 'partial.exe'
+        Invoke-FileDownload -Url 'https://vendor.example/app.exe' -OutputPath $out | Should -BeFalse
+        Test-Path $out | Should -BeFalse -Because 'a partial download must not be mistaken for a verified installer later'
+    }
+
+    It 'keeps the download and returns $true when the pinned SHA-256 matches' {
+        $reference = Join-Path $TestDrive 'reference.bin'
+        'known good payload' | Set-Content $reference -NoNewline
+        $goodHash = (Get-FileHash -Path $reference -Algorithm SHA256).Hash
+
+        Mock Invoke-WebRequest { Set-Content -Path $OutFile -Value 'known good payload' -NoNewline }
+        $out = Join-Path $TestDrive 'good.exe'
+        Invoke-FileDownload -Url 'https://vendor.example/app.exe' -OutputPath $out -ExpectedSha256 $goodHash |
+            Should -BeTrue
+        Test-Path $out | Should -BeTrue
+    }
+}
+
+# Live check against the real winget repository: every winget-pinned app must resolve to
+# exactly one allowlisted installer with a pinned hash. Catches manifest-format drift and
+# selector ambiguity early. Network-dependent, so excluded in CI via -ExcludeTag LocalOnly.
+Describe 'Get-WingetInstallerInfo (live winget repository)' -Tag 'LocalOnly' {
+    It 'resolves a unique, allowlisted installer for every winget-pinned app' {
+        $checked = 0
+        foreach ($name in (Get-AllAppNames)) {
+            $cfg = Get-AppConfiguration -AppName $name
+            if (-not $cfg.WingetPackageId) { continue }
+            $info = Get-WingetInstallerInfo -PackageId $cfg.WingetPackageId `
+                -InstallerType $cfg.WingetInstallerType `
+                -AllowedUrlPrefixes $cfg.AllowedDownloadUrlPrefixes
+            $info | Should -Not -BeNullOrEmpty -Because "winget resolution must succeed for $name"
+            $info.Sha256 | Should -Match '^[0-9A-Fa-f]{64}$'
+            $info.Version | Should -Match '^\d'
+            $checked++
+        }
+        $checked | Should -BeGreaterOrEqual 3 -Because '7-Zip, VLC and Inkscape are winget-pinned'
+    }
+}
+
 Describe 'Get-AppFamilyBaseName' {
     It 'takes the text before the version placeholder from a template' {
         Get-AppFamilyBaseName -DisplayNameTemplate 'Mozilla Firefox {0} (German)' | Should -Be 'Mozilla Firefox'
