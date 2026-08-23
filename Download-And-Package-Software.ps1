@@ -384,7 +384,13 @@ foreach ($appName in $allAppNames) {
 
     # Version checking. Apps whose filenames carry no dotted version (e.g. 7-Zip's
     # 7z2602-x64.msi) fall through here and are caught by the installer-exists check below.
-    if (Test-VersionExists -AppFolder $appFolder -NewVersion $versionInfo.Version -Pattern $appConfig.IntuneWinPattern) {
+    # Hash-pinned apps skip this shortcut entirely: winget can revise an existing version
+    # in place (new URL/filename/hash - Inkscape's build-suffixed names make this real),
+    # and a same-version artifact under a different filename must not be blessed without
+    # verification. For pinned apps only the exact resolved installer, verified against
+    # the current pin below, can justify a skip; artifacts under superseded filenames are
+    # cleaned up by Remove-OldAppFiles after the fresh download is packaged.
+    if (-not $pinnedHash -and (Test-VersionExists -AppFolder $appFolder -NewVersion $versionInfo.Version -Pattern $appConfig.IntuneWinPattern)) {
         Write-Host "  Skipping - already up to date" -ForegroundColor Yellow
         continue
     }
