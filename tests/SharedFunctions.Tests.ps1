@@ -323,6 +323,23 @@ Installers:
             -AllowedUrlPrefixes @('https://vendor.example/files/') | Should -BeNullOrEmpty
     }
 
+    It 'refuses a malformed InstallerSha256 before attempting any download' {
+        $badHashYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/app.msi
+  InstallerSha256: not-a-real-hash
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $badHashYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
     It 'fails closed when the manifest declares a different PackageVersion than its directory' {
         $mismatchYaml = @"
 PackageVersion: 9.9.9

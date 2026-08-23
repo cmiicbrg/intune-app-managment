@@ -359,14 +359,18 @@ foreach ($appName in $allAppNames) {
     $installer = Join-Path $appFolder $versionInfo.Filename
     $intunewinPath = $installer -replace '\.(exe|msi)$', '.intunewin'
 
+    # One resolved pin for every decision below: the winget manifest hash, or a static
+    # ExpectedSha256 from AppConfig for apps pinned that way instead
+    $pinnedHash = $versionInfo.Sha256 ?? $appConfig.ExpectedSha256
+
     # For hash-pinned apps, never let a leftover artifact short-circuit the run unverified:
     # a stale or partial installer (e.g. left behind by an interrupted transfer, or downloaded
     # before hash pinning existed) is removed together with its package, and an .intunewin
     # without its installer is unverifiable and removed too. This must happen before the
     # version-exists check below, which would otherwise skip based on the bad package alone.
-    if ($versionInfo.Sha256) {
+    if ($pinnedHash) {
         if (Test-Path $installer) {
-            if (-not (Test-DownloadedFileIntegrity -FilePath $installer -ExpectedSha256 $versionInfo.Sha256)) {
+            if (-not (Test-DownloadedFileIntegrity -FilePath $installer -ExpectedSha256 $pinnedHash)) {
                 Write-Host "  Existing installer failed hash verification - removing it and its package for re-download" -ForegroundColor Yellow
                 Remove-Item -Path $installer -Force -ErrorAction SilentlyContinue
                 Remove-Item -Path $intunewinPath -Force -ErrorAction SilentlyContinue
@@ -393,7 +397,7 @@ foreach ($appName in $allAppNames) {
         # fresh download would (pinned hash, or Authenticode + publisher). On failure it
         # is removed and the run falls through to a normal verified download.
         if (Test-DownloadedFileIntegrity -FilePath $installer `
-            -ExpectedSha256 ($versionInfo.Sha256 ?? $appConfig.ExpectedSha256) `
+            -ExpectedSha256 $pinnedHash `
             -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
             -ExpectedPublisher $appConfig.ExpectedPublisher) {
 
@@ -413,7 +417,7 @@ foreach ($appName in $allAppNames) {
 
     Write-Host "  Downloading version $($versionInfo.Version)..." -ForegroundColor Cyan
     if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installer `
-        -ExpectedSha256 ($versionInfo.Sha256 ?? $appConfig.ExpectedSha256) `
+        -ExpectedSha256 $pinnedHash `
         -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
         -ExpectedPublisher $appConfig.ExpectedPublisher) {
         # Clean up old files before packaging

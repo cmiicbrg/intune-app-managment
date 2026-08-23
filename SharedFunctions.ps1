@@ -569,9 +569,16 @@ function Get-WingetInstallerInfo {
     }
 
     $url = $candidates[0]['InstallerUrl']
-    $sha256 = $candidates[0]['InstallerSha256']
+    $sha256 = "$($candidates[0]['InstallerSha256'])".Trim()
     if (-not $url -or -not $sha256) {
         Write-Host "Winget lookup FAILED: installer entry for '$PackageId' $($latest.Name) is missing InstallerUrl or InstallerSha256" -ForegroundColor Red
+        return $null
+    }
+
+    # Downstream verification would reject a malformed pin anyway (fail closed), but
+    # refusing here avoids downloading an installer that can never verify
+    if ($sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+        Write-Host "Winget lookup FAILED: InstallerSha256 for '$PackageId' $($latest.Name) is not a 64-character hex hash" -ForegroundColor Red
         return $null
     }
 
