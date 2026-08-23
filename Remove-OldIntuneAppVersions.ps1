@@ -8,8 +8,9 @@
     Evaluates the tenant live - the same read and analysis as Get-IntuneAppInventory.ps1, never a
     saved report - and deletes the retention evaluator's delete candidates, oldest version first,
     for every app family in the tenant's deployment plan. A version is deleted only when it is
-    outside the newest KeepNewest versions AND older than KeepNewerThanWeeks weeks (see
-    TenantDeployments.json). Never deleted: the newest version, dependency targets, duplicate
+    outside the newest KeepNewest versions AND was superseded - stopped being the current
+    version - more than KeepNewerThanWeeks weeks ago (see TenantDeployments.json): a device that
+    last checked in within that window still finds the version it runs. Never deleted: the newest version, dependency targets, duplicate
     version numbers (Review), versions whose relationships could not be read, families outside
     the deployment plan, and apps that do not follow the family naming convention (unmanaged).
 
@@ -182,7 +183,7 @@ try {
         Write-Host "$($cleanup.DeletionCount) version(s) to delete:" -ForegroundColor Cyan
         foreach ($d in $cleanup.Deletions) {
             $installed = if ($null -ne $d.InstalledDeviceCount) { "$($d.InstalledDeviceCount) device(s)" } else { 'unknown' }
-            Write-Host ("  {0,-45} v{1,-18} rank {2,2}  {3,6} weeks  installed: {4}" -f $d.DisplayName, $d.DisplayVersion, $d.Rank, ([string]$d.AgeWeeks), $installed) -ForegroundColor Gray
+            Write-Host ("  {0,-45} v{1,-18} rank {2,2}  superseded {3,5} weeks ago  created {4,5} weeks ago  installed: {5}" -f $d.DisplayName, $d.DisplayVersion, $d.Rank, ([string]($d.SupersededWeeks ?? '?')), ([string]$d.AgeWeeks), $installed) -ForegroundColor Gray
         }
         Write-Host ""
 

@@ -65,6 +65,7 @@ function Get-AppCleanupPlan {
                 Version              = $candidate.Version
                 Rank                 = if ($record) { $record.Retention.Rank } else { $null }
                 AgeWeeks             = $candidate.AgeWeeks
+                SupersededWeeks      = $candidate.SupersededWeeks
                 CreatedDateTime      = if ($record) { $record.CreatedDateTime } else { $null }
                 AssignmentCount      = if ($record -and -not $record.AssignmentsUnavailable) { @($record.Assignments).Count } else { $null }   # $null = unknown
                 SupersededBy         = if ($record) { @($record.SupersededBy | ForEach-Object { $_.TargetDisplayName }) } else { @() }

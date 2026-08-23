@@ -43,16 +43,18 @@ function Invoke-IntuneAppCleanup {
     $results = [System.Collections.Generic.List[object]]::new()
     foreach ($deletion in @($Plan.Deletions)) {
         $assignmentInfo = if ($null -ne $deletion.AssignmentCount) { "$($deletion.AssignmentCount) assignment(s)" } else { 'assignments unknown' }
-        $label = "$($deletion.DisplayName) v$($deletion.DisplayVersion) [$($deletion.Family)] - rank $($deletion.Rank), $($deletion.AgeWeeks) weeks old, $assignmentInfo"
+        $superseded = if ($null -ne $deletion.SupersededWeeks) { "superseded $($deletion.SupersededWeeks) weeks ago" } else { 'superseded at an unknown time' }
+        $label = "$($deletion.DisplayName) v$($deletion.DisplayVersion) [$($deletion.Family)] - rank $($deletion.Rank), $superseded, $($deletion.AgeWeeks) weeks old, $assignmentInfo"
         $outcome = [ordered]@{
-            Id             = $deletion.Id
-            Family         = $deletion.Family
-            DisplayName    = $deletion.DisplayName
-            DisplayVersion = $deletion.DisplayVersion
-            Rank           = $deletion.Rank
-            AgeWeeks       = $deletion.AgeWeeks
-            Outcome        = $null
-            Detail         = $null
+            Id              = $deletion.Id
+            Family          = $deletion.Family
+            DisplayName     = $deletion.DisplayName
+            DisplayVersion  = $deletion.DisplayVersion
+            Rank            = $deletion.Rank
+            AgeWeeks        = $deletion.AgeWeeks
+            SupersededWeeks = $deletion.SupersededWeeks
+            Outcome         = $null
+            Detail          = $null
         }
 
         if (-not (& $Decision $label)) {

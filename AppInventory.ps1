@@ -183,7 +183,7 @@ function Get-AppInventoryAnalysis {
                 $verdict.Action = 'Review'
                 $verdict.Reasons = @($verdict.Reasons) + 'relationships could not be read - may be a dependency target; deletion suppressed, re-run the inventory'
             }
-            $record.Retention = [ordered]@{ Rank = $verdict.Rank; AgeWeeks = $verdict.AgeWeeks; Action = $verdict.Action; Reasons = @($verdict.Reasons) }
+            $record.Retention = [ordered]@{ Rank = $verdict.Rank; AgeWeeks = $verdict.AgeWeeks; SupersededWeeks = $verdict.SupersededWeeks; Action = $verdict.Action; Reasons = @($verdict.Reasons) }
         }
 
         $relationshipsUnavailable = @($members | Where-Object RelationshipsUnavailable)
@@ -254,7 +254,7 @@ function Get-AppInventoryAnalysis {
             KeepCount               = @($plan | Where-Object Action -eq 'Keep').Count
             DeleteCandidateCount    = @($plan | Where-Object Action -eq 'Delete').Count
             ReviewCount             = @($plan | Where-Object Action -eq 'Review').Count
-            DeleteCandidates        = @(Select-AppRetentionDeleteCandidates -Plan $plan | ForEach-Object { [ordered]@{ Id = $_.Id; DisplayName = $_.DisplayName; Version = $_.Version.ToString(); AgeWeeks = $_.AgeWeeks } })
+            DeleteCandidates        = @(Select-AppRetentionDeleteCandidates -Plan $plan | ForEach-Object { [ordered]@{ Id = $_.Id; DisplayName = $_.DisplayName; Version = $_.Version.ToString(); AgeWeeks = $_.AgeWeeks; SupersededWeeks = $_.SupersededWeeks } })
         })
     }
 
@@ -429,10 +429,10 @@ function Format-AppInventoryMarkdown {
         $any = $true
         $lines.Add("### $($f.Family)")
         $lines.Add('')
-        $lines.Add('| App | Version | Age (weeks) |')
-        $lines.Add('| --- | --- | ---: |')
+        $lines.Add('| App | Version | Superseded (weeks ago) | Age (weeks) |')
+        $lines.Add('| --- | --- | ---: | ---: |')
         foreach ($c in $f.DeleteCandidates) {
-            $lines.Add("| $($c.DisplayName) | $($c.Version) | $($c.AgeWeeks) |")
+            $lines.Add("| $($c.DisplayName) | $($c.Version) | $($c.SupersededWeeks ?? '-') | $($c.AgeWeeks) |")
         }
         $lines.Add('')
     }
@@ -460,8 +460,8 @@ function Format-AppInventoryMarkdown {
         $members = @($Records | Where-Object { $_.Family -eq $f.Family } | Sort-Object { $_.Retention.Rank ?? [int]::MaxValue }, { $_.CreatedDateTime } -Descending:$false)
         $lines.Add("### $($f.Family)$(if ($f.InflatingDetection) { ' (inflating detection)' })")
         $lines.Add('')
-        $header = '| Rank | App | Version | Created | Age (weeks) | Assignments | Supersedes | Action | Reasons |'
-        $sep = '| ---: | --- | --- | --- | ---: | --- | --- | --- | --- |'
+        $header = '| Rank | App | Version | Created | Age (weeks) | Superseded (weeks ago) | Assignments | Supersedes | Action | Reasons |'
+        $sep = '| ---: | --- | --- | --- | ---: | ---: | --- | --- | --- | --- |'
         if ($IncludesInstallSummary) { $header += ' Installed / Pending / Failed |'; $sep += ' --- |' }
         $lines.Add($header)
         $lines.Add($sep)
@@ -469,7 +469,7 @@ function Format-AppInventoryMarkdown {
             $assign = if ($m.Assignments.Count -eq 0) { '-' } else { ($m.Assignments | ForEach-Object { "$($_.Target) ($($_.Intent)$(if ($_.AutoUpdateSuperseded -eq $true) { ', auto-update' }))" }) -join '; ' }
             $sup = if ($m.Supersedes.Count -eq 0) { '-' } else { ($m.Supersedes | ForEach-Object { $_.TargetDisplayVersion }) -join ', ' }
             $created = if ($m.CreatedDateTime) { $m.CreatedDateTime.ToString('yyyy-MM-dd') } else { '-' }
-            $row = "| $($m.Retention.Rank ?? '-') | $($m.DisplayName) | $($m.DisplayVersion) | $created | $($m.Retention.AgeWeeks ?? '-') | $assign | $sup | $($m.Retention.Action) | $($m.Retention.Reasons -join '; ') |"
+            $row = "| $($m.Retention.Rank ?? '-') | $($m.DisplayName) | $($m.DisplayVersion) | $created | $($m.Retention.AgeWeeks ?? '-') | $($m.Retention.SupersededWeeks ?? '-') | $assign | $sup | $($m.Retention.Action) | $($m.Retention.Reasons -join '; ') |"
             if ($IncludesInstallSummary) {
                 $row += if ($m.InstallSummary) { " $($m.InstallSummary.installedDeviceCount) / $($m.InstallSummary.pendingInstallDeviceCount) / $($m.InstallSummary.failedDeviceCount) |" } else { ' - |' }
             }

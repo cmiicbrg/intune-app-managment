@@ -13,8 +13,8 @@ BeforeAll {
     '9.9.9' | Set-Content (Join-Path $workDir 'VERSION.txt')
     . (Join-Path $workDir 'IntuneCleanup.ps1')
 
-    function New-Deletion { param([string]$Id, [string]$Name, [string]$Version, [int]$Rank = 5, [double]$AgeWeeks = 40, $AssignmentCount = 1)
-        [PSCustomObject]@{ Id = $Id; Family = 'Chrome'; DisplayName = $Name; DisplayVersion = $Version; Version = $Version; Rank = $Rank; AgeWeeks = $AgeWeeks; CreatedDateTime = $null; AssignmentCount = $AssignmentCount; SupersededBy = @(); InstalledDeviceCount = 3 }
+    function New-Deletion { param([string]$Id, [string]$Name, [string]$Version, [int]$Rank = 5, [double]$AgeWeeks = 40, $SupersededWeeks = 30, $AssignmentCount = 1)
+        [PSCustomObject]@{ Id = $Id; Family = 'Chrome'; DisplayName = $Name; DisplayVersion = $Version; Version = $Version; Rank = $Rank; AgeWeeks = $AgeWeeks; SupersededWeeks = $SupersededWeeks; CreatedDateTime = $null; AssignmentCount = $AssignmentCount; SupersededBy = @(); InstalledDeviceCount = 3 }
     }
     function New-Plan { param([array]$Deletions)
         [PSCustomObject]@{ Families = @(); Deletions = @($Deletions); DeletionCount = @($Deletions).Count; SkippedCount = 0 }
@@ -37,6 +37,7 @@ Describe 'Invoke-IntuneAppCleanup' {
         $results.Id | Should -Be @('x1', 'x2')
         $results.Outcome | Should -Be @('Deleted', 'Deleted')
         $results[0].Detail | Should -Be '1 relationship(s) removed first'
+        $results[0].SupersededWeeks | Should -Be 30
         Should -Invoke Remove-InteropAppRelationships -ParameterFilter { $AppId -eq 'x1' } -Times 1 -Exactly
         Should -Invoke Remove-InteropWin32App -ParameterFilter { $AppId -eq 'x2' } -Times 1 -Exactly
         Should -Invoke Remove-InteropWin32App -Times 2 -Exactly
@@ -50,7 +51,7 @@ Describe 'Invoke-IntuneAppCleanup' {
         $results = @(Invoke-IntuneAppCleanup -Plan $plan -Decision { param($label) $seen.Add($label); $false } -DeclinedOutcome 'WouldDelete' 6> $null)
         $results[0].Outcome | Should -Be 'WouldDelete'
         $seen.Count | Should -Be 1
-        $seen[0] | Should -Be 'Google Chrome 140 v140.0 [Chrome] - rank 5, 40 weeks old, assignments unknown'
+        $seen[0] | Should -Be 'Google Chrome 140 v140.0 [Chrome] - rank 5, superseded 30 weeks ago, 40 weeks old, assignments unknown'
         Should -Invoke Remove-InteropAppRelationships -Times 0 -Exactly
         Should -Invoke Remove-InteropWin32App -Times 0 -Exactly
     }
@@ -101,8 +102,8 @@ Describe 'Write-AppCleanupLog' {
         $policy = @{ KeepNewest = 3; KeepNewerThanWeeks = 10; Source = 'tenant'; OptIn = $true }
         $results = @([PSCustomObject]@{ Id = 'x1'; Family = 'Chrome'; DisplayName = 'Google Chrome 140'; DisplayVersion = '140.0'; Rank = 5; AgeWeeks = 40; Outcome = 'Deleted'; Detail = '1 relationship(s) removed first' })
 
-        $first = Write-AppCleanupLog -Directory $dir -TenantName 'MZ' -Now $now -Mode 'Live' -Trigger 'Deploy' -AppName 'Chrome' -TenantPolicy $policy -PlanAppNames @('Chrome', 'Firefox') -Families @() -Results $results -ToolVersionPath (Join-Path $TestDrive 'repo\VERSION.txt')
-        $second = Write-AppCleanupLog -Directory $dir -TenantName 'MZ' -Now $now -ToolVersionPath (Join-Path $TestDrive 'repo\VERSION.txt')
+        $first = Write-AppCleanupLog -Directory $dir -TenantName 'MZ' -Now $now -Mode 'Live' -Trigger 'Deploy' -AppName 'Chrome' -TenantPolicy $policy -PlanAppNames @('Chrome', 'Firefox') -Families @() -Results $results -ToolVersionPath (Join-Path $workDir 'VERSION.txt')
+        $second = Write-AppCleanupLog -Directory $dir -TenantName 'MZ' -Now $now -ToolVersionPath (Join-Path $workDir 'VERSION.txt')
 
         (Split-Path $first -Leaf) | Should -Be 'MZ-cleanup-20260822-180000.json'
         (Split-Path $second -Leaf) | Should -Be 'MZ-cleanup-20260822-180000-2.json'

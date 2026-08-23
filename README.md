@@ -407,9 +407,15 @@ the Company Portal. A retention policy in the same plan file states how much his
 }
 ```
 
-A version is **kept** when it is among the newest `KeepNewest` versions **or** was created within
-the last `KeepNewerThanWeeks` weeks. Defaults are 3 / 10 when omitted; an app's block overrides the
-tenant's, which overrides the defaults. `KeepNewest` can never go below 2 — Intune irrevocably
+A version is **kept** when it is among the newest `KeepNewest` versions **or** was still the
+current version at some point within the last `KeepNewerThanWeeks` weeks — that is, the first
+newer version was created less than that many weeks ago. The window is about devices, not about
+a version's own age: a device that last checked in N weeks ago runs whatever was current back
+then, and that version must still exist in Intune for supersedence and auto-update to pick the
+device up. (A fast-moving app can have three builds younger than the window and still need last
+month's build kept.) Defaults are 3 / 10 when omitted — choose the window by how long your
+devices can stay away, e.g. 14 weeks for schools with long holidays; an app's block overrides
+the tenant's, which overrides the defaults. `KeepNewest` can never go below 2 — Intune irrevocably
 drops Company Portal auto-update tracking for a superseded app whose assignment disappears, so the
 immediate predecessor must always survive. Always kept regardless of policy: dependency targets,
 unparseable versions, and versions with an unknown creation date. Duplicate version numbers are
@@ -499,8 +505,9 @@ full tenant.
 
 For an opted-in tenant, `Deploy-ToIntune.ps1` runs the same evaluation and executor for each
 family right after deploying it (new version created, or an existing one reconciled): the
-family is re-read, and versions outside the policy are removed unattended — typically the one
-that was rank 3 before the deploy and is rank 4 now. The deployment summary reports what was
+family is re-read, and versions outside the policy are removed unattended — the one that was
+rank 3 before the deploy and is rank 4 now, once it was superseded longer ago than the window.
+The deployment summary reports what was
 removed and every pass — also one that found nothing to remove — writes the same
 `inventory/<Tenant>-cleanup-<timestamp>.json` log with `Trigger: Deploy`. `-NoRetention`
 skips the step; `-ShowPlan` shows whether it would run. The deploy

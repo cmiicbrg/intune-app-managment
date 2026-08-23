@@ -972,7 +972,8 @@ try {
         # Version retention for this family (opted-in tenants): the same evaluation and executor as
         # Remove-OldIntuneAppVersions.ps1, unattended. The family is re-read so the version just
         # created (or reconciled) and its supersedence are part of the picture; the version that was
-        # rank 3 before the deploy is rank 4 now and goes if it is older than the policy's window.
+        # rank 3 before the deploy is rank 4 now and goes once it was superseded longer ago than the
+        # policy's window (i.e. no device that checked in within the window can still run it).
         # The tenant list lags a creation by a few seconds, so the deployed app's id is ensured.
         if ($retentionPolicy) {
             Write-Host "`n  Version retention for $($app.AppConfigName)..." -ForegroundColor Cyan
