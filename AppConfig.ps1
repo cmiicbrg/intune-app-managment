@@ -513,10 +513,13 @@ function Get-AppConfigPolicyViolation {
             }
             else {
                 foreach ($prefix in $cfg.AllowedDownloadUrlPrefixes) {
-                    # A blank prefix would match every URL; a non-HTTPS prefix could never
-                    # match a legitimate download but hints at a mis-pasted allowlist
-                    if ([string]::IsNullOrWhiteSpace($prefix) -or -not "$prefix".StartsWith('https://')) {
-                        $violations += "${name}: every AllowedDownloadUrlPrefixes entry must be a non-empty https:// prefix (found '$prefix')"
+                    # A blank prefix would match every URL; whitespace padding or a non-HTTPS
+                    # scheme means the prefix can never match at runtime (mis-pasted allowlist).
+                    # Case-insensitive like the runtime check in Get-WingetInstallerInfo.
+                    if ([string]::IsNullOrWhiteSpace($prefix) -or
+                        "$prefix" -ne "$prefix".Trim() -or
+                        -not "$prefix".StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $violations += "${name}: every AllowedDownloadUrlPrefixes entry must be a non-empty https:// prefix without surrounding whitespace (found '$prefix')"
                         break
                     }
                 }

@@ -615,10 +615,16 @@ function Invoke-FileDownload {
     Write-Host "To: $(Split-Path $OutputPath)" -ForegroundColor Cyan
 
     try {
-        # Download with progress
-        $ProgressPreference = 'SilentlyContinue'  # Speeds up download
-        Invoke-WebRequest -Uri $Url -OutFile $OutputPath -ErrorAction Stop
-        $ProgressPreference = 'Continue'
+        # Suppressing progress rendering speeds up Invoke-WebRequest considerably;
+        # restored in finally so a thrown transfer cannot leak the setting
+        $previousProgressPreference = $ProgressPreference
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -Uri $Url -OutFile $OutputPath -ErrorAction Stop
+        }
+        finally {
+            $ProgressPreference = $previousProgressPreference
+        }
 
         # Verify integrity before declaring success
         if (-not (Test-DownloadedFileIntegrity -FilePath $OutputPath -ExpectedSha256 $ExpectedSha256 -EnforceSignatureCheck $EnforceSignatureCheck -ExpectedPublisher $ExpectedPublisher)) {

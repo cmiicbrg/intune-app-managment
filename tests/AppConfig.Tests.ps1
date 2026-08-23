@@ -185,12 +185,27 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
             @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
                 WingetPackageId = 'X.Y'
                 AllowedDownloadUrlPrefixes = @('https://vendor.example/', '')
-            } })[0] | Should -Match 'non-empty https://' -Because 'a blank prefix would match every URL'
+            } })[0] | Should -Match 'non-empty https:// prefix' -Because 'a blank prefix would match every URL'
 
             @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
                 WingetPackageId = 'X.Y'
                 AllowedDownloadUrlPrefixes = @('http://vendor.example/')
-            } })[0] | Should -Match 'non-empty https://'
+            } })[0] | Should -Match 'non-empty https:// prefix'
+        }
+
+        It 'matches the scheme case-insensitively, like the runtime allowlist check' {
+            Get-AppConfigPolicyViolation -Configurations @{ Ok = @{
+                AllowUnsignedInstaller = $true
+                WingetPackageId = 'X.Y'
+                AllowedDownloadUrlPrefixes = @('HTTPS://vendor.example/')
+            } } | Should -BeNullOrEmpty
+        }
+
+        It 'flags whitespace-padded prefixes, which could never match a canonical URL' {
+            @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
+                WingetPackageId = 'X.Y'
+                AllowedDownloadUrlPrefixes = @(' https://vendor.example/')
+            } })[0] | Should -Match 'surrounding whitespace'
         }
 
         It 'accepts an unsigned installer that is winget-pinned with a URL allowlist' {
