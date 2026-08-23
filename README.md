@@ -28,12 +28,12 @@ To upgrade:
 | --- | --- | --- |
 | Mozilla Firefox (German) | EXE | Mozilla Product Details API |
 | Google Chrome Enterprise | MSI | Web scraping (AppLocker XML) |
-| 7-Zip | MSI | GitHub Releases |
+| 7-Zip | MSI | Winget manifest (SHA-256 pinned) |
 | GIMP | EXE | Web scraping |
-| VLC Media Player | EXE | Web scraping |
+| VLC Media Player | EXE | Winget manifest (SHA-256 pinned) |
 | Notepad++ | EXE | GitHub Releases |
 | Affinity Studio | MSI | AppLocker XML extraction |
-| Inkscape | MSI | Web scraping |
+| Inkscape | MSI | Winget manifest (SHA-256 pinned) |
 | Audacity | EXE | GitHub Releases |
 | LibreOffice (German) | MSI | Web scraping (Enterprise version) |
 | OpenShot Video Editor | EXE | GitHub Releases |
@@ -46,6 +46,15 @@ To upgrade:
 | Visual C++ Redistributable | EXE | Web scraping (Microsoft) |
 | NextExam Teacher | MSI | Manual update |
 | NextExam Student | MSI | Manual update |
+
+## Download Integrity
+
+Every installer download is verified before it is packaged (`Invoke-FileDownload` → `Test-DownloadedFileIntegrity` in `SharedFunctions.ps1`); an unverified file is deleted and the app is skipped for that run. Only HTTPS URLs are accepted. There are two trust tiers:
+
+1. **Authenticode-signed vendors** (default): the download must carry a *valid* Authenticode signature, and the certificate subject must contain the `ExpectedPublisher` configured in `AppConfig.ps1`.
+2. **Unsigned/unreliably signed vendors** (7-Zip, VLC, Inkscape): version, download URL and SHA-256 are taken as one bundle from the package's community [winget manifest](https://github.com/microsoft/winget-pkgs) (`WingetPackageId` in `AppConfig.ps1`), which Microsoft's validation pipeline independently downloads, hashes and scans before merge. The download is verified against that pinned hash, and the manifest's URL must match the app's `AllowedDownloadUrlPrefixes` so a manifest can never redirect downloads away from the vendor's own infrastructure. If no manifest exists yet for a new release, the app is skipped until one is merged (typically hours to a few days) - for these apps that lag is accepted as a deliberate quarantine window.
+
+The policy is enforced at load time: `AppConfig.ps1` refuses to load a configuration in which an app sets `AllowUnsignedInstaller` without a winget pin or an explicit `ExpectedSha256` (`Get-AppConfigPolicyViolation`). There is deliberately no unverified fallback URL for winget-pinned apps.
 
 ## Prerequisites
 

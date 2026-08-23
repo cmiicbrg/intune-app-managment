@@ -425,6 +425,153 @@ function Test-DownloadedFileIntegrity {
     return $true
 }
 
+# Minimal parser for winget installer manifests (<PackageId>.installer.yaml).
+# Full YAML is deliberately out of scope: only the flat "Key: value" fields this pipeline
+# consumes are read, and only at the two indent levels winget manifests actually use
+# (root-level defaults and two-space-indented keys inside "- " installer entries).
+# Anything else - nested lists, block scalars, unknown keys - is ignored.
+function ConvertFrom-WingetInstallerManifest {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Yaml
+    )
+
+    # The only keys the resolver consumes; everything else is noise
+    $wantedKeys = @('PackageVersion', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope', 'InstallerUrl', 'InstallerSha256')
+
+    $defaults = @{}
+    $installers = @()
+    $current = $null
+
+    foreach ($line in ($Yaml -split "`r?`n")) {
+        if ($line -match '^\s*#') { continue }
+
+        if ($line -match '^- ([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
+            # New installer entry
+            if ($current) { $installers += $current }
+            $current = @{}
+            $key = $matches[1]; $value = $matches[2].Trim("'`"")
+            if ($key -in $wantedKeys -and $value) { $current[$key] = $value }
+        }
+        elseif ($current -and $line -match '^  ([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
+            # Key inside the current installer entry (exactly two spaces - deeper
+            # indents belong to nested structures like AppsAndFeaturesEntries)
+            $key = $matches[1]; $value = $matches[2].Trim("'`"")
+            if ($key -in $wantedKeys -and $value -and -not $current.ContainsKey($key)) { $current[$key] = $value }
+        }
+        elseif ($line -match '^([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
+            # Root-level key: a default that installer entries inherit
+            if ($current) { $installers += $current; $current = $null }
+            $key = $matches[1]; $value = $matches[2].Trim("'`"")
+            if ($key -in $wantedKeys -and $value) { $defaults[$key] = $value }
+        }
+    }
+    if ($current) { $installers += $current }
+
+    return @{ Defaults = $defaults; Installers = $installers }
+}
+
+# Resolves the latest version, download URL and SHA-256 of a package from the community
+# winget repository (microsoft/winget-pkgs). Used for vendors that do not Authenticode-sign
+# their installers: the manifest hash - independently verified by Microsoft's validation
+# pipeline before merge - replaces the signature check.
+#
+# Fails closed: any ambiguity (no manifest, zero or multiple matching installer entries,
+# a download URL outside AllowedUrlPrefixes, an API error) returns $null, which callers
+# treat as "skip this app for this run". Deliberately never falls back to an unverified URL.
+function Get-WingetInstallerInfo {
+    param(
+        # Winget package identifier, e.g. "VideoLAN.VLC"
+        [Parameter(Mandatory=$true)]
+        [string]$PackageId,
+
+        [string]$Architecture = 'x64',
+
+        # Winget installer type to select (e.g. "wix", "nullsoft"); required whenever a
+        # package publishes more than one installer per architecture
+        [string]$InstallerType,
+
+        # The manifest's InstallerUrl must start with one of these, so a malicious manifest
+        # cannot redirect downloads away from the vendor's own infrastructure
+        [string[]]$AllowedUrlPrefixes
+    )
+
+    $idPath = ($PackageId -split '\.') -join '/'
+    $letter = $PackageId.Substring(0, 1).ToLowerInvariant()
+    $manifestRoot = "manifests/$letter/$idPath"
+
+    # Latest version = highest directory name that parses as [version]; tags like "Nightly" are skipped
+    try {
+        $listing = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/$manifestRoot" -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Winget lookup FAILED: could not list versions for '$PackageId': $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+
+    $versions = foreach ($item in $listing) {
+        if ($item.type -ne 'dir') { continue }
+        $parsed = $null
+        if ([version]::TryParse($item.name, [ref]$parsed)) {
+            [PSCustomObject]@{ Name = $item.name; Version = $parsed }
+        }
+    }
+    $latest = $versions | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $latest) {
+        Write-Host "Winget lookup FAILED: no parseable versions found for '$PackageId'" -ForegroundColor Red
+        return $null
+    }
+
+    try {
+        $yaml = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/$manifestRoot/$($latest.Name)/$PackageId.installer.yaml" -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Winget lookup FAILED: could not fetch installer manifest for '$PackageId' $($latest.Name): $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+
+    $manifest = ConvertFrom-WingetInstallerManifest -Yaml $yaml
+    $candidates = @($manifest.Installers | Where-Object {
+        $arch = if ($_.ContainsKey('Architecture')) { $_.Architecture } else { $manifest.Defaults['Architecture'] }
+        $type = if ($_.ContainsKey('InstallerType')) { $_.InstallerType } else { $manifest.Defaults['InstallerType'] }
+        ($arch -eq $Architecture) -and (-not $InstallerType -or $type -eq $InstallerType)
+    })
+
+    if ($candidates.Count -ne 1) {
+        Write-Host "Winget lookup FAILED: expected exactly 1 installer entry for '$PackageId' $($latest.Name) ($Architecture/$InstallerType), found $($candidates.Count)" -ForegroundColor Red
+        return $null
+    }
+
+    $url = $candidates[0]['InstallerUrl']
+    $sha256 = $candidates[0]['InstallerSha256']
+    if (-not $url -or -not $sha256) {
+        Write-Host "Winget lookup FAILED: installer entry for '$PackageId' $($latest.Name) is missing InstallerUrl or InstallerSha256" -ForegroundColor Red
+        return $null
+    }
+
+    if ($AllowedUrlPrefixes) {
+        $allowed = $false
+        foreach ($prefix in $AllowedUrlPrefixes) {
+            if ($url.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
+        }
+        if (-not $allowed) {
+            Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is outside the allowed prefixes" -ForegroundColor Red
+            Write-Host "  URL: $url" -ForegroundColor Red
+            return $null
+        }
+    }
+
+    $filename = [System.Uri]::UnescapeDataString(([System.Uri]$url).Segments[-1])
+    Write-Host "Winget manifest resolved: $PackageId $($latest.Name) (SHA-256 pinned)" -ForegroundColor Green
+
+    return [PSCustomObject]@{
+        Version  = $latest.Name
+        Url      = $url
+        Sha256   = $sha256
+        Filename = $filename
+    }
+}
+
 # Function to download file with progress
 function Invoke-FileDownload {
     param(
@@ -435,9 +582,15 @@ function Invoke-FileDownload {
         [string]$ExpectedPublisher
     )
     
+    # Installers only ever come from HTTPS endpoints - fail before touching the network
+    if (-not $Url.StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "Download REFUSED: only HTTPS URLs are allowed ($Url)" -ForegroundColor Red
+        return $false
+    }
+
     Write-Host "Downloading from: $Url" -ForegroundColor Cyan
     Write-Host "To: $(Split-Path $OutputPath)" -ForegroundColor Cyan
-    
+
     try {
         # Download with progress
         $ProgressPreference = 'SilentlyContinue'  # Speeds up download

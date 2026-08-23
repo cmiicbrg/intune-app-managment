@@ -46,7 +46,23 @@ function Get-LatestVersionInfo {
     
     try {
         # Handle different version detection methods
-        if ($AppConfig.VersionApiUrl) {
+        if ($AppConfig.WingetPackageId) {
+            # Winget manifest (7-Zip, VLC, Inkscape - unsigned installers). Version, URL and
+            # SHA-256 come as one reviewed bundle; the hash replaces the Authenticode check.
+            Write-Host "Resolving version from winget manifest..." -ForegroundColor Gray
+            $wingetInfo = Get-WingetInstallerInfo -PackageId $AppConfig.WingetPackageId `
+                -Architecture ($AppConfig.WingetArchitecture ?? "x64") `
+                -InstallerType $AppConfig.WingetInstallerType `
+                -AllowedUrlPrefixes $AppConfig.AllowedDownloadUrlPrefixes
+            if ($wingetInfo) {
+                return @{Url = $wingetInfo.Url; Version = $wingetInfo.Version; Filename = $wingetInfo.Filename; Sha256 = $wingetInfo.Sha256}
+            }
+            # Deliberately no FallbackUrl here: without a manifest hash there is nothing to
+            # verify an unsigned installer against. Skip and pick it up on a later run.
+            Write-Host "No verifiable winget manifest - skipping this run" -ForegroundColor Yellow
+            return $null
+        }
+        elseif ($AppConfig.VersionApiUrl) {
             # API-based version detection (Firefox)
             Write-Host "Fetching version from API..." -ForegroundColor Gray
             $versionInfo = Invoke-RestMethod -Uri $AppConfig.VersionApiUrl
@@ -55,7 +71,7 @@ function Get-LatestVersionInfo {
             return @{Url = $AppConfig.DownloadUrl; Version = $version; Filename = $filename}
         }
         elseif ($AppConfig.GitHubApiUrl) {
-            # GitHub releases (7-Zip, Notepad++, Audacity, OpenShot, KeePassXC, Stellarium, Next-Exam)
+            # GitHub releases (Notepad++, Audacity, OpenShot, KeePassXC, Stellarium, Next-Exam)
             Write-Host "Fetching version from GitHub..." -ForegroundColor Gray
             $release = Invoke-RestMethod -Uri $AppConfig.GitHubApiUrl
             $asset = $release.assets | Where-Object { $_.name -match $AppConfig.GitHubAssetPattern } | Select-Object -First 1
@@ -66,7 +82,7 @@ function Get-LatestVersionInfo {
             }
         }
         elseif ($AppConfig.DownloadPageUrl -and $AppConfig.DownloadUrlRegex) {
-            # Web scraping (GIMP, VLC, Inkscape, LibreOffice, Google Earth Pro)
+            # Web scraping (GIMP, LibreOffice, Google Earth Pro)
             Write-Host "Fetching version from download page..." -ForegroundColor Gray
             $page = Invoke-WebRequest -Uri $AppConfig.DownloadPageUrl
 
@@ -78,34 +94,6 @@ function Get-LatestVersionInfo {
                     $url = $AppConfig.DownloadUrlTemplate -f $majorMinor, $version
                     $filename = $AppConfig.FilenameTemplate -f $version
                     return @{Url = $url; Version = $version; Filename = $filename}
-                }
-                elseif ($AppConfig.Name -eq "VLC") {
-                    # VLC special handling
-                    $filename = $matches[1]
-                    $version = $matches[2]
-                    $url = $AppConfig.DownloadUrlTemplate -f $filename
-                    return @{Url = $url; Version = $version; Filename = $filename}
-                }
-                elseif ($AppConfig.Name -eq "Inkscape") {
-                    # Inkscape special handling - two-step process
-                    $version = $matches[1]  # e.g., 1.4.2
-                    Write-Host "  Found version: $version" -ForegroundColor Gray
-                    
-                    # Step 2: Get the platforms page to find the actual MSI download link
-                    $platformsUrl = $AppConfig.PlatformsUrlTemplate -f $version
-                    Write-Host "  Fetching download link from platforms page..." -ForegroundColor Gray
-                    $platformsPage = Invoke-WebRequest -Uri $platformsUrl
-                    
-                    if ($platformsPage.Content -match $AppConfig.DownloadLinkRegex) {
-                        $actualFilename = $matches[1]  # e.g., inkscape-1.4.2_2025-05-13_f4327f4-x64.msi
-                        $url = $matches[0]  # Full URL
-                        $filename = $AppConfig.FilenameTemplate -f $version  # Simplified filename for storage
-                        Write-Host "  Found MSI: $actualFilename" -ForegroundColor Gray
-                        return @{Url = $url; Version = $version; Filename = $actualFilename}
-                    }
-                    else {
-                        Write-Host "  Could not find MSI download link on platforms page" -ForegroundColor Yellow
-                    }
                 }
                 elseif ($AppConfig.Name -eq "LibreOffice") {
                     # LibreOffice special handling - find unique versions and pick the lower one (enterprise/stable)
@@ -153,6 +141,11 @@ function Get-LatestVersionInfo {
     }
     catch {
         Write-Host "Error fetching version info: $_" -ForegroundColor Yellow
+        if ($AppConfig.WingetPackageId) {
+            # Never hand an unsigned app to an unverified fallback URL
+            Write-Host "No unverified fallback for winget-verified apps - skipping this run" -ForegroundColor Yellow
+            return $null
+        }
         if ($AppConfig.FallbackUrl) {
             Write-Host "Using fallback URL" -ForegroundColor Yellow
             return (Get-FallbackVersionInfo -AppConfig $AppConfig)
@@ -217,7 +210,7 @@ foreach ($appName in $allAppNames) {
         
         Write-Host "  Downloading (version will be determined from file)..." -ForegroundColor Cyan
         if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installerTemp `
-            -ExpectedSha256 $appConfig.ExpectedSha256 `
+            -ExpectedSha256 ($versionInfo.Sha256 ?? $appConfig.ExpectedSha256) `
             -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
             -ExpectedPublisher $appConfig.ExpectedPublisher) {
             
@@ -391,7 +384,7 @@ foreach ($appName in $allAppNames) {
     
     Write-Host "  Downloading version $($versionInfo.Version)..." -ForegroundColor Cyan
     if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installer `
-        -ExpectedSha256 $appConfig.ExpectedSha256 `
+        -ExpectedSha256 ($versionInfo.Sha256 ?? $appConfig.ExpectedSha256) `
         -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
         -ExpectedPublisher $appConfig.ExpectedPublisher) {
         # Clean up old files before packaging

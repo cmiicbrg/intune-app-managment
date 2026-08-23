@@ -57,18 +57,19 @@ $script:AppConfigurations = @{
         Folder = "7zip"
         IconFile = "7zip-logo.png"
         IntuneWinPattern = "7z*-x64.intunewin"
-        GitHubRepo = "ip7z/7zip"
-        GitHubApiUrl = "https://api.github.com/repos/ip7z/7zip/releases/latest"
-        GitHubAssetPattern = "^7z\d+-x64\.msi$"  # Excludes the EXE, ARM and x86 (7z####.msi) assets
-        FallbackUrl = "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.msi"
-        FallbackVersion = "26.02"
+        # The 7-Zip MSI is not Authenticode-signed, so version, URL and SHA-256 come from the
+        # winget manifest (independently verified by Microsoft's validation pipeline) and the
+        # download is verified against that pinned hash instead of a signature.
+        WingetPackageId = "7zip.7zip"
+        WingetInstallerType = "wix"  # selects the x64 MSI entry (the EXE entries are "exe")
+        AllowedDownloadUrlPrefixes = @("https://github.com/ip7z/7zip/releases/download/")
         FilenameTemplate = "7z{0}-x64.msi"
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"  # Simple product code detection, no version operator needed
-        AllowUnsignedInstaller = $true  # 7-Zip MSI is not Authenticode-signed
+        AllowUnsignedInstaller = $true  # signature check replaced by the winget SHA-256 pin above
         AutoUpdate = $true
     }
     
@@ -105,11 +106,13 @@ $script:AppConfigurations = @{
         Folder = "vlc"
         IconFile = "vlc-logo.png"
         IntuneWinPattern = "vlc-*-win64.intunewin"
-        DownloadPageUrl = "https://get.videolan.org/vlc/last/win64/"
-        DownloadUrlRegex = 'href="(vlc-([\d\.]+)-win64\.exe)"'
-        DownloadUrlTemplate = "https://get.videolan.org/vlc/last/win64/{0}"
-        FallbackUrl = "https://get.videolan.org/vlc/3.0.21/win64/vlc-3.0.21-win64.exe"
-        FallbackVersion = "3.0.21"
+        # VLC's EXE signature status is unreliable across versions, so version, URL and SHA-256
+        # come from the winget manifest and the download is verified against that pinned hash.
+        # This also replaces scraping get.videolan.org (a mirror redirector that once served an
+        # HTML page as the "installer") with the direct download.videolan.org origin URL.
+        WingetPackageId = "VideoLAN.VLC"
+        WingetInstallerType = "nullsoft"  # selects the x64 EXE entry (MSI is "wix", portable is "zip")
+        AllowedDownloadUrlPrefixes = @("https://download.videolan.org/pub/videolan/vlc/")
         FilenameTemplate = "vlc-{0}-win64.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" /S'
@@ -118,7 +121,7 @@ $script:AppConfigurations = @{
         DetectionFile = "vlc.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
-        AllowUnsignedInstaller = $true  # VLC EXE signature status is unreliable across versions
+        AllowUnsignedInstaller = $true  # signature check replaced by the winget SHA-256 pin above
         AutoUpdate = $true
     }
     
@@ -177,19 +180,19 @@ $script:AppConfigurations = @{
         Folder = "inkscape"
         IconFile = "inkscape-logo.png"
         IntuneWinPattern = "inkscape-*.intunewin"
-        DownloadPageUrl = "https://inkscape.org/release/"
-        DownloadUrlRegex = 'href="/release/([\d\.]+)/"'  # Extract version from main page
-        PlatformsUrlTemplate = "https://inkscape.org/release/{0}/platforms/"  # {0} = version
-        DownloadLinkRegex = 'https://inkscape\.org/gallery/item/\d+/(inkscape-[\d\.]+-\d{4}-\d{2}-\d{2}_[a-f0-9]+-x64\.msi)'  # Extract MSI filename
-        FallbackUrl = "https://inkscape.org/gallery/item/56340/inkscape-1.4.2_2025-05-13_f4327f4-x64.msi"
-        FallbackVersion = "1.4.2"
+        # The Inkscape MSI has an unreliable signature (self-signed/incomplete cert chain), so
+        # version, URL and SHA-256 come from the winget manifest and the download is verified
+        # against that pinned hash. Also replaces the two-step release-page/platforms-page scrape.
+        WingetPackageId = "Inkscape.Inkscape"
+        WingetInstallerType = "wix"  # selects the x64 MSI entry (the EXE entry is "nullsoft")
+        AllowedDownloadUrlPrefixes = @("https://media.inkscape.org/dl/resources/file/")
         FilenameTemplate = "inkscape-{0}-x64.msi"  # Simplified name for storage
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn ALLUSERS=1'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
-        AllowUnsignedInstaller = $true  # Inkscape MSI has unreliable signature (self-signed/incomplete cert chain)
+        AllowUnsignedInstaller = $true  # signature check replaced by the winget SHA-256 pin above
         AutoUpdate = $true
     }
     
@@ -485,6 +488,37 @@ $script:AppConfigurations = @{
         ExpectedPublisher = "thomas.weissel@bildung.gv.at"
         AutoUpdate = $true
     }
+}
+
+# Download-integrity policy: every app must anchor the integrity of its downloads somewhere.
+# Signed installers are covered by the default Authenticode check (plus ExpectedPublisher);
+# an app that opts out of the signature check (AllowUnsignedInstaller) must instead be
+# verifiable against a hash - a winget manifest pin or an explicit ExpectedSha256. Returns
+# one message per violation; empty means the configuration is compliant.
+function Get-AppConfigPolicyViolation {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$Configurations
+    )
+
+    $violations = @()
+    foreach ($name in ($Configurations.Keys | Sort-Object)) {
+        $cfg = $Configurations[$name]
+        if ($cfg.AllowUnsignedInstaller -and -not ($cfg.WingetPackageId -or $cfg.ExpectedSha256)) {
+            $violations += "${name}: AllowUnsignedInstaller requires WingetPackageId or ExpectedSha256 - downloads must stay verifiable"
+        }
+        if ($cfg.WingetPackageId -and -not $cfg.AllowedDownloadUrlPrefixes) {
+            $violations += "${name}: WingetPackageId requires AllowedDownloadUrlPrefixes to pin where installers may be fetched from"
+        }
+    }
+    return $violations
+}
+
+# Enforced at load time so a config that reopens the unverified-download hole
+# (the pre-v3.6 VLC/7-Zip/Inkscape state) cannot even be dot-sourced.
+$configPolicyViolations = @(Get-AppConfigPolicyViolation -Configurations $script:AppConfigurations)
+if ($configPolicyViolations.Count -gt 0) {
+    throw "AppConfig.ps1 download-integrity policy violations:`n - $($configPolicyViolations -join "`n - ")"
 }
 
 # Path to the machine-maintained version cache written by Download-And-Package-Software.ps1.

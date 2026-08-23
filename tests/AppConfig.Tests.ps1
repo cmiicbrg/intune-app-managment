@@ -161,6 +161,45 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         }
     }
 
+    Context 'Download-integrity policy (Get-AppConfigPolicyViolation)' {
+        It 'accepts the shipped configuration' {
+            # AppConfig.ps1 throws at load time on violations, so reaching this test at all
+            # already proves compliance - this re-checks explicitly for a readable failure
+            $all = @{}
+            foreach ($name in (Get-AllAppNames)) { $all[$name] = Get-AppConfiguration -AppName $name }
+            Get-AppConfigPolicyViolation -Configurations $all | Should -BeNullOrEmpty
+        }
+
+        It 'flags an unsigned installer without a hash source' {
+            $violations = @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{ AllowUnsignedInstaller = $true } })
+            $violations.Count | Should -Be 1
+            $violations[0] | Should -Match 'AllowUnsignedInstaller requires'
+        }
+
+        It 'flags a winget-pinned app without a URL allowlist' {
+            @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{ WingetPackageId = 'X.Y' } })[0] |
+                Should -Match 'AllowedDownloadUrlPrefixes'
+        }
+
+        It 'accepts an unsigned installer that is winget-pinned with a URL allowlist' {
+            Get-AppConfigPolicyViolation -Configurations @{ Ok = @{
+                AllowUnsignedInstaller = $true
+                WingetPackageId = 'X.Y'
+                AllowedDownloadUrlPrefixes = @('https://vendor.example/')
+            } } | Should -BeNullOrEmpty
+        }
+
+        It 'finds an integrity anchor on every configured app' {
+            # Every download must be verifiable: Authenticode publisher pin, explicit
+            # SHA-256, or a winget manifest hash. A new app missing all three fails here.
+            foreach ($name in (Get-AllAppNames)) {
+                $cfg = Get-AppConfiguration -AppName $name
+                [bool]($cfg.ExpectedPublisher -or $cfg.ExpectedSha256 -or $cfg.WingetPackageId) |
+                    Should -BeTrue -Because "$name must pin a publisher, a hash, or a winget manifest"
+            }
+        }
+    }
+
     Context 'Common settings applied to every generated config' {
         It 'stamps install experience, restart behavior, and an x64/Win11 requirement rule' {
             foreach ($config in @(

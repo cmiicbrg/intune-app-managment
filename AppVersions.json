@@ -43,6 +43,12 @@
       "Filename": "",
       "UpdatedUtc": "2026-08-10T18:12:19Z"
     },
+    "Inkscape": {
+      "Version": "1.4.4",
+      "Url": "https://media.inkscape.org/dl/resources/file/inkscape-1.4.4_2026-05-05_dcaf3e7-x64.signed_xMx7DJV.msi",
+      "Filename": "inkscape-1.4.4_2026-05-05_dcaf3e7-x64.signed_xMx7DJV.msi",
+      "UpdatedUtc": "2026-08-23T18:39:33Z"
+    },
     "LibreOffice": {
       "Version": "25.8.7",
       "Url": "https://download.documentfoundation.org/libreoffice/stable/25.8.7/win/x86_64/LibreOffice_25.8.7_Win_x86-64.msi",
@@ -66,6 +72,12 @@
       "Url": "https://github.com/Stellarium/stellarium/releases/download/v26.2/stellarium-26.2-qt6-win64.exe",
       "Filename": "stellarium-26.2-qt6-win64.exe",
       "UpdatedUtc": "2026-08-10T18:13:48Z"
+    },
+    "VLC": {
+      "Version": "3.0.23",
+      "Url": "https://download.videolan.org/pub/videolan/vlc/3.0.23/win64/vlc-3.0.23-win64.exe",
+      "Filename": "vlc-3.0.23-win64.exe",
+      "UpdatedUtc": "2026-08-23T18:39:01Z"
     }
   }
 }
