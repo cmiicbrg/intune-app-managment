@@ -63,7 +63,8 @@ $script:AppConfigurations = @{
         WingetPackageId = "7zip.7zip"
         WingetInstallerType = "wix"  # selects the x64 MSI entry (the EXE entries are "exe")
         AllowedDownloadUrlPrefixes = @("https://github.com/ip7z/7zip/releases/download/")
-        FilenameTemplate = "7z{0}-x64.msi"
+        # No FilenameTemplate: winget-pinned apps store the installer under the manifest
+        # URL's real filename, which the version cache records
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
@@ -113,7 +114,6 @@ $script:AppConfigurations = @{
         WingetPackageId = "VideoLAN.VLC"
         WingetInstallerType = "nullsoft"  # selects the x64 EXE entry (MSI is "wix", portable is "zip")
         AllowedDownloadUrlPrefixes = @("https://download.videolan.org/pub/videolan/vlc/")
-        FilenameTemplate = "vlc-{0}-win64.exe"
         PackageType = "EXE"
         InstallCommandTemplate = '"{0}" /S'
         UninstallCommandTemplate = '"C:\Program Files\VideoLAN\VLC\uninstall.exe" /S'
@@ -186,7 +186,6 @@ $script:AppConfigurations = @{
         WingetPackageId = "Inkscape.Inkscape"
         WingetInstallerType = "wix"  # selects the x64 MSI entry (the EXE entry is "nullsoft")
         AllowedDownloadUrlPrefixes = @("https://media.inkscape.org/dl/resources/file/")
-        FilenameTemplate = "inkscape-{0}-x64.msi"  # Simplified name for storage
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn ALLUSERS=1'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code

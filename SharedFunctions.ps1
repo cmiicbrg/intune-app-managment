@@ -437,7 +437,7 @@ function ConvertFrom-WingetInstallerManifest {
     )
 
     # The only keys the resolver consumes; everything else is noise
-    $wantedKeys = @('PackageVersion', 'Architecture', 'InstallerType', 'NestedInstallerType', 'Scope', 'InstallerUrl', 'InstallerSha256')
+    $wantedKeys = @('PackageVersion', 'Architecture', 'InstallerType', 'Scope', 'InstallerUrl', 'InstallerSha256')
 
     $defaults = @{}
     $installers = @()
