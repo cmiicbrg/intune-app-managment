@@ -496,6 +496,15 @@ function Get-WingetInstallerInfo {
         [string[]]$AllowedUrlPrefixes
     )
 
+    # The allowlist is not optional: without it the manifest alone would decide where
+    # installers come from. Fail closed - before spending any network calls - rather than
+    # letting a caller accidentally skip the check.
+    $validPrefixes = @($AllowedUrlPrefixes | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($validPrefixes.Count -eq 0) {
+        Write-Host "Winget lookup REFUSED: no AllowedUrlPrefixes provided for '$PackageId' - the URL allowlist is mandatory" -ForegroundColor Red
+        return $null
+    }
+
     $idPath = ($PackageId -split '\.') -join '/'
     $letter = $PackageId.Substring(0, 1).ToLowerInvariant()
     $manifestRoot = "manifests/$letter/$idPath"
@@ -571,17 +580,14 @@ function Get-WingetInstallerInfo {
     }
     $canonicalUrl = $parsedUri.AbsoluteUri
 
-    if ($AllowedUrlPrefixes) {
-        $allowed = $false
-        foreach ($prefix in $AllowedUrlPrefixes) {
-            if ([string]::IsNullOrWhiteSpace($prefix)) { continue }  # never let a blank entry match everything
-            if ($canonicalUrl.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
-        }
-        if (-not $allowed) {
-            Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is outside the allowed prefixes" -ForegroundColor Red
-            Write-Host "  URL (canonical): $canonicalUrl" -ForegroundColor Red
-            return $null
-        }
+    $allowed = $false
+    foreach ($prefix in $validPrefixes) {
+        if ($canonicalUrl.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
+    }
+    if (-not $allowed) {
+        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is outside the allowed prefixes" -ForegroundColor Red
+        Write-Host "  URL (canonical): $canonicalUrl" -ForegroundColor Red
+        return $null
     }
 
     $filename = [System.Uri]::UnescapeDataString($parsedUri.Segments[-1])

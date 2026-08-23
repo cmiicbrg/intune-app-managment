@@ -201,25 +201,32 @@ Describe 'Get-WingetInstallerInfo' {
     }
 
     It 'picks the highest version by [version] sort (not string sort) and skips Nightly' {
-        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix'
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/')
         $info.Version | Should -Be '3.0.10' -Because 'a string sort would rank 3.0.9 above 3.0.10'
         Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*/3.0.10/Fixture.App.installer.yaml' } -Times 1
     }
 
     It 'returns the URL, hash and decoded filename of the uniquely matching installer' {
-        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix'
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/')
         $info.Url | Should -Be 'https://vendor.example/files/fixture%203.0.10-x64.msi'
         $info.Sha256 | Should -Be ('A' * 64)
         $info.Filename | Should -Be 'fixture 3.0.10-x64.msi'
     }
 
+    It 'fails closed without any network call when no allowlist is provided' {
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' | Should -BeNullOrEmpty
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('', '  ') |
+            Should -BeNullOrEmpty -Because 'blank-only entries are no allowlist at all'
+        Should -Invoke Invoke-RestMethod -Times 0
+    }
+
     It 'fails closed when the selector matches more than one installer' {
         # x64 without an InstallerType matches both the wix and the nullsoft entry
-        Get-WingetInstallerInfo -PackageId 'Fixture.App' | Should -BeNullOrEmpty
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
     }
 
     It 'fails closed when the selector matches nothing' {
-        Get-WingetInstallerInfo -PackageId 'Fixture.App' -Architecture 'arm64' | Should -BeNullOrEmpty
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -Architecture 'arm64' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
     }
 
     It 'refuses an InstallerUrl outside the allowed prefixes' {
@@ -235,11 +242,11 @@ Describe 'Get-WingetInstallerInfo' {
 
     It 'returns $null when the version listing cannot be fetched' {
         Mock Invoke-RestMethod { throw 'API rate limit exceeded' }
-        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' | Should -BeNullOrEmpty
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
     }
 
     It 'builds the manifest path from a multi-segment package id' {
-        Get-WingetInstallerInfo -PackageId 'The.Document.Foundation' -InstallerType 'wix' | Out-Null
+        Get-WingetInstallerInfo -PackageId 'The.Document.Foundation' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/') | Out-Null
         Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*/manifests/t/The/Document/Foundation' } -Times 1
     }
 
@@ -286,7 +293,7 @@ Installers:
             if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
             return $mismatchYaml
         }
-        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' | Should -BeNullOrEmpty
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
     }
 }
 
