@@ -104,7 +104,7 @@ if (-not $plan -or $plan.Count -eq 0) {
     exit 1
 }
 $planAppNames = @($plan.Keys)
-Write-Host "Tenant policy: keep the newest $($tenantPolicy.KeepNewest) version(s) plus everything newer than $($tenantPolicy.KeepNewerThanWeeks) week(s); $($planAppNames.Count) app(s) in the deployment plan" -ForegroundColor Gray
+Write-Host "Tenant policy: keep the newest $($tenantPolicy.KeepNewest) version(s) plus every version that was still current within the last $($tenantPolicy.KeepNewerThanWeeks) week(s); $($planAppNames.Count) app(s) in the deployment plan" -ForegroundColor Gray
 
 $allFamilies = @(Get-AppFamilyCatalog)
 $families = $allFamilies

@@ -770,7 +770,7 @@ if ($ShowPlan) {
             Write-Host "Version retention after deploy: off (-NoRetention)" -ForegroundColor Gray
         }
         else {
-            Write-Host "Version retention after deploy: keep the newest $($planPolicy.KeepNewest) version(s) plus everything newer than $($planPolicy.KeepNewerThanWeeks) week(s), older ones are removed (per-app overrides apply)" -ForegroundColor Gray
+            Write-Host "Version retention after deploy: keep the newest $($planPolicy.KeepNewest) version(s) plus every version that was still current within the last $($planPolicy.KeepNewerThanWeeks) week(s); versions superseded longer ago are removed (per-app overrides apply)" -ForegroundColor Gray
         }
     }
 
@@ -791,7 +791,7 @@ if ($deploymentPlan -and -not $NoRetention) {
     $candidatePolicy = Get-TenantRetentionPolicy -TenantName $TenantName
     if ($candidatePolicy.OptIn) {
         $retentionPolicy = $candidatePolicy
-        Write-Host "Version retention after deploy: keep the newest $($retentionPolicy.KeepNewest) plus everything newer than $($retentionPolicy.KeepNewerThanWeeks) week(s) (per-app overrides apply)" -ForegroundColor Gray
+        Write-Host "Version retention after deploy: keep the newest $($retentionPolicy.KeepNewest) version(s) plus every version that was still current within the last $($retentionPolicy.KeepNewerThanWeeks) week(s) (per-app overrides apply)" -ForegroundColor Gray
     }
 }
 $retentionResults = [System.Collections.Generic.List[object]]::new()
