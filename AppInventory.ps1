@@ -306,6 +306,22 @@ function Test-SupersedenceHeadroom {
         [int]$Limit = $script:SupersedenceGraphNodeLimit
     )
 
+    # Fail closed: a record whose relationships could not be read looks like an isolated node,
+    # so an 11-node chain could pass as empty during a relationship outage and the upload would
+    # end in exactly the unlinked app this check exists to prevent.
+    $unreadable = @($Records | Where-Object { $_.RelationshipsUnavailable })
+    if ($unreadable.Count -gt 0) {
+        return [PSCustomObject]@{
+            Nodes         = $null
+            NodesAfter    = $null
+            Limit         = $Limit
+            CanAddVersion = $false
+            WillFill      = $false
+            Unknown       = $true
+            Reason        = "the relationships of $($unreadable.Count) existing version(s) could not be read, so the size of the supersedence graph is unknown"
+        }
+    }
+
     $sizes = Get-SupersedenceComponentSizes -Records $Records
     $nodes = if ($AppId -and $sizes.ContainsKey($AppId)) { [int]$sizes[$AppId] } else { 0 }
     return [PSCustomObject]@{
@@ -314,6 +330,8 @@ function Test-SupersedenceHeadroom {
         Limit         = $Limit
         CanAddVersion = ($nodes + 1) -le $Limit
         WillFill      = ($nodes + 1) -eq $Limit
+        Unknown       = $false
+        Reason        = $null
     }
 }
 

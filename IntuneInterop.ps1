@@ -362,7 +362,12 @@ function Get-InteropWin32AppById {
         [string]$AppId
     )
 
-    return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -OutputType PSObject -ErrorAction Stop
+    try {
+        return Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId" -OutputType PSObject -ErrorAction Stop
+    }
+    catch {
+        throw "Could not read app '$AppId': $(Get-InteropErrorMessage -ErrorRecord $_)"
+    }
 }
 
 function Publish-InteropWin32App {

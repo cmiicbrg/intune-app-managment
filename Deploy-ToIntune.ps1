@@ -420,6 +420,9 @@ function Publish-App {
         # leaving an unlinked version - stop before uploading anything.
         if ($null -ne $newestOlderApp) {
             $headroom = Test-SupersedenceHeadroom -Records $allExistingApps -AppId $newestOlderApp.Id
+            if ($headroom.Unknown) {
+                throw "Cannot verify that the new version can supersede $($newestOlderApp.displayName): $($headroom.Reason). Nothing was uploaded - retry the deployment."
+            }
             if (-not $headroom.CanAddVersion) {
                 throw "The supersedence graph of '$AppName' already has $($headroom.Nodes) node(s) - Intune's limit is $($headroom.Limit), so the new version could not supersede $($newestOlderApp.displayName). Run .\Remove-OldIntuneAppVersions.ps1 for this tenant (or loosen its retention policy) and deploy again."
             }

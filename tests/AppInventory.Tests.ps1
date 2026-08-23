@@ -229,6 +229,16 @@ Describe 'Get-AppInventoryAnalysis' {
         $fresh = Test-SupersedenceHeadroom -Records @($script:records) -AppId $null
         $fresh.Nodes | Should -Be 0
         $fresh.CanAddVersion | Should -BeTrue -Because 'a first version starts a chain of one'
+        $fresh.Unknown | Should -BeFalse
+    }
+
+    It 'fails closed when any relationship read of the family failed (the graph size is unknown)' {
+        # p-0 of the partial fixture has RelationshipsUnavailable: an 11-node chain could hide behind it
+        $blocked = Test-SupersedenceHeadroom -Records @($script:partial) -AppId 'p-3'
+        $blocked.Unknown | Should -BeTrue
+        $blocked.CanAddVersion | Should -BeFalse
+        $blocked.Nodes | Should -BeNullOrEmpty
+        $blocked.Reason | Should -Match 'relationships of 1 existing version\(s\) could not be read'
     }
 
     It 'sizes the supersedence graph and warns near the limit' {

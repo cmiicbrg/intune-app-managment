@@ -157,9 +157,13 @@ Describe 'Get-InteropWin32AppById' {
         Should -Invoke Invoke-MgGraphRequest -ParameterFilter { $Method -eq 'GET' -and $Uri -like '*/deviceAppManagement/mobileApps/app-1' } -Times 1 -Exactly
     }
 
-    It 'throws when the app does not exist' {
-        Mock Invoke-MgGraphRequest { throw 'NotFound' }
-        { Get-InteropWin32AppById -AppId 'nope' } | Should -Throw '*NotFound*'
+    It "throws with Graph's reason when the app does not exist" {
+        Mock Invoke-MgGraphRequest {
+            $record = [System.Management.Automation.ErrorRecord]::new([System.Exception]::new('Response status code does not indicate success: NotFound (Not Found).'), 'Graph', 'InvalidOperation', $null)
+            $record.ErrorDetails = [System.Management.Automation.ErrorDetails]::new('{"error":{"code":"ResourceNotFound","message":"Resource Not Found - MobileApp with id nope"}}')
+            throw $record
+        }
+        { Get-InteropWin32AppById -AppId 'nope' } | Should -Throw "*read app 'nope'*ResourceNotFound: Resource Not Found*"
     }
 }
 
