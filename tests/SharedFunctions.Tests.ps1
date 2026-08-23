@@ -220,6 +220,30 @@ Describe 'Get-WingetInstallerInfo' {
         Should -Invoke Invoke-RestMethod -Times 0
     }
 
+    It 'rejects a prefix without a trailing slash, which could cross an authority boundary' {
+        # "https://vendor.example" would StartsWith-match "https://vendor.example.evil.com/..."
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example') | Should -BeNullOrEmpty
+        Should -Invoke Invoke-RestMethod -Times 0
+    }
+
+    It 'never lets a lookalike domain match a properly slash-terminated prefix' {
+        $evilYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example.evil.com/files/payload.msi
+  InstallerSha256: $('F' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $evilYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty
+    }
+
     It 'fails closed when the selector matches more than one installer' {
         # x64 without an InstallerType matches both the wix and the nullsoft entry
         Get-WingetInstallerInfo -PackageId 'Fixture.App' -AllowedUrlPrefixes @('https://vendor.example/') | Should -BeNullOrEmpty

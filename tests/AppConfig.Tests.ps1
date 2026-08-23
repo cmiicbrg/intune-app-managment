@@ -201,6 +201,13 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
             } } | Should -BeNullOrEmpty
         }
 
+        It 'flags a prefix without a trailing slash, which could cross an authority boundary' {
+            @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
+                WingetPackageId = 'X.Y'
+                AllowedDownloadUrlPrefixes = @('https://vendor.example')
+            } })[0] | Should -Match "ending in '/'" -Because 'https://vendor.example would also match https://vendor.example.evil.com/'
+        }
+
         It 'flags whitespace-padded prefixes, which could never match a canonical URL' {
             @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
                 WingetPackageId = 'X.Y'

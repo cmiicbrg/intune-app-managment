@@ -498,10 +498,17 @@ function Get-WingetInstallerInfo {
 
     # The allowlist is not optional: without it the manifest alone would decide where
     # installers come from. Fail closed - before spending any network calls - rather than
-    # letting a caller accidentally skip the check.
-    $validPrefixes = @($AllowedUrlPrefixes | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    # letting a caller accidentally skip the check. A usable prefix must be an absolute
+    # https:// URL ending in '/', so a StartsWith match can never cross an authority
+    # boundary ("https://vendor.example" must not match "https://vendor.example.evil.com/").
+    $validPrefixes = @($AllowedUrlPrefixes | Where-Object {
+        if ([string]::IsNullOrWhiteSpace($_)) { return $false }
+        $prefixUri = $null
+        [System.Uri]::TryCreate($_, [System.UriKind]::Absolute, [ref]$prefixUri) -and
+            $prefixUri.Scheme -eq 'https' -and $_.EndsWith('/')
+    })
     if ($validPrefixes.Count -eq 0) {
-        Write-Host "Winget lookup REFUSED: no AllowedUrlPrefixes provided for '$PackageId' - the URL allowlist is mandatory" -ForegroundColor Red
+        Write-Host "Winget lookup REFUSED: no usable AllowedUrlPrefixes for '$PackageId' - the allowlist is mandatory and every prefix must be an https:// URL ending in '/'" -ForegroundColor Red
         return $null
     }
 
