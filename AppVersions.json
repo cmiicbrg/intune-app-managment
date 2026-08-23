@@ -14,16 +14,16 @@
       "UpdatedUtc": "2026-08-10T18:11:36Z"
     },
     "Chrome": {
-      "Version": "151.0.7922.138",
+      "Version": "151.0.7922.174",
       "Url": "https://dl.google.com/chrome/install/googlechromestandaloneenterprise64.msi",
       "Filename": "",
-      "UpdatedUtc": "2026-08-12T10:23:51Z"
+      "UpdatedUtc": "2026-08-22T21:27:01Z"
     },
     "Firefox": {
-      "Version": "153.0.4",
+      "Version": "154.0",
       "Url": "https://download.mozilla.org/?product=firefox-latest-ssl&os=win64&lang=de",
-      "Filename": "Firefox-Setup-153.0.4-de.exe",
-      "UpdatedUtc": "2026-08-11T14:32:57Z"
+      "Filename": "Firefox-Setup-154.0-de.exe",
+      "UpdatedUtc": "2026-08-22T21:27:08Z"
     },
     "GeoGebra": {
       "Version": "6.0.927.1",
