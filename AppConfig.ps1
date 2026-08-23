@@ -507,8 +507,20 @@ function Get-AppConfigPolicyViolation {
         if ($cfg.AllowUnsignedInstaller -and -not ($cfg.WingetPackageId -or $cfg.ExpectedSha256)) {
             $violations += "${name}: AllowUnsignedInstaller requires WingetPackageId or ExpectedSha256 - downloads must stay verifiable"
         }
-        if ($cfg.WingetPackageId -and -not $cfg.AllowedDownloadUrlPrefixes) {
-            $violations += "${name}: WingetPackageId requires AllowedDownloadUrlPrefixes to pin where installers may be fetched from"
+        if ($cfg.WingetPackageId) {
+            if (-not $cfg.AllowedDownloadUrlPrefixes) {
+                $violations += "${name}: WingetPackageId requires AllowedDownloadUrlPrefixes to pin where installers may be fetched from"
+            }
+            else {
+                foreach ($prefix in $cfg.AllowedDownloadUrlPrefixes) {
+                    # A blank prefix would match every URL; a non-HTTPS prefix could never
+                    # match a legitimate download but hints at a mis-pasted allowlist
+                    if ([string]::IsNullOrWhiteSpace($prefix) -or -not "$prefix".StartsWith('https://')) {
+                        $violations += "${name}: every AllowedDownloadUrlPrefixes entry must be a non-empty https:// prefix (found '$prefix')"
+                        break
+                    }
+                }
+            }
         }
     }
     return $violations

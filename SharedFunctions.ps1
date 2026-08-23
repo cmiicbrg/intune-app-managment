@@ -531,6 +531,16 @@ function Get-WingetInstallerInfo {
     }
 
     $manifest = ConvertFrom-WingetInstallerManifest -Yaml $yaml
+
+    # The manifest must describe the version whose directory it lives in - a disagreement
+    # means a raced listing or a manipulated manifest, and either way the bundle is not
+    # the "version + URL + hash" unit we claim to verify
+    $declaredVersion = $manifest.Defaults['PackageVersion']
+    if ($declaredVersion -and $declaredVersion -ne $latest.Name) {
+        Write-Host "Winget lookup FAILED: manifest in directory '$($latest.Name)' declares PackageVersion '$declaredVersion' for '$PackageId'" -ForegroundColor Red
+        return $null
+    }
+
     $candidates = @($manifest.Installers | Where-Object {
         $arch = if ($_.ContainsKey('Architecture')) { $_.Architecture } else { $manifest.Defaults['Architecture'] }
         $type = if ($_.ContainsKey('InstallerType')) { $_.InstallerType } else { $manifest.Defaults['InstallerType'] }
@@ -549,24 +559,37 @@ function Get-WingetInstallerInfo {
         return $null
     }
 
+    # Canonicalize before the allowlist check and use the canonical form from here on:
+    # System.Uri compacts dot segments (escaped or not), so a raw-string prefix match on
+    # "https://host/allowed/../attacker/..." would pass while the request actually goes
+    # elsewhere. The canonical AbsoluteUri is what the HTTP client will really fetch.
+    $parsedUri = $null
+    if (-not [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$parsedUri) -or $parsedUri.Scheme -ne 'https') {
+        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is not a valid HTTPS URL" -ForegroundColor Red
+        Write-Host "  URL: $url" -ForegroundColor Red
+        return $null
+    }
+    $canonicalUrl = $parsedUri.AbsoluteUri
+
     if ($AllowedUrlPrefixes) {
         $allowed = $false
         foreach ($prefix in $AllowedUrlPrefixes) {
-            if ($url.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
+            if ([string]::IsNullOrWhiteSpace($prefix)) { continue }  # never let a blank entry match everything
+            if ($canonicalUrl.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
         }
         if (-not $allowed) {
             Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is outside the allowed prefixes" -ForegroundColor Red
-            Write-Host "  URL: $url" -ForegroundColor Red
+            Write-Host "  URL (canonical): $canonicalUrl" -ForegroundColor Red
             return $null
         }
     }
 
-    $filename = [System.Uri]::UnescapeDataString(([System.Uri]$url).Segments[-1])
+    $filename = [System.Uri]::UnescapeDataString($parsedUri.Segments[-1])
     Write-Host "Winget manifest resolved: $PackageId $($latest.Name) (SHA-256 pinned)" -ForegroundColor Green
 
     return [PSCustomObject]@{
         Version  = $latest.Name
-        Url      = $url
+        Url      = $canonicalUrl
         Sha256   = $sha256
         Filename = $filename
     }
@@ -612,6 +635,12 @@ function Invoke-FileDownload {
         Write-Host "Error details: $($_.Exception.Message)" -ForegroundColor Red
         if ($_.Exception.Response) {
             Write-Host "HTTP Status: $($_.Exception.Response.StatusCode.value__) $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
+        }
+        # A failed transfer can leave a partial file at the target path; remove it so a
+        # later run cannot mistake it for a previously verified installer
+        if (Test-Path $OutputPath) {
+            Write-Host "Removing partial download: $(Split-Path $OutputPath -Leaf)" -ForegroundColor Red
+            Remove-Item -Path $OutputPath -Force -ErrorAction SilentlyContinue
         }
         return $false
     }

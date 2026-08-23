@@ -181,6 +181,18 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
                 Should -Match 'AllowedDownloadUrlPrefixes'
         }
 
+        It 'flags blank or non-HTTPS allowlist prefixes' {
+            @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
+                WingetPackageId = 'X.Y'
+                AllowedDownloadUrlPrefixes = @('https://vendor.example/', '')
+            } })[0] | Should -Match 'non-empty https://' -Because 'a blank prefix would match every URL'
+
+            @(Get-AppConfigPolicyViolation -Configurations @{ Bad = @{
+                WingetPackageId = 'X.Y'
+                AllowedDownloadUrlPrefixes = @('http://vendor.example/')
+            } })[0] | Should -Match 'non-empty https://'
+        }
+
         It 'accepts an unsigned installer that is winget-pinned with a URL allowlist' {
             Get-AppConfigPolicyViolation -Configurations @{ Ok = @{
                 AllowUnsignedInstaller = $true

@@ -242,6 +242,52 @@ Describe 'Get-WingetInstallerInfo' {
         Get-WingetInstallerInfo -PackageId 'The.Document.Foundation' -InstallerType 'wix' | Out-Null
         Should -Invoke Invoke-RestMethod -ParameterFilter { $Uri -like '*/manifests/t/The/Document/Foundation' } -Times 1
     }
+
+    It 'canonicalizes dot-segment URLs before the allowlist check' {
+        # Raw-string StartsWith would pass this URL, but the HTTP client fetches the
+        # canonical form, which points outside the allowed prefix
+        $dotSegmentYaml = @"
+PackageVersion: 3.0.10
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/../evil/payload.msi
+  InstallerSha256: $('D' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $dotSegmentYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/') | Should -BeNullOrEmpty
+    }
+
+    It 'returns the canonical URL so the fetch matches what was allowlisted' {
+        $info = Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('https://vendor.example/files/')
+        $info.Url | Should -Be ([System.Uri]$info.Url).AbsoluteUri
+    }
+
+    It 'never lets a blank allowlist entry match every URL' {
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' `
+            -AllowedUrlPrefixes @('', 'https://download.othervendor.example/') | Should -BeNullOrEmpty
+    }
+
+    It 'fails closed when the manifest declares a different PackageVersion than its directory' {
+        $mismatchYaml = @"
+PackageVersion: 9.9.9
+Installers:
+- Architecture: x64
+  InstallerType: wix
+  InstallerUrl: https://vendor.example/files/old.msi
+  InstallerSha256: $('E' * 64)
+"@
+        Mock Invoke-RestMethod {
+            if ($Uri -like 'https://api.github.com/*') { return $script:wingetListing }
+            return $mismatchYaml
+        }
+        Get-WingetInstallerInfo -PackageId 'Fixture.App' -InstallerType 'wix' | Should -BeNullOrEmpty
+    }
 }
 
 Describe 'Invoke-FileDownload' {
@@ -258,6 +304,16 @@ Describe 'Invoke-FileDownload' {
         Invoke-FileDownload -Url 'https://vendor.example/app.exe' -OutputPath $out -ExpectedSha256 ('A' * 64) |
             Should -BeFalse
         Test-Path $out | Should -BeFalse -Because 'an unverified download must not stay on disk for packaging'
+    }
+
+    It 'removes the partial file when the transfer itself fails' {
+        Mock Invoke-WebRequest {
+            Set-Content -Path $OutFile -Value 'half a payload' -NoNewline
+            throw 'connection reset'
+        }
+        $out = Join-Path $TestDrive 'partial.exe'
+        Invoke-FileDownload -Url 'https://vendor.example/app.exe' -OutputPath $out | Should -BeFalse
+        Test-Path $out | Should -BeFalse -Because 'a partial download must not be mistaken for a verified installer later'
     }
 
     It 'keeps the download and returns $true when the pinned SHA-256 matches' {

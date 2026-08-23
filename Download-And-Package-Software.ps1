@@ -59,6 +59,8 @@ function Get-LatestVersionInfo {
             }
             # Deliberately no FallbackUrl here: without a manifest hash there is nothing to
             # verify an unsigned installer against. Skip and pick it up on a later run.
+            # If this persists across runs, suspect winget manifest format drift - run the
+            # LocalOnly live test in tests/SharedFunctions.Tests.ps1 to diagnose.
             Write-Host "No verifiable winget manifest - skipping this run" -ForegroundColor Yellow
             return $null
         }
@@ -354,34 +356,61 @@ foreach ($appName in $allAppNames) {
         continue
     }
     
+    $installer = Join-Path $appFolder $versionInfo.Filename
+    $intunewinPath = $installer -replace '\.(exe|msi)$', '.intunewin'
+
+    # For hash-pinned apps, never let a leftover artifact short-circuit the run unverified:
+    # a stale or partial installer (e.g. left behind by an interrupted transfer, or downloaded
+    # before hash pinning existed) is removed together with its package, and an .intunewin
+    # without its installer is unverifiable and removed too. This must happen before the
+    # version-exists check below, which would otherwise skip based on the bad package alone.
+    if ($versionInfo.Sha256) {
+        if (Test-Path $installer) {
+            if (-not (Test-DownloadedFileIntegrity -FilePath $installer -ExpectedSha256 $versionInfo.Sha256)) {
+                Write-Host "  Existing installer failed hash verification - removing it and its package for re-download" -ForegroundColor Yellow
+                Remove-Item -Path $installer -Force -ErrorAction SilentlyContinue
+                Remove-Item -Path $intunewinPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        elseif (Test-Path $intunewinPath) {
+            Write-Host "  Package exists without its verified installer - removing unverifiable package" -ForegroundColor Yellow
+            Remove-Item -Path $intunewinPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     # Version checking. Apps whose filenames carry no dotted version (e.g. 7-Zip's
     # 7z2602-x64.msi) fall through here and are caught by the installer-exists check below.
     if (Test-VersionExists -AppFolder $appFolder -NewVersion $versionInfo.Version -Pattern $appConfig.IntuneWinPattern) {
         Write-Host "  Skipping - already up to date" -ForegroundColor Yellow
         continue
     }
-    
-    # Download and package
-    $installer = Join-Path $appFolder $versionInfo.Filename
-    
+
     # Check if installer file already exists
     if (Test-Path $installer) {
         Write-Host "  Installer file already exists: $installer" -ForegroundColor Yellow
-        Write-Host "  Checking if package exists..." -ForegroundColor Gray
-        
-        # Check if .intunewin also exists
-        $intunewinPath = $installer -replace '\.(exe|msi)$', '.intunewin'
-        if (Test-Path $intunewinPath) {
-            Write-Host "  Skipping - both installer and package already exist" -ForegroundColor Yellow
-            continue
-        }
-        else {
+
+        # A leftover file is never reused blindly: it must pass the same verification a
+        # fresh download would (pinned hash, or Authenticode + publisher). On failure it
+        # is removed and the run falls through to a normal verified download.
+        if (Test-DownloadedFileIntegrity -FilePath $installer `
+            -ExpectedSha256 ($versionInfo.Sha256 ?? $appConfig.ExpectedSha256) `
+            -EnforceSignatureCheck (-not $appConfig.AllowUnsignedInstaller) `
+            -ExpectedPublisher $appConfig.ExpectedPublisher) {
+
+            if (Test-Path $intunewinPath) {
+                Write-Host "  Skipping - both installer and package already exist" -ForegroundColor Yellow
+                continue
+            }
             Write-Host "  Package not found, creating from existing installer..." -ForegroundColor Cyan
             New-IntuneWinPackage -SourceFolder $appFolder -SetupFile (Split-Path $installer -Leaf) -OutputFolder $appFolder
             continue
         }
+
+        Write-Host "  Existing installer failed verification - removing for re-download" -ForegroundColor Yellow
+        Remove-Item -Path $installer -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $intunewinPath -Force -ErrorAction SilentlyContinue
     }
-    
+
     Write-Host "  Downloading version $($versionInfo.Version)..." -ForegroundColor Cyan
     if (Invoke-FileDownload -Url $versionInfo.Url -OutputPath $installer `
         -ExpectedSha256 ($versionInfo.Sha256 ?? $appConfig.ExpectedSha256) `
