@@ -800,13 +800,6 @@ $runStartedUtc = [datetime]::UtcNow
 
 # Connected from here on: the finally block disconnects on every exit path
 try {
-    # One read of the tenant for the families being deployed, classified by the naming
-    # convention: existing-version detection, the supersedence pre-flight and retention all work
-    # on these records instead of listing the tenant once per app.
-    Write-Host "Reading existing versions..." -ForegroundColor Cyan
-    $familyNames = @($appsToProcess | ForEach-Object { $_[0].AppConfigName })
-    $tenantRecords = @((Read-IntuneAppInventory -Families $script:appsToDeploy -OnlyFamilies $familyNames).Records)
-
     $deployedApps = @()
     $failedApps = @()
 
@@ -947,6 +940,13 @@ try {
 
         Write-Host "  Assignments: $(Format-AssignmentSpec -Spec $assignmentSpec)" -ForegroundColor Gray
 
+        # The family's existing versions, read fresh right before publishing (not once per run): a
+        # dependency auto-deployed by an earlier app of this run - VCRedist created while deploying
+        # KeePassXC - must count as existing when its own turn comes. Only this family's apps are
+        # fetched, classified by the naming convention.
+        Write-Host "  Reading existing versions of $($app.AppConfigName)..." -ForegroundColor Gray
+        $familyRecords = @((Read-IntuneAppInventory -Families $script:appsToDeploy -OnlyFamilies @($app.AppConfigName)).Records)
+
         # Deploy the app with version info for supersedence
         $result = Publish-App `
             -AppName $app.Name `
@@ -959,7 +959,7 @@ try {
             -AssignAllUsers $assignmentSpec.AllUsers `
             -AssignAllDevices $assignmentSpec.AllDevices `
             -AssignGroups $assignmentSpec.Groups `
-            -ExistingApps @($tenantRecords | Where-Object { $_.Family -eq $app.AppConfigName })
+            -ExistingApps $familyRecords
 
         if ($result) {
             $deployedApps += $app.Name
@@ -973,10 +973,11 @@ try {
         # Remove-OldIntuneAppVersions.ps1, unattended. The family is re-read so the version just
         # created (or reconciled) and its supersedence are part of the picture; the version that was
         # rank 3 before the deploy is rank 4 now and goes if it is older than the policy's window.
+        # The tenant list lags a creation by a few seconds, so the deployed app's id is ensured.
         if ($retentionPolicy) {
             Write-Host "`n  Version retention for $($app.AppConfigName)..." -ForegroundColor Cyan
             try {
-                $familyRecords = @((Read-IntuneAppInventory -Families $script:appsToDeploy -OnlyFamilies @($app.AppConfigName)).Records)
+                $familyRecords = @((Read-IntuneAppInventory -Families $script:appsToDeploy -OnlyFamilies @($app.AppConfigName) -EnsureAppIds @("$($result.id)")).Records)
                 $familyEntry = @($script:appsToDeploy | Where-Object { $_.AppConfigName -eq $app.AppConfigName })
                 $familyAnalysis = Get-AppInventoryAnalysis -Records $familyRecords -Families $familyEntry `
                     -PolicyResolver { param($appConfigName) Get-TenantRetentionPolicy -TenantName $TenantName -AppName $appConfigName } `

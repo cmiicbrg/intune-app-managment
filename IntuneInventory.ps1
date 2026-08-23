@@ -20,11 +20,13 @@ function Read-IntuneAppInventory {
     -IncludeInstallSummary, the install counts from one tenant-wide report. Group display names
     are resolved with -ResolveGroupNames when Microsoft.Graph.Groups is available.
 
-    With -OnlyFamilies, the per-app detail reads are limited to the apps of those families
-    (classified by display name right after the list call, so nothing else is fetched);
-    -IncludeUnmanaged additionally reads the apps that belong to no family.
+    With -OnlyFamilies, only the apps of those families are fetched and read in detail
+    (classified by display name on the list items, so nothing else is even fetched);
+    -IncludeUnmanaged additionally reads the apps that belong to no family. -EnsureAppIds adds
+    apps the tenant list does not carry yet (see below).
 
-    Returns @{ Records = @(...); AppCount (in tenant); SelectedCount; IncludesInstallSummary }.
+    Returns @{ Records = @(...); AppCount; SelectedCount; IncludesInstallSummary } - both counts
+    are the apps read (the whole tenant, or the selection).
     #>
     [CmdletBinding()]
     param(
@@ -39,22 +41,48 @@ function Read-IntuneAppInventory {
         # With -OnlyFamilies: also read the apps that belong to no family (near-miss reporting)
         [switch]$IncludeUnmanaged,
 
+        # App ids that must be part of the result even if the tenant list does not carry them
+        # yet (the mobileApps list lags a creation by a few seconds; the per-ID GET does not).
+        # They are fetched directly and classified like everything else.
+        [string[]]$EnsureAppIds,
+
         [switch]$IncludeInstallSummary,
 
         [switch]$ResolveGroupNames
     )
 
-    $apps = @(Get-InteropWin32App)
-    $appCount = $apps.Count
-    Write-Host "  $appCount Win32 app(s) in tenant" -ForegroundColor Gray
-
     if ($OnlyFamilies) {
-        $apps = @($apps | Where-Object {
-            $family = Resolve-AppFamily -DisplayName "$($_.displayName)" -Families $Families
+        # Classify on the list items' display names so only the selected apps are fetched in full.
+        # Plain script block, not a closure: Get-InteropWin32App invokes it from a scope below this
+        # one, so $Families/$OnlyFamilies/$IncludeUnmanaged resolve dynamically - a closure would
+        # run in its own module scope and not see the dot-sourced Resolve-AppFamily.
+        $familyFilter = {
+            param($displayName)
+            $family = Resolve-AppFamily -DisplayName "$displayName" -Families $Families
             if ($family) { $OnlyFamilies -contains $family.AppConfigName } else { [bool]$IncludeUnmanaged }
-        })
-        Write-Host "  $($apps.Count) selected for $($OnlyFamilies -join ', ')$(if ($IncludeUnmanaged) { ' (plus unmanaged apps)' }) - details are read for these only" -ForegroundColor Gray
+        }
+        $apps = @(Get-InteropWin32App -DisplayNameFilter $familyFilter)
+        Write-Host "  $($apps.Count) Win32 app(s) of $($OnlyFamilies -join ', ')$(if ($IncludeUnmanaged) { ' (plus unmanaged apps)' }) in tenant" -ForegroundColor Gray
     }
+    else {
+        $apps = @(Get-InteropWin32App)
+        Write-Host "  $($apps.Count) Win32 app(s) in tenant" -ForegroundColor Gray
+    }
+
+    foreach ($ensureId in @($EnsureAppIds | Where-Object { $_ })) {
+        if (@($apps | Where-Object { "$($_.id)" -eq $ensureId }).Count -gt 0) { continue }
+        try {
+            $late = Get-InteropWin32AppById -AppId $ensureId
+            if ($null -ne $late) {
+                $apps += $late
+                Write-Host "  + $($late.displayName) (not in the tenant list yet - fetched directly)" -ForegroundColor Gray
+            }
+        }
+        catch {
+            Write-Host "  Warning: app '$ensureId' could not be read directly: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+    $appCount = $apps.Count
 
     # Group name resolution is best-effort: only when the Groups module is already available
     $groupNames = @{}

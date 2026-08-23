@@ -71,19 +71,42 @@ Describe 'Read-IntuneAppInventory' {
         ($result.Records | Where-Object Id -eq 'a1').InstallSummary | Should -BeNullOrEmpty
     }
 
-    It 'reads details only for the selected families, optionally plus the unmanaged apps' {
-        Mock Get-InteropWin32App { @((New-GraphApp -Id 'a1' -Name 'Google Chrome 150'), (New-GraphApp -Id 'a2' -Name 'Some Other App'), (New-GraphApp -Id 'a3' -Name 'Mozilla Firefox 153 (German)')) }
+    It 'fetches and reads only the selected families, optionally plus the unmanaged apps' {
+        # The list filter is applied by Get-InteropWin32App before the per-ID fetches; the mock
+        # honors it the same way
+        Mock Get-InteropWin32App {
+            param($DisplayName, $DisplayNameFilter)
+            $all = @((New-GraphApp -Id 'a1' -Name 'Google Chrome 150'), (New-GraphApp -Id 'a2' -Name 'Some Other App'), (New-GraphApp -Id 'a3' -Name 'Mozilla Firefox 153 (German)'))
+            if ($DisplayNameFilter) { $all = @($all | Where-Object { & $DisplayNameFilter $_.displayName }) }
+            $all
+        }
 
         $chromeOnly = Read-IntuneAppInventory -Families $script:families -OnlyFamilies @('Chrome') 6> $null
-        $chromeOnly.AppCount | Should -Be 3
+        $chromeOnly.AppCount | Should -Be 1
         $chromeOnly.SelectedCount | Should -Be 1
         $chromeOnly.Records.Id | Should -Be @('a1')
+        Should -Invoke Get-InteropWin32App -ParameterFilter { $null -ne $DisplayNameFilter } -Times 1 -Exactly -Because 'the family is selected on the list items, before any per-ID fetch'
         Should -Invoke Get-InteropAppAssignmentDetail -Times 1 -Exactly
         Should -Invoke Get-InteropAppRelationship -Times 1 -Exactly
 
         $withUnmanaged = Read-IntuneAppInventory -Families $script:families -OnlyFamilies @('Chrome') -IncludeUnmanaged 6> $null
         ($withUnmanaged.Records.Id | Sort-Object) | Should -Be @('a1', 'a2')
         $withUnmanaged.Records.Id | Should -Not -Contain 'a3' -Because 'Firefox is a managed family outside the selection'
+    }
+
+    It 'fetches an ensured app directly when the tenant list does not carry it yet' {
+        Mock Get-InteropWin32AppById { param($AppId) New-GraphApp -Id $AppId -Name 'Google Chrome 151' }
+        $result = Read-IntuneAppInventory -Families $script:families -EnsureAppIds @('a1', 'a-new') 6> $null
+        ($result.Records.Id | Sort-Object) | Should -Be @('a-new', 'a1', 'a2')
+        ($result.Records | Where-Object Id -eq 'a-new').Family | Should -Be 'Chrome'
+        Should -Invoke Get-InteropWin32AppById -ParameterFilter { $AppId -eq 'a-new' } -Times 1 -Exactly
+        Should -Invoke Get-InteropWin32AppById -ParameterFilter { $AppId -eq 'a1' } -Times 0 -Exactly -Because 'a1 is already in the list'
+    }
+
+    It 'warns but continues when an ensured app cannot be read directly' {
+        Mock Get-InteropWin32AppById { throw 'NotFound' }
+        $result = Read-IntuneAppInventory -Families $script:families -EnsureAppIds @('gone') 6> $null
+        $result.Records.Count | Should -Be 2
     }
 
     It 'does not request the report without -IncludeInstallSummary' {
