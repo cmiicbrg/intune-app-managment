@@ -103,3 +103,6 @@ packages/Schuelerkopierer/*
 tmp/
 sccm-management/
 user-device-management/
+
+.mcp.json
+.env

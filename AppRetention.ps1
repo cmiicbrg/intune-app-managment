@@ -27,6 +27,194 @@
 # SupersededWeeks the weeks since then - the number the window rule is about.
 # Rank counts distinct version numbers (duplicates share a rank), so a duplicate never consumes a
 # KeepNewest slot. Unparseable versions have no rank.
+# Weeks between a creation time and $Now, $null when the creation time is unknown.
+function Get-AppRetentionAgeWeeks {
+    param($CreatedDateTime, [datetime]$Now)
+
+    if ($null -eq $CreatedDateTime) { return $null }
+    return [math]::Round(($Now - [datetime]$CreatedDateTime).TotalDays / 7, 1)
+}
+
+# Distinct-version ranks (1 = newest) and how many apps share each version string, both keyed by
+# version string. Duplicates share a rank, so a duplicate never consumes a KeepNewest slot.
+function Get-AppRetentionVersionRank {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [array]$Ordered
+    )
+
+    $rankByVersion = @{}
+    $countByVersion = @{}
+    $rank = 0
+    foreach ($app in $Ordered) {
+        $key = $app.Version.ToString()
+        if (-not $rankByVersion.ContainsKey($key)) {
+            $rank++
+            $rankByVersion[$key] = $rank
+            $countByVersion[$key] = 0
+        }
+        $countByVersion[$key]++
+    }
+
+    return @{ Rank = $rankByVersion; Count = $countByVersion }
+}
+
+# When did this version stop being the newest? At the creation of the first newer version. A
+# device that last checked in before that moment may still run this version, so it stays as long
+# as that moment lies inside the window. Returns @{ At; Weeks; Reason }, where Reason is the Keep
+# reason that moment earns ($null once the version has aged out of the window). The newest version
+# is never superseded; a newer version without a creation date makes the moment unknowable, which
+# is itself a Keep reason.
+function Get-AppRetentionSupersession {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [array]$Ordered,
+
+        [Parameter(Mandatory = $true)]
+        $App,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Rank,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Policy,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Now
+    )
+
+    if ($Rank -le 1) {
+        return @{ At = $null; Weeks = $null; Reason = $null }
+    }
+
+    $newerDates = @($Ordered | Where-Object { $_.Version -gt $App.Version } | ForEach-Object { $_.CreatedDateTime })
+    if (@($newerDates | Where-Object { $null -eq $_ }).Count -gt 0) {
+        return @{ At = $null; Weeks = $null; Reason = 'superseded at an unknown time (a newer version has no creation date)' }
+    }
+
+    $at = ($newerDates | ForEach-Object { [datetime]$_ } | Measure-Object -Minimum).Minimum
+    $weeks = [math]::Round(($Now - $at).TotalDays / 7, 1)
+    $windowStart = $Now.AddDays(-7 * [int]$Policy.KeepNewerThanWeeks)
+    $reason = $null
+    if ($at -ge $windowStart) {
+        $reason = "current until $weeks weeks ago (within $($Policy.KeepNewerThanWeeks) weeks)"
+    }
+
+    return @{ At = $at; Weeks = $weeks; Reason = $reason }
+}
+
+# The plan entry for one version with a parseable version number: every Keep reason it earns, and
+# Delete only when it earned none.
+function New-AppRetentionEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        $App,
+
+        [Parameter(Mandatory = $true)]
+        [int]$Rank,
+
+        # How many apps share this version number - more than one means Review
+        [Parameter(Mandatory = $true)]
+        [int]$DuplicateCount,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [array]$Ordered,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$Policy,
+
+        [string[]]$ProtectedAppIds = @(),
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Now
+    )
+
+    $keepNewest = [int]$Policy.KeepNewest
+    $reasons = [System.Collections.Generic.List[string]]::new()
+
+    if ($Rank -eq 1) {
+        $reasons.Add('newest version')
+    }
+    elseif ($Rank -le $keepNewest) {
+        $reasons.Add("within newest $keepNewest")
+    }
+
+    if ($null -eq $App.CreatedDateTime) {
+        $reasons.Add('unknown creation date')
+    }
+
+    $superseded = Get-AppRetentionSupersession -Ordered $Ordered -App $App -Rank $Rank -Policy $Policy -Now $Now
+    if ($superseded.Reason) {
+        $reasons.Add($superseded.Reason)
+    }
+
+    if ($ProtectedAppIds -contains $App.Id) {
+        $reasons.Add('protected (dependency target)')
+    }
+
+    $action = if ($reasons.Count -gt 0) { 'Keep' } else { 'Delete' }
+    if ($action -eq 'Delete') {
+        $reasons.Add("superseded $($superseded.Weeks) weeks ago (more than $($Policy.KeepNewerThanWeeks) weeks) and outside newest $keepNewest")
+    }
+
+    if ($DuplicateCount -gt 1) {
+        $reasons.Add('duplicate version - review manually')
+        $action = 'Review'
+    }
+
+    return [PSCustomObject]@{
+        Id              = $App.Id
+        DisplayName     = $App.DisplayName
+        Version         = $App.Version
+        CreatedDateTime = $App.CreatedDateTime
+        Rank            = $Rank
+        AgeWeeks        = Get-AppRetentionAgeWeeks -CreatedDateTime $App.CreatedDateTime -Now $Now
+        SupersededAt    = $superseded.At
+        SupersededWeeks = $superseded.Weeks
+        Action          = $action
+        Reasons         = @($reasons)
+    }
+}
+
+# The plan entry for a version whose version number cannot be parsed: always kept, never ranked.
+function New-AppRetentionUnparseableEntry {
+    param(
+        [Parameter(Mandatory = $true)]
+        $App,
+
+        [string[]]$ProtectedAppIds = @(),
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Now
+    )
+
+    $reasons = [System.Collections.Generic.List[string]]::new()
+    $reasons.Add('unparseable version - never deleted automatically')
+
+    if ($null -eq $App.CreatedDateTime) {
+        $reasons.Add('unknown creation date')
+    }
+    if ($ProtectedAppIds -contains $App.Id) {
+        $reasons.Add('protected (dependency target)')
+    }
+
+    return [PSCustomObject]@{
+        Id              = $App.Id
+        DisplayName     = $App.DisplayName
+        Version         = $null
+        CreatedDateTime = $App.CreatedDateTime
+        Rank            = $null
+        AgeWeeks        = Get-AppRetentionAgeWeeks -CreatedDateTime $App.CreatedDateTime -Now $Now
+        SupersededAt    = $null
+        SupersededWeeks = $null
+        Action          = 'Keep'
+        Reasons         = @($reasons)
+    }
+}
+
 function Get-AppRetentionPlan {
     param(
         # Objects with Id, DisplayName, Version ([version] or $null), CreatedDateTime ([datetime] or $null)
@@ -49,127 +237,25 @@ function Get-AppRetentionPlan {
         return @()
     }
 
-    $keepNewest = [int]$Policy.KeepNewest
-    $windowStart = $Now.AddDays(-7 * [int]$Policy.KeepNewerThanWeeks)
-
     $parseable = @($Apps | Where-Object { $null -ne $_.Version })
     $unparseable = @($Apps | Where-Object { $null -eq $_.Version })
 
     # Newest first; identical versions ordered newest-created first
     $ordered = @($parseable | Sort-Object -Property @{ Expression = 'Version'; Descending = $true }, @{ Expression = 'CreatedDateTime'; Descending = $true })
-
-    # Distinct-version ranks and duplicate detection
-    $rankByVersion = @{}
-    $countByVersion = @{}
-    $rank = 0
-    foreach ($app in $ordered) {
-        $key = $app.Version.ToString()
-        if (-not $rankByVersion.ContainsKey($key)) {
-            $rank++
-            $rankByVersion[$key] = $rank
-            $countByVersion[$key] = 0
-        }
-        $countByVersion[$key]++
-    }
+    $ranks = Get-AppRetentionVersionRank -Ordered $ordered
 
     $results = [System.Collections.Generic.List[object]]::new()
 
     foreach ($app in $ordered) {
         $key = $app.Version.ToString()
-        $appRank = $rankByVersion[$key]
-        $reasons = [System.Collections.Generic.List[string]]::new()
-        $ageWeeks = $null
-
-        if ($appRank -eq 1) {
-            $reasons.Add('newest version')
-        }
-        elseif ($appRank -le $keepNewest) {
-            $reasons.Add("within newest $keepNewest")
-        }
-
-        if ($null -eq $app.CreatedDateTime) {
-            $reasons.Add('unknown creation date')
-        }
-        else {
-            $ageWeeks = [math]::Round(($Now - [datetime]$app.CreatedDateTime).TotalDays / 7, 1)
-        }
-
-        # When did this version stop being the newest? At the creation of the first newer
-        # version. A device that last checked in before that moment may still run this version,
-        # so it stays as long as that moment lies inside the window.
-        $supersededAt = $null
-        $supersededWeeks = $null
-        if ($appRank -gt 1) {
-            $newerDates = @($ordered | Where-Object { $_.Version -gt $app.Version } | ForEach-Object { $_.CreatedDateTime })
-            if (@($newerDates | Where-Object { $null -eq $_ }).Count -gt 0) {
-                $reasons.Add('superseded at an unknown time (a newer version has no creation date)')
-            }
-            else {
-                $supersededAt = ($newerDates | ForEach-Object { [datetime]$_ } | Measure-Object -Minimum).Minimum
-                $supersededWeeks = [math]::Round(($Now - $supersededAt).TotalDays / 7, 1)
-                if ($supersededAt -ge $windowStart) {
-                    $reasons.Add("current until $supersededWeeks weeks ago (within $($Policy.KeepNewerThanWeeks) weeks)")
-                }
-            }
-        }
-
-        if ($ProtectedAppIds -contains $app.Id) {
-            $reasons.Add('protected (dependency target)')
-        }
-
-        $action = if ($reasons.Count -gt 0) { 'Keep' } else { 'Delete' }
-        if ($action -eq 'Delete') {
-            $reasons.Add("superseded $supersededWeeks weeks ago (more than $($Policy.KeepNewerThanWeeks) weeks) and outside newest $keepNewest")
-        }
-
-        if ($countByVersion[$key] -gt 1) {
-            $reasons.Add('duplicate version - review manually')
-            $action = 'Review'
-        }
-
-        $results.Add([PSCustomObject]@{
-            Id              = $app.Id
-            DisplayName     = $app.DisplayName
-            Version         = $app.Version
-            CreatedDateTime = $app.CreatedDateTime
-            Rank            = $appRank
-            AgeWeeks        = $ageWeeks
-            SupersededAt    = $supersededAt
-            SupersededWeeks = $supersededWeeks
-            Action          = $action
-            Reasons         = @($reasons)
-        })
+        $results.Add((New-AppRetentionEntry -App $app -Rank $ranks.Rank[$key] -DuplicateCount $ranks.Count[$key] -Ordered $ordered -Policy $Policy -ProtectedAppIds $ProtectedAppIds -Now $Now))
     }
 
     # Unparseable versions last, newest-created first (unknown dates at the very end), so the
     # output order is deterministic regardless of input order
     $orderedUnparseable = @($unparseable | Sort-Object -Property @{ Expression = { $null -eq $_.CreatedDateTime } }, @{ Expression = 'CreatedDateTime'; Descending = $true }, 'DisplayName')
     foreach ($app in $orderedUnparseable) {
-        $reasons = [System.Collections.Generic.List[string]]::new()
-        $reasons.Add('unparseable version - never deleted automatically')
-        $ageWeeks = $null
-        if ($null -eq $app.CreatedDateTime) {
-            $reasons.Add('unknown creation date')
-        }
-        else {
-            $ageWeeks = [math]::Round(($Now - [datetime]$app.CreatedDateTime).TotalDays / 7, 1)
-        }
-        if ($ProtectedAppIds -contains $app.Id) {
-            $reasons.Add('protected (dependency target)')
-        }
-
-        $results.Add([PSCustomObject]@{
-            Id              = $app.Id
-            DisplayName     = $app.DisplayName
-            Version         = $null
-            CreatedDateTime = $app.CreatedDateTime
-            Rank            = $null
-            AgeWeeks        = $ageWeeks
-            SupersededAt    = $null
-            SupersededWeeks = $null
-            Action          = 'Keep'
-            Reasons         = @($reasons)
-        })
+        $results.Add((New-AppRetentionUnparseableEntry -App $app -ProtectedAppIds $ProtectedAppIds -Now $Now))
     }
 
     return @($results)

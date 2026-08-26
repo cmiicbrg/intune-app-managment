@@ -358,58 +358,31 @@ function Test-IntuneCredentials {
 
 #region Public Functions
 
-function Add-IntuneTenant {
-    <#
-    .SYNOPSIS
-    Adds a new tenant configuration with encrypted client secret
-    
-    .DESCRIPTION
-    Guides you through Azure AD app registration setup, then stores the tenant
-    configuration with an AES-256-GCM encrypted client secret.
-    
-    .PARAMETER Name
-    A friendly name for the tenant (e.g., "School", "District")
-    
-    .PARAMETER TenantId
-    The Azure AD Directory (tenant) ID
-    
-    .PARAMETER ClientId
-    The Application (client) ID from the app registration
-    
-    .EXAMPLE
-    Add-IntuneTenant -Name "School"
-    
-    .EXAMPLE
-    Add-IntuneTenant -Name "District" -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -ClientId "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
-    #>
-    [CmdletBinding()]
+# The plaintext behind a SecureString. The unmanaged BSTR is always zeroed and freed, whatever
+# happens in between - the only reason this dance exists.
+function ConvertFrom-SecureStringPlain {
     param(
         [Parameter(Mandatory = $true)]
-        [ValidateNotNullOrEmpty()]
-        [string]$Name,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$TenantId,
-        
-        [Parameter(Mandatory = $false)]
-        [string]$ClientId
+        [System.Security.SecureString]$SecureString
     )
-    
-    Write-Host ""
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "  Add Intune Tenant: $Name" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host ""
-    
-    # Check if tenant already exists
-    $config = Read-TenantConfig
-    if ($config.tenants.PSObject.Properties.Name -contains $Name) {
-        Write-Host "A tenant with name '$Name' already exists." -ForegroundColor Yellow
-        Write-Host "To update it, first remove it with: Remove-IntuneTenant -Name '$Name'" -ForegroundColor Yellow
-        return
+
+    $ptr = [System.IntPtr]::Zero
+    try {
+        $ptr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureString)
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
     }
-    
-    # Display setup instructions if TenantId not provided
+    finally {
+        if ($ptr -ne [System.IntPtr]::Zero) {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
+        }
+    }
+}
+
+# A validated Directory (tenant) ID: the one passed in, or one read from the console after the
+# setup instructions. $null when it is missing or not a GUID (the caller aborts).
+function Read-IntuneTenantIdValue {
+    param([string]$TenantId)
+
     if (-not $TenantId) {
         Write-Host "STEP 1: Find your Tenant ID" -ForegroundColor Green
         Write-Host "-------------------------------------------------------------------" -ForegroundColor Gray
@@ -417,21 +390,27 @@ function Add-IntuneTenant {
         Write-Host "2. Navigate to: Azure Active Directory (or Microsoft Entra ID)"
         Write-Host "3. On the Overview page, copy the 'Tenant ID' (Directory ID)"
         Write-Host ""
-        
+
         $TenantId = Read-Host "Enter Tenant ID (GUID)"
         if ([string]::IsNullOrWhiteSpace($TenantId)) {
             Write-Host "Tenant ID is required. Aborting." -ForegroundColor Red
-            return
+            return $null
         }
     }
-    
-    # Validate TenantId format
+
     if ($TenantId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
         Write-Host "Invalid Tenant ID format. Expected a GUID." -ForegroundColor Red
-        return
+        return $null
     }
-    
-    # Display app registration instructions if ClientId not provided
+
+    return $TenantId
+}
+
+# A validated Application (client) ID: the one passed in, or one read from the console after the
+# app-registration instructions. $null when it is missing or not a GUID (the caller aborts).
+function Read-IntuneClientIdValue {
+    param([string]$ClientId)
+
     if (-not $ClientId) {
         Write-Host ""
         Write-Host "STEP 2: Create an App Registration" -ForegroundColor Green
@@ -445,20 +424,169 @@ function Add-IntuneTenant {
         Write-Host "4. Click 'Register'"
         Write-Host "5. Copy the 'Application (client) ID' from the Overview page"
         Write-Host ""
-        
+
         $ClientId = Read-Host "Enter Application (Client) ID (GUID)"
         if ([string]::IsNullOrWhiteSpace($ClientId)) {
             Write-Host "Client ID is required. Aborting." -ForegroundColor Red
-            return
+            return $null
         }
     }
-    
-    # Validate ClientId format
+
     if ($ClientId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
         Write-Host "Invalid Client ID format. Expected a GUID." -ForegroundColor Red
+        return $null
+    }
+
+    return $ClientId
+}
+
+# $true when the password decrypts an already stored tenant - the check that keeps a config file
+# from ending up with entries under two different passwords. A config without tenants passes.
+function Test-TenantMasterKey {
+    param(
+        [Parameter(Mandatory = $true)] $Config,
+        [Parameter(Mandatory = $true)] [string]$MasterKey
+    )
+
+    $existingTenantNames = @($Config.tenants.PSObject.Properties.Name)
+    if ($existingTenantNames.Count -eq 0) {
+        return $true
+    }
+
+    $testTenantName = $existingTenantNames | Select-Object -First 1
+    $testTenant = $Config.tenants.$testTenantName
+    $testDecrypt = Unprotect-Secret -EncryptedBase64 $testTenant.encryptedSecret -Password $MasterKey
+
+    if ($null -eq $testDecrypt) {
+        Write-Host "Incorrect encryption password (could not decrypt existing tenant '$testTenantName')." -ForegroundColor Red
+        Write-Host "Aborting to prevent mixing passwords in the config file." -ForegroundColor Yellow
+        return $false
+    }
+
+    Write-Host "Password verified against existing config." -ForegroundColor Gray
+    return $true
+}
+
+# The encryption password to store the new tenant under: the one cached for this session, or one
+# read from the console - confirmed for a new config file, validated against an existing entry
+# otherwise. Caches it for the session. $null when it is missing, mistyped or wrong.
+function Get-TenantMasterKeyForWrite {
+    param([Parameter(Mandatory = $true)] $Config)
+
+    $masterKey = Get-CachedMasterKey
+    if ($masterKey) {
+        Write-Host "Using cached encryption password from this session." -ForegroundColor Gray
+        return $masterKey
+    }
+
+    Write-Host "STEP 5: Set Encryption Password" -ForegroundColor Green
+    Write-Host "-------------------------------------------------------------------" -ForegroundColor Gray
+    Write-Host "This password encrypts your client secrets in the config file."
+    Write-Host "You need to enter it once per PowerShell session."
+    Write-Host ""
+
+    $masterKey = ConvertFrom-SecureStringPlain -SecureString (Read-Host "Enter encryption password" -AsSecureString)
+    if ([string]::IsNullOrWhiteSpace($masterKey)) {
+        Write-Host "Encryption password is required. Aborting." -ForegroundColor Red
+        return $null
+    }
+
+    # For new config: confirm password
+    # For existing config: validate by decrypting an existing entry
+    if (-not (Test-Path $script:ConfigFilePath)) {
+        $masterKeyConfirm = ConvertFrom-SecureStringPlain -SecureString (Read-Host "Confirm encryption password" -AsSecureString)
+        if ($masterKey -ne $masterKeyConfirm) {
+            Write-Host "Passwords do not match. Aborting." -ForegroundColor Red
+            return $null
+        }
+    }
+    elseif (-not (Test-TenantMasterKey -Config $Config -MasterKey $masterKey)) {
+        return $null
+    }
+
+    # Cache the master key for this session
+    Set-CachedMasterKey -Password $masterKey
+    return $masterKey
+}
+
+# The client secret of the new app registration, read from the console after the instructions.
+# $null when nothing was entered (the caller aborts).
+function Read-IntuneClientSecretValue {
+    Write-Host "STEP 4: Create a Client Secret" -ForegroundColor Green
+    Write-Host "-------------------------------------------------------------------" -ForegroundColor Gray
+    Write-Host "1. In your app registration, go to: Certificates and secrets"
+    Write-Host "2. Click '+ New client secret'"
+    Write-Host "3. Set description (e.g., 'IntuneDeploymentKey') and expiration"
+    Write-Host "4. Click 'Add'"
+    Write-Host "5. IMPORTANT: Copy the 'Value' immediately (it will not be shown again!)"
+    Write-Host ""
+
+    $clientSecret = ConvertFrom-SecureStringPlain -SecureString (Read-Host "Enter Client Secret Value" -AsSecureString)
+    if ([string]::IsNullOrWhiteSpace($clientSecret)) {
+        Write-Host "Client Secret is required. Aborting." -ForegroundColor Red
+        return $null
+    }
+
+    return $clientSecret
+}
+
+function Add-IntuneTenant {
+    <#
+    .SYNOPSIS
+    Adds a new tenant configuration with encrypted client secret
+
+    .DESCRIPTION
+    Guides you through Azure AD app registration setup, then stores the tenant
+    configuration with an AES-256-GCM encrypted client secret.
+
+    .PARAMETER Name
+    A friendly name for the tenant (e.g., "School", "District")
+
+    .PARAMETER TenantId
+    The Azure AD Directory (tenant) ID
+
+    .PARAMETER ClientId
+    The Application (client) ID from the app registration
+
+    .EXAMPLE
+    Add-IntuneTenant -Name "School"
+
+    .EXAMPLE
+    Add-IntuneTenant -Name "District" -TenantId "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" -ClientId "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Name,
+
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId
+    )
+
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  Add Intune Tenant: $Name" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Check if tenant already exists
+    $config = Read-TenantConfig
+    if ($config.tenants.PSObject.Properties.Name -contains $Name) {
+        Write-Host "A tenant with name '$Name' already exists." -ForegroundColor Yellow
+        Write-Host "To update it, first remove it with: Remove-IntuneTenant -Name '$Name'" -ForegroundColor Yellow
         return
     }
-    
+
+    $TenantId = Read-IntuneTenantIdValue -TenantId $TenantId
+    if (-not $TenantId) { return }
+
+    $ClientId = Read-IntuneClientIdValue -ClientId $ClientId
+    if (-not $ClientId) { return }
+
     # Instructions for API permissions
     Write-Host ""
     Write-Host "STEP 3: Configure API Permissions" -ForegroundColor Green
@@ -472,40 +600,16 @@ function Add-IntuneTenant {
     Write-Host "4. Click 'Grant admin consent for [Your Organization]'"
     Write-Host "5. Verify all permissions show green checkmarks"
     Write-Host ""
-    
-    # Instructions for client secret
-    Write-Host "STEP 4: Create a Client Secret" -ForegroundColor Green
-    Write-Host "-------------------------------------------------------------------" -ForegroundColor Gray
-    Write-Host "1. In your app registration, go to: Certificates and secrets"
-    Write-Host "2. Click '+ New client secret'"
-    Write-Host "3. Set description (e.g., 'IntuneDeploymentKey') and expiration"
-    Write-Host "4. Click 'Add'"
-    Write-Host "5. IMPORTANT: Copy the 'Value' immediately (it will not be shown again!)"
-    Write-Host ""
-    
-    $secureSecret = Read-Host "Enter Client Secret Value" -AsSecureString
-    $clientSecretPtr = [System.IntPtr]::Zero
-    try {
-        $clientSecretPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureSecret)
-        $clientSecret = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($clientSecretPtr)
-    }
-    finally {
-        if ($clientSecretPtr -ne [System.IntPtr]::Zero) {
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($clientSecretPtr)
-        }
-    }
-    
-    if ([string]::IsNullOrWhiteSpace($clientSecret)) {
-        Write-Host "Client Secret is required. Aborting." -ForegroundColor Red
-        return
-    }
-    
+
+    $clientSecret = Read-IntuneClientSecretValue
+    if (-not $clientSecret) { return }
+
     # Test credentials before storing
     Write-Host ""
     Write-Host "Testing credentials..." -ForegroundColor Cyan
-    
+
     $testResult = Test-IntuneCredentials -TenantId $TenantId -ClientId $ClientId -ClientSecret $clientSecret
-    
+
     if (-not $testResult) {
         Write-Host ""
         Write-Host "Credential test FAILED. Please verify:" -ForegroundColor Red
@@ -517,104 +621,36 @@ function Add-IntuneTenant {
         Write-Host "Tenant was NOT saved." -ForegroundColor Red
         return
     }
-    
+
     Write-Host "Credential test PASSED!" -ForegroundColor Green
     Write-Host ""
-    
-    # Get or prompt for master password
-    $masterKey = Get-CachedMasterKey
-    if (-not $masterKey) {
-        Write-Host "STEP 5: Set Encryption Password" -ForegroundColor Green
-        Write-Host "-------------------------------------------------------------------" -ForegroundColor Gray
-        Write-Host "This password encrypts your client secrets in the config file."
-        Write-Host "You need to enter it once per PowerShell session."
-        Write-Host ""
-        
-        $securePassword = Read-Host "Enter encryption password" -AsSecureString
-        $masterKeyPtr = [System.IntPtr]::Zero
-        try {
-            $masterKeyPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-            $masterKey = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($masterKeyPtr)
-        }
-        finally {
-            if ($masterKeyPtr -ne [System.IntPtr]::Zero) {
-                [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($masterKeyPtr)
-            }
-        }
-        
-        if ([string]::IsNullOrWhiteSpace($masterKey)) {
-            Write-Host "Encryption password is required. Aborting." -ForegroundColor Red
-            return
-        }
-        
-        # For new config: confirm password
-        # For existing config: validate by decrypting an existing entry
-        if (-not (Test-Path $script:ConfigFilePath)) {
-            # New config - confirm password
-            $securePasswordConfirm = Read-Host "Confirm encryption password" -AsSecureString
-            $confirmPtr = [System.IntPtr]::Zero
-            try {
-                $confirmPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePasswordConfirm)
-                $masterKeyConfirm = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($confirmPtr)
-            }
-            finally {
-                if ($confirmPtr -ne [System.IntPtr]::Zero) {
-                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($confirmPtr)
-                }
-            }
-            
-            if ($masterKey -ne $masterKeyConfirm) {
-                Write-Host "Passwords do not match. Aborting." -ForegroundColor Red
-                return
-            }
-        }
-        else {
-            # Existing config - validate password by decrypting an existing entry
-            $existingTenantNames = $config.tenants.PSObject.Properties.Name
-            if ($existingTenantNames.Count -gt 0) {
-                $testTenantName = $existingTenantNames | Select-Object -First 1
-                $testTenant = $config.tenants.$testTenantName
-                $testDecrypt = Unprotect-Secret -EncryptedBase64 $testTenant.encryptedSecret -Password $masterKey
-                
-                if ($null -eq $testDecrypt) {
-                    Write-Host "Incorrect encryption password (could not decrypt existing tenant '$testTenantName')." -ForegroundColor Red
-                    Write-Host "Aborting to prevent mixing passwords in the config file." -ForegroundColor Yellow
-                    return
-                }
-                Write-Host "Password verified against existing config." -ForegroundColor Gray
-            }
-        }
-        
-        # Cache the master key for this session
-        Set-CachedMasterKey -Password $masterKey
-    }
-    else {
-        Write-Host "Using cached encryption password from this session." -ForegroundColor Gray
-    }
-    
+
+    $masterKey = Get-TenantMasterKeyForWrite -Config $config
+    if (-not $masterKey) { return }
+
     # Encrypt the client secret
     $encryptedSecret = Protect-Secret -PlainText $clientSecret -Password $masterKey
-    
+
     # Add tenant to config
     $tenantConfig = [PSCustomObject]@{
         tenantId        = $TenantId
         clientId        = $ClientId
         encryptedSecret = $encryptedSecret
     }
-    
+
     # Handle empty tenants object
     if ($null -eq $config.tenants -or $config.tenants -isnot [PSCustomObject]) {
         $config.tenants = [PSCustomObject]@{}
     }
-    
+
     $config.tenants | Add-Member -MemberType NoteProperty -Name $Name -Value $tenantConfig -Force
-    
+
     # Save config
     Write-TenantConfig -Config $config
-    
+
     # Cache the decrypted secret for this session
     Set-CachedTenantSecret -TenantName $Name -Secret $clientSecret
-    
+
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Green
     Write-Host "  Tenant '$Name' added successfully!" -ForegroundColor Green
@@ -628,21 +664,63 @@ function Add-IntuneTenant {
     Write-Host ""
 }
 
+# The tenant's decrypted client secret, prompting for the encryption password when none is cached
+# and retrying once after a wrong one. Caches password and secret for the session on success;
+# $null when the secret stays undecryptable.
+function Unprotect-TenantSecret {
+    param(
+        [Parameter(Mandatory = $true)] $Tenant,
+        [Parameter(Mandatory = $true)] [string]$TenantName
+    )
+
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        $masterKey = Get-CachedMasterKey
+        if (-not $masterKey) {
+            Write-Host "Enter encryption password for tenant config:" -ForegroundColor Cyan
+            $masterKey = ConvertFrom-SecureStringPlain -SecureString (Read-Host "Password" -AsSecureString)
+
+            if ([string]::IsNullOrWhiteSpace($masterKey)) {
+                Write-Host "Password is required." -ForegroundColor Red
+                return $null
+            }
+        }
+
+        $clientSecret = Unprotect-Secret -EncryptedBase64 $Tenant.encryptedSecret -Password $masterKey
+        if ($null -ne $clientSecret) {
+            # Cache for this session
+            Set-CachedMasterKey -Password $masterKey
+            Set-CachedTenantSecret -TenantName $TenantName -Secret $clientSecret
+            return $clientSecret
+        }
+
+        # Decryption failed: clear cached master key and retry once
+        Write-Host "Failed to decrypt client secret. Wrong password?" -ForegroundColor Red
+        $global:__IntuneCachedMasterKey = $null
+
+        if ($attempt -lt 2) {
+            Write-Host "Cleared cached encryption password. Please try again." -ForegroundColor Yellow
+        }
+    }
+
+    # All attempts exhausted
+    return $null
+}
+
 function Get-IntuneTenant {
     <#
     .SYNOPSIS
     Retrieves tenant credentials for deployment
-    
+
     .DESCRIPTION
-    Gets the tenant configuration, decrypts the client secret (prompting for 
+    Gets the tenant configuration, decrypts the client secret (prompting for
     password if not cached), and returns a credential object.
-    
+
     .PARAMETER Name
     The friendly name of the tenant to retrieve
-    
+
     .OUTPUTS
     PSCustomObject with TenantId, ClientId, and ClientSecret properties
-    
+
     .EXAMPLE
     $creds = Get-IntuneTenant -Name "School"
     .\Deploy-ToIntune.ps1 -TenantId $creds.TenantId -ClientId $creds.ClientId -ClientSecret $creds.ClientSecret
@@ -653,17 +731,17 @@ function Get-IntuneTenant {
         [ValidateNotNullOrEmpty()]
         [string]$Name
     )
-    
+
     # Check if config file exists
     if (-not (Test-Path $script:ConfigFilePath)) {
         Write-Host "No tenant configuration found." -ForegroundColor Red
         Write-Host "Run 'Add-IntuneTenant -Name `"$Name`"' to set up a tenant." -ForegroundColor Yellow
         return $null
     }
-    
+
     # Read config
     $config = Read-TenantConfig
-    
+
     # Check if tenant exists
     if ($config.tenants.PSObject.Properties.Name -notcontains $Name) {
         Write-Host "Tenant '$Name' not found in configuration." -ForegroundColor Red
@@ -672,68 +750,23 @@ function Get-IntuneTenant {
         Get-AllIntuneTenants
         return $null
     }
-    
+
     $tenant = $config.tenants.$Name
-    
-    # Check session cache first
-    $cachedSecret = Get-CachedTenantSecret -TenantName $Name
-    if ($cachedSecret) {
-        return [PSCustomObject]@{
-            TenantId     = $tenant.tenantId
-            ClientId     = $tenant.clientId
-            ClientSecret = $cachedSecret
-        }
+
+    # Check session cache first, then decrypt (prompting for the password)
+    $clientSecret = Get-CachedTenantSecret -TenantName $Name
+    if (-not $clientSecret) {
+        $clientSecret = Unprotect-TenantSecret -Tenant $tenant -TenantName $Name
     }
-    
-    # Get or prompt for master password, with retry on decryption failure
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-        $masterKey = Get-CachedMasterKey
-        if (-not $masterKey) {
-            Write-Host "Enter encryption password for tenant config:" -ForegroundColor Cyan
-            $securePassword = Read-Host "Password" -AsSecureString
-            $passwordPtr = [System.IntPtr]::Zero
-            try {
-                $passwordPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePassword)
-                $masterKey = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordPtr)
-            }
-            finally {
-                if ($passwordPtr -ne [System.IntPtr]::Zero) {
-                    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr)
-                }
-            }
-            
-            if ([string]::IsNullOrWhiteSpace($masterKey)) {
-                Write-Host "Password is required." -ForegroundColor Red
-                return $null
-            }
-        }
-        
-        # Decrypt the secret
-        $clientSecret = Unprotect-Secret -EncryptedBase64 $tenant.encryptedSecret -Password $masterKey
-        
-        if ($null -ne $clientSecret) {
-            # Cache for this session
-            Set-CachedMasterKey -Password $masterKey
-            Set-CachedTenantSecret -TenantName $Name -Secret $clientSecret
-            
-            return [PSCustomObject]@{
-                TenantId     = $tenant.tenantId
-                ClientId     = $tenant.clientId
-                ClientSecret = $clientSecret
-            }
-        }
-        
-        # Decryption failed: clear cached master key and retry once
-        Write-Host "Failed to decrypt client secret. Wrong password?" -ForegroundColor Red
-        $global:__IntuneCachedMasterKey = $null
-        
-        if ($attempt -lt 2) {
-            Write-Host "Cleared cached encryption password. Please try again." -ForegroundColor Yellow
-        }
+    if (-not $clientSecret) {
+        return $null
     }
-    
-    # All attempts exhausted
-    return $null
+
+    return [PSCustomObject]@{
+        TenantId     = $tenant.tenantId
+        ClientId     = $tenant.clientId
+        ClientSecret = $clientSecret
+    }
 }
 
 function Get-AllIntuneTenants {
