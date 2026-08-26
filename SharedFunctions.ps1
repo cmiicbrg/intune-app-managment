@@ -155,6 +155,83 @@ function Get-IntuneAppVersion {
 
 #endregion
 
+# Releases a COM object if it is still there. Releasing can only fail if it is already gone -
+# nothing to recover from, and it must never mask the result (or the error) of the work that ran
+# before the finally block.
+function Remove-ComReference {
+    param(
+        [AllowNull()] $ComObject,
+        [string]$Description = 'COM'
+    )
+
+    if ($null -eq $ComObject) { return }
+    try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($ComObject) | Out-Null }
+    catch { Write-Verbose "Releasing the $Description COM object failed: $_" }
+}
+
+# ProductVersion straight out of the MSI database via the WindowsInstaller COM object (reliable
+# on all PS versions). $null when the file is not readable as an MSI or carries no version.
+function Get-MsiProductVersion {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FilePath
+    )
+
+    $dbObject = $null
+    $viewObject = $null
+    try {
+        $msiInstaller = New-Object -ComObject WindowsInstaller.Installer
+        $dbObject = $msiInstaller.OpenDatabase($FilePath, 0)
+        $viewObject = $dbObject.OpenView("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
+        [void]$viewObject.Execute()
+        $record = $viewObject.Fetch()
+        if (-not $record) { return $null }
+
+        $ver = $record.StringData(1)
+        if ([string]::IsNullOrWhiteSpace($ver)) { return $null }
+        return $ver
+    }
+    catch {
+        Write-Verbose "MSI COM version extraction failed: $_"
+        return $null
+    }
+    finally {
+        Remove-ComReference -ComObject $viewObject -Description 'MSI view'
+        Remove-ComReference -ComObject $dbObject -Description 'MSI database'
+    }
+}
+
+# Version from Get-AppLockerFileInformation, which PS 7 loads through the Windows compatibility
+# session. Works for both MSI and EXE. $null when nothing usable comes back.
+function Get-AppLockerFileVersion {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FilePath
+    )
+
+    try {
+        $info = Get-AppLockerFileInformation -Path $FilePath -ErrorAction Stop
+        $pub = $info.Publisher
+        if ($null -eq $pub) { return $null }
+
+        # The compat session usually returns Publisher as a string on PS 7, but the
+        # shape isn't guaranteed across Windows builds - handle both.
+        if ($pub -is [string]) {
+            # Format: "PUBLISHER\PRODUCT\BINARY,VERSION"
+            if ($pub -match ',(\d+[\d\.]+)') { return $matches[1] }
+            return $null
+        }
+
+        $bv = $pub.BinaryVersion
+        if ($null -ne $bv) { return $bv.ToString() }
+    }
+    catch {
+        Write-Verbose "AppLocker version extraction failed: $_"
+    }
+
+    return $null
+}
+
 # Function to extract version from an installer file
 # For MSI files, queries the MSI database directly via the WindowsInstaller COM object.
 # For EXE files, falls back to Get-AppLockerFileInformation, which PS 7 loads through
@@ -167,57 +244,12 @@ function Get-InstallerVersion {
 
     $extension = [System.IO.Path]::GetExtension($FilePath).ToLower()
 
-    # MSI: query ProductVersion from the MSI database (reliable on all PS versions)
     if ($extension -eq '.msi') {
-        $dbObject = $null
-        $viewObject = $null
-        try {
-            $msiInstaller = New-Object -ComObject WindowsInstaller.Installer
-            $dbObject = $msiInstaller.OpenDatabase($FilePath, 0)
-            $viewObject = $dbObject.OpenView("SELECT Value FROM Property WHERE Property = 'ProductVersion'")
-            [void]$viewObject.Execute()
-            $record = $viewObject.Fetch()
-            if ($record) {
-                $ver = $record.StringData(1)
-                if (-not [string]::IsNullOrWhiteSpace($ver)) {
-                    return $ver
-                }
-            }
-        }
-        catch {
-            Write-Verbose "MSI COM version extraction failed: $_"
-        }
-        finally {
-            if ($null -ne $viewObject) { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($viewObject) | Out-Null } catch {} }
-            if ($null -ne $dbObject)   { try { [System.Runtime.InteropServices.Marshal]::ReleaseComObject($dbObject)   | Out-Null } catch {} }
-        }
+        $msiVersion = Get-MsiProductVersion -FilePath $FilePath
+        if ($msiVersion) { return $msiVersion }
     }
 
-    # Fallback: Get-AppLockerFileInformation (works for both MSI and EXE)
-    try {
-        $info = Get-AppLockerFileInformation -Path $FilePath -ErrorAction Stop
-        $pub = $info.Publisher
-
-        # The compat session usually returns Publisher as a string on PS 7, but the
-        # shape isn't guaranteed across Windows builds - handle both.
-        if ($null -ne $pub -and $pub -is [string]) {
-            # Format: "PUBLISHER\PRODUCT\BINARY,VERSION"
-            if ($pub -match ',(\d+[\d\.]+)') {
-                return $matches[1]
-            }
-        }
-        elseif ($null -ne $pub) {
-            $bv = $pub.BinaryVersion
-            if ($null -ne $bv) {
-                return $bv.ToString()
-            }
-        }
-    }
-    catch {
-        Write-Verbose "AppLocker version extraction failed: $_"
-    }
-
-    return $null
+    return Get-AppLockerFileVersion -FilePath $FilePath
 }
 
 # Function to record a successfully downloaded version in AppVersions.json.
@@ -343,6 +375,81 @@ function Test-VersionExists {
     return $false
 }
 
+# The file's SHA-256 against the pin from AppConfig or a winget manifest. Fails closed: a
+# malformed pin, an unreadable file or a mismatch are all $false.
+function Test-FileSha256 {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedSha256
+    )
+
+    # Normalize: strip whitespace, uppercase, validate 64 hex chars
+    $normalizedHash = ($ExpectedSha256 -replace '\s','').ToUpperInvariant()
+    if ($normalizedHash.Length -ne 64 -or $normalizedHash -notmatch '^[0-9A-F]{64}$') {
+        Write-Host "Integrity check FAILED: ExpectedSha256 is not a valid 64-character hex string." -ForegroundColor Red
+        Write-Host "  Received: $ExpectedSha256" -ForegroundColor Red
+        return $false
+    }
+
+    try {
+        $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop).Hash
+    }
+    catch {
+        Write-Host "Integrity check FAILED: unable to compute SHA-256 for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+        Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+
+    if ($actualHash -ne $normalizedHash) {
+        Write-Host "Integrity check FAILED: SHA-256 mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+        Write-Host "  Expected: $normalizedHash" -ForegroundColor Red
+        Write-Host "  Actual:   $actualHash" -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "Integrity check passed: SHA-256 verified." -ForegroundColor Green
+    return $true
+}
+
+# The file's Authenticode signature, and - when the app declares one - that the signing
+# certificate's subject contains the expected publisher (substring, case-insensitive).
+function Test-FileAuthenticodeSignature {
+    param(
+        [string]$FilePath,
+        [string]$ExpectedPublisher
+    )
+
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $FilePath -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Integrity check FAILED: unable to verify Authenticode signature for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+        Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+
+    if ($signature.Status -ne 'Valid') {
+        Write-Host "Integrity check FAILED: Authenticode signature status is '$($signature.Status)' for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+        return $false
+    }
+
+    if (-not $ExpectedPublisher) {
+        Write-Host "Integrity check passed: valid Authenticode signature." -ForegroundColor Green
+        return $true
+    }
+
+    $subject = $signature.SignerCertificate.Subject
+    if (-not $subject -or $subject.IndexOf($ExpectedPublisher, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        Write-Host "Integrity check FAILED: publisher mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
+        Write-Host "  Expected publisher containing: $ExpectedPublisher" -ForegroundColor Red
+        Write-Host "  Actual certificate subject:    $subject" -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "Integrity check passed: valid signature from '$ExpectedPublisher'." -ForegroundColor Green
+    return $true
+}
+
 # Function to verify integrity of a downloaded installer file.
 # Checks SHA-256 hash (if provided) or Authenticode signature + optional publisher match.
 # Returns $true if the file passes verification, $false otherwise (fail closed).
@@ -359,70 +466,51 @@ function Test-DownloadedFileIntegrity {
         return $false
     }
 
-    # SHA-256 takes precedence — if provided, Authenticode checks are intentionally skipped
+    # SHA-256 takes precedence - if provided, Authenticode checks are intentionally skipped
     # because an explicit hash pins the exact binary content (stronger than signature alone).
     if ($ExpectedSha256) {
-        # Normalize: strip whitespace, uppercase, validate 64 hex chars
-        $normalizedHash = ($ExpectedSha256 -replace '\s','').ToUpperInvariant()
-        if ($normalizedHash.Length -ne 64 -or $normalizedHash -notmatch '^[0-9A-F]{64}$') {
-            Write-Host "Integrity check FAILED: ExpectedSha256 is not a valid 64-character hex string." -ForegroundColor Red
-            Write-Host "  Received: $ExpectedSha256" -ForegroundColor Red
-            return $false
-        }
-        try {
-            $actualHash = (Get-FileHash -Path $FilePath -Algorithm SHA256 -ErrorAction Stop).Hash
-            if ($actualHash -ne $normalizedHash) {
-                Write-Host "Integrity check FAILED: SHA-256 mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
-                Write-Host "  Expected: $normalizedHash" -ForegroundColor Red
-                Write-Host "  Actual:   $actualHash" -ForegroundColor Red
-                return $false
-            }
-            Write-Host "Integrity check passed: SHA-256 verified." -ForegroundColor Green
-            return $true
-        }
-        catch {
-            Write-Host "Integrity check FAILED: unable to compute SHA-256 for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
-            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
-            return $false
-        }
+        return Test-FileSha256 -FilePath $FilePath -ExpectedSha256 $ExpectedSha256
     }
 
-    # Authenticode signature check (default path)
     if ($EnforceSignatureCheck) {
-        try {
-            $signature = Get-AuthenticodeSignature -FilePath $FilePath -ErrorAction Stop
-        }
-        catch {
-            Write-Host "Integrity check FAILED: unable to verify Authenticode signature for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
-            Write-Host "  Error: $($_.Exception.Message)" -ForegroundColor Red
-            return $false
-        }
-
-        if ($signature.Status -ne 'Valid') {
-            Write-Host "Integrity check FAILED: Authenticode signature status is '$($signature.Status)' for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
-            return $false
-        }
-
-        # Publisher match (substring, case-insensitive)
-        if ($ExpectedPublisher) {
-            $subject = $signature.SignerCertificate.Subject
-            if (-not $subject -or $subject.IndexOf($ExpectedPublisher, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
-                Write-Host "Integrity check FAILED: publisher mismatch for $(Split-Path $FilePath -Leaf)" -ForegroundColor Red
-                Write-Host "  Expected publisher containing: $ExpectedPublisher" -ForegroundColor Red
-                Write-Host "  Actual certificate subject:    $subject" -ForegroundColor Red
-                return $false
-            }
-            Write-Host "Integrity check passed: valid signature from '$ExpectedPublisher'." -ForegroundColor Green
-        }
-        else {
-            Write-Host "Integrity check passed: valid Authenticode signature." -ForegroundColor Green
-        }
-        return $true
+        return Test-FileAuthenticodeSignature -FilePath $FilePath -ExpectedPublisher $ExpectedPublisher
     }
 
     # Signature enforcement explicitly disabled (AllowUnsignedInstaller = $true)
     Write-Host "Integrity check skipped: signature enforcement disabled for this app." -ForegroundColor Yellow
     return $true
+}
+
+# Records one "Key: value" pair of a winget manifest, ignoring keys the resolver does not
+# consume and empty values. -KeepExisting leaves a key an installer entry already carries
+# (its own "- Key:" line wins over the indented ones that follow).
+function Set-WingetManifestField {
+    param(
+        [Parameter(Mandatory=$true)] [hashtable]$Target,
+        [Parameter(Mandatory=$true)] [string]$Key,
+        [AllowEmptyString()] [string]$Value,
+        [Parameter(Mandatory=$true)] [string[]]$WantedKeys,
+        [switch]$KeepExisting
+    )
+
+    $trimmed = $Value.Trim("'`"")
+    if ($Key -notin $WantedKeys -or -not $trimmed) { return }
+    if ($KeepExisting -and $Target.ContainsKey($Key)) { return }
+
+    $Target[$Key] = $trimmed
+}
+
+# Adds the installer entry that was being read to the collected ones. An entry that carries no
+# key the resolver consumes is dropped (an empty hashtable is falsy), which is what the parser
+# did before the entries became a function argument.
+function Close-WingetInstallerEntry {
+    param(
+        [AllowEmptyCollection()] [array]$Installers = @(),
+        [AllowNull()] $Current
+    )
+
+    if (-not $Current) { return ,$Installers }
+    return ,($Installers + $Current)
 }
 
 # Minimal parser for winget installer manifests (<PackageId>.installer.yaml).
@@ -448,27 +536,192 @@ function ConvertFrom-WingetInstallerManifest {
 
         if ($line -match '^- ([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
             # New installer entry
-            if ($current) { $installers += $current }
+            $installers = Close-WingetInstallerEntry -Installers $installers -Current $current
             $current = @{}
-            $key = $matches[1]; $value = $matches[2].Trim("'`"")
-            if ($key -in $wantedKeys -and $value) { $current[$key] = $value }
+            Set-WingetManifestField -Target $current -Key $matches[1] -Value $matches[2] -WantedKeys $wantedKeys
+            continue
         }
-        elseif ($current -and $line -match '^  ([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
-            # Key inside the current installer entry (exactly two spaces - deeper
-            # indents belong to nested structures like AppsAndFeaturesEntries)
-            $key = $matches[1]; $value = $matches[2].Trim("'`"")
-            if ($key -in $wantedKeys -and $value -and -not $current.ContainsKey($key)) { $current[$key] = $value }
+
+        # Key inside the current installer entry (exactly two spaces - deeper
+        # indents belong to nested structures like AppsAndFeaturesEntries)
+        if ($current -and $line -match '^  ([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
+            Set-WingetManifestField -Target $current -Key $matches[1] -Value $matches[2] -WantedKeys $wantedKeys -KeepExisting
+            continue
         }
-        elseif ($line -match '^([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
-            # Root-level key: a default that installer entries inherit
-            if ($current) { $installers += $current; $current = $null }
-            $key = $matches[1]; $value = $matches[2].Trim("'`"")
-            if ($key -in $wantedKeys -and $value) { $defaults[$key] = $value }
+
+        # Root-level key: a default that installer entries inherit
+        if ($line -match '^([A-Za-z][A-Za-z0-9]*):\s*(.*?)\s*$') {
+            $installers = Close-WingetInstallerEntry -Installers $installers -Current $current
+            $current = $null
+            Set-WingetManifestField -Target $defaults -Key $matches[1] -Value $matches[2] -WantedKeys $wantedKeys
         }
     }
-    if ($current) { $installers += $current }
+    $installers = Close-WingetInstallerEntry -Installers $installers -Current $current
 
     return @{ Defaults = $defaults; Installers = $installers }
+}
+
+# The usable entries of a download-URL allowlist. A usable prefix must be an absolute https://
+# URL ending in '/', so a StartsWith match can never cross an authority boundary
+# ("https://vendor.example" must not match "https://vendor.example.evil.com/").
+function Select-WingetAllowedPrefix {
+    param([AllowNull()] [string[]]$AllowedUrlPrefixes)
+
+    return @($AllowedUrlPrefixes | Where-Object {
+        if ([string]::IsNullOrWhiteSpace($_)) { return $false }
+        $prefixUri = $null
+        [System.Uri]::TryCreate($_, [System.UriKind]::Absolute, [ref]$prefixUri) -and
+            $prefixUri.Scheme -eq 'https' -and $_.EndsWith('/')
+    })
+}
+
+# The newest published version of a package: the highest manifest directory name that parses as
+# [version] (tags like "Nightly" are skipped). $null when the listing fails or holds none.
+function Get-WingetLatestVersion {
+    param(
+        [Parameter(Mandatory=$true)] [string]$PackageId,
+        [Parameter(Mandatory=$true)] [string]$ManifestRoot
+    )
+
+    try {
+        $listing = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/$ManifestRoot" -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Winget lookup FAILED: could not list versions for '$PackageId': $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+
+    $versions = foreach ($item in $listing) {
+        if ($item.type -ne 'dir') { continue }
+        $parsed = $null
+        if ([version]::TryParse($item.name, [ref]$parsed)) {
+            [PSCustomObject]@{ Name = $item.name; Version = $parsed }
+        }
+    }
+
+    $latest = $versions | Sort-Object Version -Descending | Select-Object -First 1
+    if (-not $latest) {
+        Write-Host "Winget lookup FAILED: no parseable versions found for '$PackageId'" -ForegroundColor Red
+        return $null
+    }
+    return $latest
+}
+
+# The parsed installer manifest of one version. The manifest must describe the version whose
+# directory it lives in - a disagreement means a raced listing or a manipulated manifest, and
+# either way the bundle is not the "version + URL + hash" unit we claim to verify.
+function Get-WingetInstallerManifest {
+    param(
+        [Parameter(Mandatory=$true)] [string]$PackageId,
+        [Parameter(Mandatory=$true)] [string]$ManifestRoot,
+        [Parameter(Mandatory=$true)] [string]$Version
+    )
+
+    try {
+        $yaml = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/$ManifestRoot/$Version/$PackageId.installer.yaml" -ErrorAction Stop
+    }
+    catch {
+        Write-Host "Winget lookup FAILED: could not fetch installer manifest for '$PackageId' $($Version): $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+
+    $manifest = ConvertFrom-WingetInstallerManifest -Yaml $yaml
+
+    $declaredVersion = $manifest.Defaults['PackageVersion']
+    if ($declaredVersion -and $declaredVersion -ne $Version) {
+        Write-Host "Winget lookup FAILED: manifest in directory '$Version' declares PackageVersion '$declaredVersion' for '$PackageId'" -ForegroundColor Red
+        return $null
+    }
+
+    return $manifest
+}
+
+# The one installer entry matching the requested architecture and installer type, as
+# @{ Url; Sha256 }. Anything ambiguous or unusable - no single match, a missing URL or hash, a
+# hash that is not 64 hex chars - is $null, which the caller turns into "skip this app".
+function Select-WingetInstallerEntry {
+    param(
+        [Parameter(Mandatory=$true)] [hashtable]$Manifest,
+        [Parameter(Mandatory=$true)] [string]$PackageId,
+        [Parameter(Mandatory=$true)] [string]$Version,
+        [string]$Architecture = 'x64',
+        [string]$InstallerType
+    )
+
+    $candidates = @($Manifest.Installers | Where-Object {
+        $arch = if ($_.ContainsKey('Architecture')) { $_.Architecture } else { $Manifest.Defaults['Architecture'] }
+        $type = if ($_.ContainsKey('InstallerType')) { $_.InstallerType } else { $Manifest.Defaults['InstallerType'] }
+        ($arch -eq $Architecture) -and (-not $InstallerType -or $type -eq $InstallerType)
+    })
+
+    if ($candidates.Count -ne 1) {
+        Write-Host "Winget lookup FAILED: expected exactly 1 installer entry for '$PackageId' $Version ($Architecture/$InstallerType), found $($candidates.Count)" -ForegroundColor Red
+        return $null
+    }
+
+    $url = $candidates[0]['InstallerUrl']
+    $sha256 = "$($candidates[0]['InstallerSha256'])".Trim()
+    if (-not $url -or -not $sha256) {
+        Write-Host "Winget lookup FAILED: installer entry for '$PackageId' $Version is missing InstallerUrl or InstallerSha256" -ForegroundColor Red
+        return $null
+    }
+
+    # Downstream verification would reject a malformed pin anyway (fail closed), but
+    # refusing here avoids downloading an installer that can never verify
+    if ($sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
+        Write-Host "Winget lookup FAILED: InstallerSha256 for '$PackageId' $Version is not a 64-character hex hash" -ForegroundColor Red
+        return $null
+    }
+
+    return @{ Url = $url; Sha256 = $sha256 }
+}
+
+# The canonical download URL and its file name, as @{ Url; Filename } - or $null when the
+# manifest's InstallerUrl is not an allowed HTTPS URL ending in a usable file name.
+function Resolve-WingetInstallerUrl {
+    param(
+        [Parameter(Mandatory=$true)] [string]$Url,
+        [Parameter(Mandatory=$true)] [string[]]$ValidPrefixes,
+        [Parameter(Mandatory=$true)] [string]$PackageId,
+        [Parameter(Mandatory=$true)] [string]$Version
+    )
+
+    # Canonicalize before the allowlist check and use the canonical form from here on:
+    # System.Uri compacts dot segments (escaped or not), so a raw-string prefix match on
+    # "https://host/allowed/../attacker/..." would pass while the request actually goes
+    # elsewhere. The canonical AbsoluteUri is what the HTTP client will really fetch.
+    $parsedUri = $null
+    if (-not [System.Uri]::TryCreate($Url, [System.UriKind]::Absolute, [ref]$parsedUri) -or $parsedUri.Scheme -ne 'https') {
+        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $Version is not a valid HTTPS URL" -ForegroundColor Red
+        Write-Host "  URL: $Url" -ForegroundColor Red
+        return $null
+    }
+    $canonicalUrl = $parsedUri.AbsoluteUri
+
+    $allowed = $false
+    foreach ($prefix in $ValidPrefixes) {
+        if ($canonicalUrl.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
+    }
+    if (-not $allowed) {
+        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $Version is outside the allowed prefixes" -ForegroundColor Red
+        Write-Host "  URL (canonical): $canonicalUrl" -ForegroundColor Red
+        return $null
+    }
+
+    # The decoded leaf must be a plain file name: encoded separators or traversal tokens
+    # (%2F, %5C, %2E%2E) survive URI canonicalization inside a single segment, and letting
+    # them through would smuggle path components into Join-Path targets and the version cache
+    $filename = [System.Uri]::UnescapeDataString($parsedUri.Segments[-1])
+    if ([string]::IsNullOrWhiteSpace($filename) -or
+        $filename -in @('.', '..') -or
+        $filename -ne [System.IO.Path]::GetFileName($filename) -or
+        $filename.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
+        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $Version does not end in a usable file name" -ForegroundColor Red
+        Write-Host "  Decoded leaf: $filename" -ForegroundColor Red
+        return $null
+    }
+
+    return @{ Url = $canonicalUrl; Filename = $filename }
 }
 
 # Resolves the latest version, download URL and SHA-256 of a package from the community
@@ -498,15 +751,8 @@ function Get-WingetInstallerInfo {
 
     # The allowlist is not optional: without it the manifest alone would decide where
     # installers come from. Fail closed - before spending any network calls - rather than
-    # letting a caller accidentally skip the check. A usable prefix must be an absolute
-    # https:// URL ending in '/', so a StartsWith match can never cross an authority
-    # boundary ("https://vendor.example" must not match "https://vendor.example.evil.com/").
-    $validPrefixes = @($AllowedUrlPrefixes | Where-Object {
-        if ([string]::IsNullOrWhiteSpace($_)) { return $false }
-        $prefixUri = $null
-        [System.Uri]::TryCreate($_, [System.UriKind]::Absolute, [ref]$prefixUri) -and
-            $prefixUri.Scheme -eq 'https' -and $_.EndsWith('/')
-    })
+    # letting a caller accidentally skip the check.
+    $validPrefixes = Select-WingetAllowedPrefix -AllowedUrlPrefixes $AllowedUrlPrefixes
     if ($validPrefixes.Count -eq 0) {
         Write-Host "Winget lookup REFUSED: no usable AllowedUrlPrefixes for '$PackageId' - the allowlist is mandatory and every prefix must be an https:// URL ending in '/'" -ForegroundColor Red
         return $null
@@ -516,114 +762,25 @@ function Get-WingetInstallerInfo {
     $letter = $PackageId.Substring(0, 1).ToLowerInvariant()
     $manifestRoot = "manifests/$letter/$idPath"
 
-    # Latest version = highest directory name that parses as [version]; tags like "Nightly" are skipped
-    try {
-        $listing = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/winget-pkgs/contents/$manifestRoot" -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Winget lookup FAILED: could not list versions for '$PackageId': $($_.Exception.Message)" -ForegroundColor Red
-        return $null
-    }
+    $latest = Get-WingetLatestVersion -PackageId $PackageId -ManifestRoot $manifestRoot
+    if (-not $latest) { return $null }
 
-    $versions = foreach ($item in $listing) {
-        if ($item.type -ne 'dir') { continue }
-        $parsed = $null
-        if ([version]::TryParse($item.name, [ref]$parsed)) {
-            [PSCustomObject]@{ Name = $item.name; Version = $parsed }
-        }
-    }
-    $latest = $versions | Sort-Object Version -Descending | Select-Object -First 1
-    if (-not $latest) {
-        Write-Host "Winget lookup FAILED: no parseable versions found for '$PackageId'" -ForegroundColor Red
-        return $null
-    }
+    $manifest = Get-WingetInstallerManifest -PackageId $PackageId -ManifestRoot $manifestRoot -Version $latest.Name
+    if (-not $manifest) { return $null }
 
-    try {
-        $yaml = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/$manifestRoot/$($latest.Name)/$PackageId.installer.yaml" -ErrorAction Stop
-    }
-    catch {
-        Write-Host "Winget lookup FAILED: could not fetch installer manifest for '$PackageId' $($latest.Name): $($_.Exception.Message)" -ForegroundColor Red
-        return $null
-    }
+    $entry = Select-WingetInstallerEntry -Manifest $manifest -PackageId $PackageId -Version $latest.Name -Architecture $Architecture -InstallerType $InstallerType
+    if (-not $entry) { return $null }
 
-    $manifest = ConvertFrom-WingetInstallerManifest -Yaml $yaml
-
-    # The manifest must describe the version whose directory it lives in - a disagreement
-    # means a raced listing or a manipulated manifest, and either way the bundle is not
-    # the "version + URL + hash" unit we claim to verify
-    $declaredVersion = $manifest.Defaults['PackageVersion']
-    if ($declaredVersion -and $declaredVersion -ne $latest.Name) {
-        Write-Host "Winget lookup FAILED: manifest in directory '$($latest.Name)' declares PackageVersion '$declaredVersion' for '$PackageId'" -ForegroundColor Red
-        return $null
-    }
-
-    $candidates = @($manifest.Installers | Where-Object {
-        $arch = if ($_.ContainsKey('Architecture')) { $_.Architecture } else { $manifest.Defaults['Architecture'] }
-        $type = if ($_.ContainsKey('InstallerType')) { $_.InstallerType } else { $manifest.Defaults['InstallerType'] }
-        ($arch -eq $Architecture) -and (-not $InstallerType -or $type -eq $InstallerType)
-    })
-
-    if ($candidates.Count -ne 1) {
-        Write-Host "Winget lookup FAILED: expected exactly 1 installer entry for '$PackageId' $($latest.Name) ($Architecture/$InstallerType), found $($candidates.Count)" -ForegroundColor Red
-        return $null
-    }
-
-    $url = $candidates[0]['InstallerUrl']
-    $sha256 = "$($candidates[0]['InstallerSha256'])".Trim()
-    if (-not $url -or -not $sha256) {
-        Write-Host "Winget lookup FAILED: installer entry for '$PackageId' $($latest.Name) is missing InstallerUrl or InstallerSha256" -ForegroundColor Red
-        return $null
-    }
-
-    # Downstream verification would reject a malformed pin anyway (fail closed), but
-    # refusing here avoids downloading an installer that can never verify
-    if ($sha256 -notmatch '^[0-9A-Fa-f]{64}$') {
-        Write-Host "Winget lookup FAILED: InstallerSha256 for '$PackageId' $($latest.Name) is not a 64-character hex hash" -ForegroundColor Red
-        return $null
-    }
-
-    # Canonicalize before the allowlist check and use the canonical form from here on:
-    # System.Uri compacts dot segments (escaped or not), so a raw-string prefix match on
-    # "https://host/allowed/../attacker/..." would pass while the request actually goes
-    # elsewhere. The canonical AbsoluteUri is what the HTTP client will really fetch.
-    $parsedUri = $null
-    if (-not [System.Uri]::TryCreate($url, [System.UriKind]::Absolute, [ref]$parsedUri) -or $parsedUri.Scheme -ne 'https') {
-        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is not a valid HTTPS URL" -ForegroundColor Red
-        Write-Host "  URL: $url" -ForegroundColor Red
-        return $null
-    }
-    $canonicalUrl = $parsedUri.AbsoluteUri
-
-    $allowed = $false
-    foreach ($prefix in $validPrefixes) {
-        if ($canonicalUrl.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { $allowed = $true; break }
-    }
-    if (-not $allowed) {
-        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) is outside the allowed prefixes" -ForegroundColor Red
-        Write-Host "  URL (canonical): $canonicalUrl" -ForegroundColor Red
-        return $null
-    }
-
-    # The decoded leaf must be a plain file name: encoded separators or traversal tokens
-    # (%2F, %5C, %2E%2E) survive URI canonicalization inside a single segment, and letting
-    # them through would smuggle path components into Join-Path targets and the version cache
-    $filename = [System.Uri]::UnescapeDataString($parsedUri.Segments[-1])
-    if ([string]::IsNullOrWhiteSpace($filename) -or
-        $filename -in @('.', '..') -or
-        $filename -ne [System.IO.Path]::GetFileName($filename) -or
-        $filename.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) {
-        Write-Host "Winget lookup REFUSED: InstallerUrl for '$PackageId' $($latest.Name) does not end in a usable file name" -ForegroundColor Red
-        Write-Host "  Decoded leaf: $filename" -ForegroundColor Red
-        return $null
-    }
+    $download = Resolve-WingetInstallerUrl -Url $entry.Url -ValidPrefixes $validPrefixes -PackageId $PackageId -Version $latest.Name
+    if (-not $download) { return $null }
 
     Write-Host "Winget manifest resolved: $PackageId $($latest.Name) (SHA-256 pinned)" -ForegroundColor Green
 
     return [PSCustomObject]@{
         Version  = $latest.Name
-        Url      = $canonicalUrl
-        Sha256   = $sha256
-        Filename = $filename
+        Url      = $download.Url
+        Sha256   = $entry.Sha256
+        Filename = $download.Filename
     }
 }
 
@@ -843,6 +1000,46 @@ function Get-MsiAppConfig {
     }
 }
 
+# The detection rule of a file-based app: registry existence, registry version, or (the default)
+# file version.
+function New-FileAppDetectionRule {
+    param(
+        [Parameter(Mandatory=$true)] $AppConfig,
+        [Parameter(Mandatory=$true)] $CommonSettings,
+        [string]$Version,
+        [string]$Operator
+    )
+
+    if ($AppConfig.DetectionType -ne "Registry") {
+        # Default: file-based detection
+        return New-InteropFileDetectionRule `
+            -Path $AppConfig.DetectionPath `
+            -FileOrFolder $AppConfig.DetectionFile `
+            -Check32BitOn64System $CommonSettings.Check32BitOn64System `
+            -Operator $Operator `
+            -VersionValue $Version
+    }
+
+    if ($Operator -notin @('exists', 'doesNotExist', 'notExists')) {
+        return New-InteropRegistryVersionDetectionRule `
+            -KeyPath $AppConfig.DetectionPath `
+            -ValueName $AppConfig.DetectionValueName `
+            -Operator $Operator `
+            -VersionValue $Version `
+            -Check32BitOn64System $CommonSettings.Check32BitOn64System
+    }
+
+    $existenceParams = @{
+        KeyPath              = $AppConfig.DetectionPath
+        DetectionType        = if ($Operator -eq "notExists") { "doesNotExist" } else { $Operator }
+        Check32BitOn64System = $CommonSettings.Check32BitOn64System
+    }
+    if ($AppConfig.DetectionValueName) {
+        $existenceParams['ValueName'] = $AppConfig.DetectionValueName
+    }
+    return New-InteropRegistryExistenceDetectionRule @existenceParams
+}
+
 # Generic function to create File-based app configuration
 function Get-FileAppConfig {
     param(
@@ -850,67 +1047,34 @@ function Get-FileAppConfig {
         [string]$Version,
         [string]$SetupFile
     )
-    
+
     $appConfig = Get-AppConfiguration -AppName $AppName
     $commonSettings = Get-CommonSettings
-    
+
     # Use app-specific detection operator if specified, otherwise use common setting
     $detectionOperator = if ($appConfig.DetectionOperator) {
         $appConfig.DetectionOperator
     } else {
         $commonSettings.DetectionOperator
     }
-    
-    # Create detection rule based on detection type
-    if ($appConfig.DetectionType -eq "Registry") {
-        if ($detectionOperator -eq "exists" -or $detectionOperator -eq "doesNotExist" -or $detectionOperator -eq "notExists") {
-            if ($detectionOperator -eq "notExists") {
-                $detectionOperator = "doesNotExist"
-            }
-            $existenceParams = @{
-                KeyPath              = $appConfig.DetectionPath
-                DetectionType        = $detectionOperator
-                Check32BitOn64System = $commonSettings.Check32BitOn64System
-            }
-            if ($appConfig.DetectionValueName) {
-                $existenceParams['ValueName'] = $appConfig.DetectionValueName
-            }
-            $DetectionRule = New-InteropRegistryExistenceDetectionRule @existenceParams
-        }
-        else {
-            $DetectionRule = New-InteropRegistryVersionDetectionRule `
-                -KeyPath $appConfig.DetectionPath `
-                -ValueName $appConfig.DetectionValueName `
-                -Operator $detectionOperator `
-                -VersionValue $Version `
-                -Check32BitOn64System $commonSettings.Check32BitOn64System
-        }
-    }
-    else {
-        # Default: file-based detection
-        $DetectionRule = New-InteropFileDetectionRule `
-            -Path $appConfig.DetectionPath `
-            -FileOrFolder $appConfig.DetectionFile `
-            -Check32BitOn64System $commonSettings.Check32BitOn64System `
-            -Operator $detectionOperator `
-            -VersionValue $Version
-    }
-    
+
+    $DetectionRule = New-FileAppDetectionRule -AppConfig $appConfig -CommonSettings $commonSettings -Version $Version -Operator $detectionOperator
+
     $RequirementRule = New-InteropRequirementRule `
         -Architecture $commonSettings.Architecture `
         -MinimumSupportedOperatingSystem $commonSettings.MinimumOS
-    
+
     # Extract major version for display name (e.g., "143" from "143.0.4")
     $majorVersion = if ($Version -match '^(\d+)') { $matches[1] } else { $Version }
-    
+
     # Format display name with major version only, description without version
     $DisplayName = $appConfig.DisplayNameTemplate -f $majorVersion
     $Description = $appConfig.Description
-    
+
     # Format commands - {0} = setup filename, {1} = app version
     $InstallCommand = $appConfig.InstallCommandTemplate -f $SetupFile, $Version
     $UninstallCommand = $appConfig.UninstallCommandTemplate -f $SetupFile, $Version
-    
+
     return @{
         DisplayName = $DisplayName
         Description = $Description

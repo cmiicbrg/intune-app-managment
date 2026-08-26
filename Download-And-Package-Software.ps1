@@ -37,106 +37,186 @@ function Get-FallbackVersionInfo {
     return @{Url = $AppConfig.FallbackUrl; Version = $AppConfig.FallbackVersion; Filename = $filename}
 }
 
+# Winget manifest (7-Zip, VLC, Inkscape - unsigned installers). Version, URL and SHA-256 come as
+# one reviewed bundle; the hash replaces the Authenticode check. $null skips the app for this run:
+# deliberately no FallbackUrl here, because without a manifest hash there is nothing to verify an
+# unsigned installer against. If this persists across runs, suspect winget manifest format drift -
+# run the LocalOnly live test in tests/SharedFunctions.Tests.ps1 to diagnose.
+function Get-WingetVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig
+    )
+
+    Write-Host "Resolving version from winget manifest..." -ForegroundColor Gray
+    $wingetInfo = Get-WingetInstallerInfo -PackageId $AppConfig.WingetPackageId `
+        -Architecture ($AppConfig.WingetArchitecture ?? "x64") `
+        -InstallerType $AppConfig.WingetInstallerType `
+        -AllowedUrlPrefixes $AppConfig.AllowedDownloadUrlPrefixes
+
+    if ($wingetInfo) {
+        return @{Url = $wingetInfo.Url; Version = $wingetInfo.Version; Filename = $wingetInfo.Filename; Sha256 = $wingetInfo.Sha256}
+    }
+
+    Write-Host "No verifiable winget manifest - skipping this run" -ForegroundColor Yellow
+    return $null
+}
+
+# API-based version detection (Firefox)
+function Get-ApiVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig
+    )
+
+    Write-Host "Fetching version from API..." -ForegroundColor Gray
+    $versionInfo = Invoke-RestMethod -Uri $AppConfig.VersionApiUrl
+    $version = $versionInfo.($AppConfig.VersionApiProperty)
+    $filename = $AppConfig.FilenameTemplate -f $version
+
+    return @{Url = $AppConfig.DownloadUrl; Version = $version; Filename = $filename}
+}
+
+# GitHub releases (Notepad++, Audacity, OpenShot, KeePassXC, Stellarium, Next-Exam).
+# $null when the release carries no asset matching the pattern (the caller falls back).
+function Get-GitHubVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig
+    )
+
+    Write-Host "Fetching version from GitHub..." -ForegroundColor Gray
+    $release = Invoke-RestMethod -Uri $AppConfig.GitHubApiUrl
+    $asset = $release.assets | Where-Object { $_.name -match $AppConfig.GitHubAssetPattern } | Select-Object -First 1
+    if (-not $asset) {
+        return $null
+    }
+
+    # Strip any leading non-digits, so "v8.9.7" and "Audacity-3.7.8" both yield a bare version
+    $version = $release.tag_name -replace '^\D*', ''
+    return @{Url = $asset.browser_download_url; Version = $version; Filename = $asset.name}
+}
+
+# LibreOffice special handling - the download page lists both the "still" (enterprise) and the
+# "fresh" line; pick the lower of the unique versions. $null when the page shows only one line
+# or nothing at all (the caller falls back).
+function Get-LibreOfficeVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig,
+        [Parameter(Mandatory=$true)]
+        [AllowEmptyString()]
+        [string]$PageContent
+    )
+
+    $allMatches = [regex]::Matches($PageContent, $AppConfig.DownloadUrlRegex)
+    Write-Host "  Found $($allMatches.Count) match(es) on page" -ForegroundColor Gray
+
+    # Get unique versions
+    $uniqueVersions = @($allMatches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique | Sort-Object)
+
+    if ($uniqueVersions.Count -ge 2) {
+        # Use the lower version (enterprise/business version)
+        $version = $uniqueVersions[0]  # First (lowest) version
+        $url = $AppConfig.DownloadUrlTemplate -f $version
+        $filename = $AppConfig.FilenameTemplate -f $version
+        Write-Host "  Found enterprise version: $version (lower of: $($uniqueVersions -join ', '))" -ForegroundColor Green
+        return @{Url = $url; Version = $version; Filename = $filename}
+    }
+
+    if ($uniqueVersions.Count -eq 1) {
+        Write-Host "  Only found 1 unique version: $($uniqueVersions[0])" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "  No matches found with regex pattern" -ForegroundColor Yellow
+    }
+    return $null
+}
+
+# Web scraping (GIMP, LibreOffice, Google Earth Pro). $null when the page does not match or the
+# app has no scraping rules here (the caller falls back).
+function Get-DownloadPageVersionInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig
+    )
+
+    Write-Host "Fetching version from download page..." -ForegroundColor Gray
+    $page = Invoke-WebRequest -Uri $AppConfig.DownloadPageUrl
+
+    if ($page.Content -notmatch $AppConfig.DownloadUrlRegex) {
+        return $null
+    }
+
+    if ($AppConfig.Name -eq "GIMP") {
+        # GIMP special handling
+        $version = $matches[1]
+        $majorMinor = $version.Substring(0, $version.LastIndexOf('.'))
+        $url = $AppConfig.DownloadUrlTemplate -f $majorMinor, $version
+        $filename = $AppConfig.FilenameTemplate -f $version
+        return @{Url = $url; Version = $version; Filename = $filename}
+    }
+
+    if ($AppConfig.Name -eq "LibreOffice") {
+        return (Get-LibreOfficeVersionInfo -AppConfig $AppConfig -PageContent $page.Content)
+    }
+
+    if ($AppConfig.Name -eq "Google Earth Pro") {
+        # Google Earth Pro - scrape version from release notes, build versioned URL
+        $version = $matches[1]  # e.g., "7.3.7"
+        $url = $AppConfig.DownloadUrlTemplate -f $version
+        $filename = $AppConfig.FilenameTemplate -f $version
+        Write-Host "  Found version: $version" -ForegroundColor Green
+        return @{Url = $url; Version = $version; Filename = $filename}
+    }
+
+    return $null
+}
+
+# Version extracted after download (Chrome, Affinity, VCRedist)
+function Get-AppLockerDownloadInfo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [hashtable]$AppConfig
+    )
+
+    $uri = [System.Uri]$AppConfig.DownloadUrl
+    $filename = [System.IO.Path]::GetFileName($uri.LocalPath)
+
+    return @{Url = $AppConfig.DownloadUrl; Version = "Latest"; Filename = $filename}
+}
+
 # Generic function to get latest version info for an app
 function Get-LatestVersionInfo {
     param(
         [Parameter(Mandatory=$true)]
         [hashtable]$AppConfig
     )
-    
+
     try {
         # Handle different version detection methods
         if ($AppConfig.WingetPackageId) {
-            # Winget manifest (7-Zip, VLC, Inkscape - unsigned installers). Version, URL and
-            # SHA-256 come as one reviewed bundle; the hash replaces the Authenticode check.
-            Write-Host "Resolving version from winget manifest..." -ForegroundColor Gray
-            $wingetInfo = Get-WingetInstallerInfo -PackageId $AppConfig.WingetPackageId `
-                -Architecture ($AppConfig.WingetArchitecture ?? "x64") `
-                -InstallerType $AppConfig.WingetInstallerType `
-                -AllowedUrlPrefixes $AppConfig.AllowedDownloadUrlPrefixes
-            if ($wingetInfo) {
-                return @{Url = $wingetInfo.Url; Version = $wingetInfo.Version; Filename = $wingetInfo.Filename; Sha256 = $wingetInfo.Sha256}
-            }
-            # Deliberately no FallbackUrl here: without a manifest hash there is nothing to
-            # verify an unsigned installer against. Skip and pick it up on a later run.
-            # If this persists across runs, suspect winget manifest format drift - run the
-            # LocalOnly live test in tests/SharedFunctions.Tests.ps1 to diagnose.
-            Write-Host "No verifiable winget manifest - skipping this run" -ForegroundColor Yellow
-            return $null
+            return (Get-WingetVersionInfo -AppConfig $AppConfig)
         }
-        elseif ($AppConfig.VersionApiUrl) {
-            # API-based version detection (Firefox)
-            Write-Host "Fetching version from API..." -ForegroundColor Gray
-            $versionInfo = Invoke-RestMethod -Uri $AppConfig.VersionApiUrl
-            $version = $versionInfo.($AppConfig.VersionApiProperty)
-            $filename = $AppConfig.FilenameTemplate -f $version
-            return @{Url = $AppConfig.DownloadUrl; Version = $version; Filename = $filename}
+        if ($AppConfig.VersionApiUrl) {
+            return (Get-ApiVersionInfo -AppConfig $AppConfig)
         }
-        elseif ($AppConfig.GitHubApiUrl) {
-            # GitHub releases (Notepad++, Audacity, OpenShot, KeePassXC, Stellarium, Next-Exam)
-            Write-Host "Fetching version from GitHub..." -ForegroundColor Gray
-            $release = Invoke-RestMethod -Uri $AppConfig.GitHubApiUrl
-            $asset = $release.assets | Where-Object { $_.name -match $AppConfig.GitHubAssetPattern } | Select-Object -First 1
-            if ($asset) {
-                # Strip any leading non-digits, so "v8.9.7" and "Audacity-3.7.8" both yield a bare version
-                $version = $release.tag_name -replace '^\D*', ''
-                return @{Url = $asset.browser_download_url; Version = $version; Filename = $asset.name}
-            }
+
+        # These may come up empty-handed, and then fall back like an app with no method at all
+        $info = $null
+        if ($AppConfig.GitHubApiUrl) {
+            $info = Get-GitHubVersionInfo -AppConfig $AppConfig
         }
         elseif ($AppConfig.DownloadPageUrl -and $AppConfig.DownloadUrlRegex) {
-            # Web scraping (GIMP, LibreOffice, Google Earth Pro)
-            Write-Host "Fetching version from download page..." -ForegroundColor Gray
-            $page = Invoke-WebRequest -Uri $AppConfig.DownloadPageUrl
-
-            if ($page.Content -match $AppConfig.DownloadUrlRegex) {
-                if ($AppConfig.Name -eq "GIMP") {
-                    # GIMP special handling
-                    $version = $matches[1]
-                    $majorMinor = $version.Substring(0, $version.LastIndexOf('.'))
-                    $url = $AppConfig.DownloadUrlTemplate -f $majorMinor, $version
-                    $filename = $AppConfig.FilenameTemplate -f $version
-                    return @{Url = $url; Version = $version; Filename = $filename}
-                }
-                elseif ($AppConfig.Name -eq "LibreOffice") {
-                    # LibreOffice special handling - find unique versions and pick the lower one (enterprise/stable)
-                    $allMatches = [regex]::Matches($page.Content, $AppConfig.DownloadUrlRegex)
-                    Write-Host "  Found $($allMatches.Count) match(es) on page" -ForegroundColor Gray
-                    
-                    # Get unique versions
-                    $uniqueVersions = $allMatches | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique | Sort-Object
-                    
-                    if ($uniqueVersions.Count -ge 2) {
-                        # Use the lower version (enterprise/business version)
-                        $version = $uniqueVersions[0]  # First (lowest) version
-                        $url = $AppConfig.DownloadUrlTemplate -f $version
-                        $filename = $AppConfig.FilenameTemplate -f $version
-                        Write-Host "  Found enterprise version: $version (lower of: $($uniqueVersions -join ', '))" -ForegroundColor Green
-                        return @{Url = $url; Version = $version; Filename = $filename}
-                    }
-                    elseif ($uniqueVersions.Count -eq 1) {
-                        Write-Host "  Only found 1 unique version: $($uniqueVersions[0])" -ForegroundColor Yellow
-                    }
-                    else {
-                        Write-Host "  No matches found with regex pattern" -ForegroundColor Yellow
-                    }
-                }
-                elseif ($AppConfig.Name -eq "Google Earth Pro") {
-                    # Google Earth Pro - scrape version from release notes, build versioned URL
-                    $version = $matches[1]  # e.g., "7.3.7"
-                    $url = $AppConfig.DownloadUrlTemplate -f $version
-                    $filename = $AppConfig.FilenameTemplate -f $version
-                    Write-Host "  Found version: $version" -ForegroundColor Green
-                    return @{Url = $url; Version = $version; Filename = $filename}
-                }
-            }
+            $info = Get-DownloadPageVersionInfo -AppConfig $AppConfig
         }
         elseif ($AppConfig.VersionExtraction -eq "AppLocker") {
-            # Version extracted after download (Chrome, Affinity, VCRedist)
-            $uri = [System.Uri]$AppConfig.DownloadUrl
-            $filename = [System.IO.Path]::GetFileName($uri.LocalPath)
-            return @{Url = $AppConfig.DownloadUrl; Version = "Latest"; Filename = $filename}
+            return (Get-AppLockerDownloadInfo -AppConfig $AppConfig)
         }
-        
+        if ($info) {
+            return $info
+        }
+
         # If no method worked, use fallback
         Write-Host "Using fallback URL" -ForegroundColor Yellow
         return (Get-FallbackVersionInfo -AppConfig $AppConfig)

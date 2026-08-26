@@ -8,6 +8,150 @@
 
 . (Join-Path $PSScriptRoot "AppInventory.ps1")
 
+# The tenant's Win32 apps, or - with -OnlyFamilies - just the apps of those families (plus the
+# unmanaged ones with -IncludeUnmanaged).
+function Get-IntuneAppInventoryList {
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [array]$Families,
+        [string[]]$OnlyFamilies,
+        [bool]$IncludeUnmanaged = $false
+    )
+
+    if (-not $OnlyFamilies) {
+        $apps = @(Get-InteropWin32App)
+        Write-Host "  $($apps.Count) Win32 app(s) in tenant" -ForegroundColor Gray
+        return ,$apps
+    }
+
+    # Classify on the list items' display names so only the selected apps are fetched in full.
+    # Deliberately a plain script block: it is only ever invoked from inside Get-InteropWin32App,
+    # i.e. from a scope below this one, so $Families/$OnlyFamilies/$IncludeUnmanaged resolve
+    # through PowerShell's dynamic scoping. Do NOT turn it into a closure (.GetNewClosure()):
+    # a closure is bound to a new dynamic module whose command lookup skips the scope the
+    # scripts dot-source into, and Resolve-AppFamily is then not found (observed:
+    # CommandNotFoundException in both the tests and a script-scope run).
+    $familyFilter = {
+        param($displayName)
+        $family = Resolve-AppFamily -DisplayName "$displayName" -Families $Families
+        if ($family) { $OnlyFamilies -contains $family.AppConfigName } else { [bool]$IncludeUnmanaged }
+    }
+    $apps = @(Get-InteropWin32App -DisplayNameFilter $familyFilter)
+    Write-Host "  $($apps.Count) Win32 app(s) of $($OnlyFamilies -join ', ')$(if ($IncludeUnmanaged) { ' (plus unmanaged apps)' }) in tenant" -ForegroundColor Gray
+    return ,$apps
+}
+
+# Adds the apps the tenant list does not carry yet (the mobileApps list lags a creation by a few
+# seconds; the per-ID GET does not). An app that cannot be read directly is warned about and
+# skipped - the caller works with what is there.
+function Add-IntuneEnsuredApp {
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [array]$Apps,
+        [string[]]$EnsureAppIds
+    )
+
+    $result = @($Apps)
+    foreach ($ensureId in @($EnsureAppIds | Where-Object { $_ })) {
+        if (@($result | Where-Object { "$($_.id)" -eq $ensureId }).Count -gt 0) { continue }
+        try {
+            $late = Get-InteropWin32AppById -AppId $ensureId
+            if ($null -ne $late) {
+                $result += $late
+                Write-Host "  + $($late.displayName) (not in the tenant list yet - fetched directly)" -ForegroundColor Gray
+            }
+        }
+        catch {
+            Write-Host "  Warning: app '$ensureId' could not be read directly: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+    }
+
+    return ,$result
+}
+
+# Group name resolution is best-effort: only when the Groups module is already available.
+function Initialize-GroupNameResolution {
+    param([bool]$ResolveGroupNames = $false)
+
+    if (-not ($ResolveGroupNames -and (Get-Module -ListAvailable -Name Microsoft.Graph.Groups))) {
+        return $false
+    }
+
+    try {
+        Import-Module Microsoft.Graph.Groups -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Host "  Microsoft.Graph.Groups could not be loaded - group assignments are reported by id" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# Install counts come from one tenant-wide report (getAppsInstallSummaryReport) rather than one
+# request per app. If the report fails, the inventory still works - without counts ($null).
+function Get-IntuneInstallSummaryReport {
+    try {
+        $installSummaries = Get-InteropAppInstallSummaryReport
+        Write-Host "  Read install summaries for $($installSummaries.Count) app(s)" -ForegroundColor Gray
+        return $installSummaries
+    }
+    catch {
+        Write-Host "  Warning: could not read the install summary report, the inventory will not include install counts: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+# One app's assignments, or $null when they could not be read - never an empty set, which is a
+# successful read of an unassigned app.
+function Read-IntuneAppAssignmentDetail {
+    param([Parameter(Mandatory = $true)] $App)
+
+    try {
+        $assignments = @(Get-InteropAppAssignmentDetail -AppId $App.id)
+        return ,$assignments
+    }
+    catch {
+        Write-Host "  Warning: could not read assignments for '$($App.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+# One app's relationships. $null (not an empty set) on failure: the record is marked
+# RelationshipsUnavailable and the analysis suppresses its deletion, because it might be a
+# dependency target we cannot see.
+function Read-IntuneAppRelationshipDetail {
+    param([Parameter(Mandatory = $true)] $App)
+
+    try {
+        $relationships = @(Get-InteropAppRelationship -AppId $App.id)
+        return ,$relationships
+    }
+    catch {
+        Write-Host "  Warning: could not read relationships for '$($App.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+# Resolves the display name of every group these assignments target that the cache does not know
+# yet (a group that cannot be read is cached as $null, so it is not asked for again).
+function Update-AppGroupNameCache {
+    param(
+        [Parameter(Mandatory = $true)] [hashtable]$GroupNames,
+        [AllowNull()] $Assignments,
+        [bool]$CanResolveGroups = $false
+    )
+
+    if (-not $CanResolveGroups) { return }
+
+    foreach ($assignment in @($Assignments)) {
+        if (-not $assignment.GroupId -or $GroupNames.ContainsKey($assignment.GroupId)) { continue }
+        try {
+            $GroupNames[$assignment.GroupId] = (Get-MgGroup -GroupId $assignment.GroupId -Property displayName -ErrorAction Stop).DisplayName
+        }
+        catch {
+            $GroupNames[$assignment.GroupId] = $null
+        }
+    }
+}
+
 function Read-IntuneAppInventory {
     <#
     .SYNOPSIS
@@ -51,66 +195,18 @@ function Read-IntuneAppInventory {
         [switch]$ResolveGroupNames
     )
 
-    if ($OnlyFamilies) {
-        # Classify on the list items' display names so only the selected apps are fetched in full.
-        # Deliberately a plain script block: it is only ever invoked from inside Get-InteropWin32App,
-        # i.e. from a scope below this one, so $Families/$OnlyFamilies/$IncludeUnmanaged resolve
-        # through PowerShell's dynamic scoping. Do NOT turn it into a closure (.GetNewClosure()):
-        # a closure is bound to a new dynamic module whose command lookup skips the scope the
-        # scripts dot-source into, and Resolve-AppFamily is then not found (observed:
-        # CommandNotFoundException in both the tests and a script-scope run).
-        $familyFilter = {
-            param($displayName)
-            $family = Resolve-AppFamily -DisplayName "$displayName" -Families $Families
-            if ($family) { $OnlyFamilies -contains $family.AppConfigName } else { [bool]$IncludeUnmanaged }
-        }
-        $apps = @(Get-InteropWin32App -DisplayNameFilter $familyFilter)
-        Write-Host "  $($apps.Count) Win32 app(s) of $($OnlyFamilies -join ', ')$(if ($IncludeUnmanaged) { ' (plus unmanaged apps)' }) in tenant" -ForegroundColor Gray
-    }
-    else {
-        $apps = @(Get-InteropWin32App)
-        Write-Host "  $($apps.Count) Win32 app(s) in tenant" -ForegroundColor Gray
-    }
-
-    foreach ($ensureId in @($EnsureAppIds | Where-Object { $_ })) {
-        if (@($apps | Where-Object { "$($_.id)" -eq $ensureId }).Count -gt 0) { continue }
-        try {
-            $late = Get-InteropWin32AppById -AppId $ensureId
-            if ($null -ne $late) {
-                $apps += $late
-                Write-Host "  + $($late.displayName) (not in the tenant list yet - fetched directly)" -ForegroundColor Gray
-            }
-        }
-        catch {
-            Write-Host "  Warning: app '$ensureId' could not be read directly: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
-    }
+    # No @() around these calls: both return the array as one object (,$array), which @() would
+    # wrap a second time
+    $apps = Get-IntuneAppInventoryList -Families $Families -OnlyFamilies $OnlyFamilies -IncludeUnmanaged ([bool]$IncludeUnmanaged)
+    $apps = Add-IntuneEnsuredApp -Apps $apps -EnsureAppIds $EnsureAppIds
     $appCount = $apps.Count
 
-    # Group name resolution is best-effort: only when the Groups module is already available
     $groupNames = @{}
-    $canResolveGroups = $false
-    if ($ResolveGroupNames -and (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
-        try {
-            Import-Module Microsoft.Graph.Groups -ErrorAction Stop
-            $canResolveGroups = $true
-        }
-        catch {
-            Write-Host "  Microsoft.Graph.Groups could not be loaded - group assignments are reported by id" -ForegroundColor Yellow
-        }
-    }
+    $canResolveGroups = Initialize-GroupNameResolution -ResolveGroupNames ([bool]$ResolveGroupNames)
 
-    # Install counts come from one tenant-wide report (getAppsInstallSummaryReport) rather than
-    # one request per app. If the report fails, the inventory still works - without counts.
     $installSummaries = $null
     if ($IncludeInstallSummary) {
-        try {
-            $installSummaries = Get-InteropAppInstallSummaryReport
-            Write-Host "  Read install summaries for $($installSummaries.Count) app(s)" -ForegroundColor Gray
-        }
-        catch {
-            Write-Host "  Warning: could not read the install summary report, the inventory will not include install counts: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+        $installSummaries = Get-IntuneInstallSummaryReport
     }
 
     $records = [System.Collections.Generic.List[object]]::new()
@@ -119,34 +215,10 @@ function Read-IntuneAppInventory {
         $index++
         Write-Progress -Activity 'Reading app details' -Status "$index of $($apps.Count): $($app.displayName)" -PercentComplete (100 * $index / [math]::Max($apps.Count, 1))
 
-        $assignments = $null
-        try {
-            $assignments = @(Get-InteropAppAssignmentDetail -AppId $app.id)
-        }
-        catch {
-            Write-Host "  Warning: could not read assignments for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+        $assignments = Read-IntuneAppAssignmentDetail -App $app
+        Update-AppGroupNameCache -GroupNames $groupNames -Assignments $assignments -CanResolveGroups $canResolveGroups
 
-        foreach ($assignment in @($assignments)) {
-            if ($canResolveGroups -and $assignment.GroupId -and -not $groupNames.ContainsKey($assignment.GroupId)) {
-                try {
-                    $groupNames[$assignment.GroupId] = (Get-MgGroup -GroupId $assignment.GroupId -Property displayName -ErrorAction Stop).DisplayName
-                }
-                catch {
-                    $groupNames[$assignment.GroupId] = $null
-                }
-            }
-        }
-
-        # $null (not an empty set) on failure: the record is marked RelationshipsUnavailable and
-        # the analysis suppresses its deletion, because it might be a dependency target we cannot see.
-        $relationships = $null
-        try {
-            $relationships = @(Get-InteropAppRelationship -AppId $app.id)
-        }
-        catch {
-            Write-Host "  Warning: could not read relationships for '$($app.displayName)': $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+        $relationships = Read-IntuneAppRelationshipDetail -App $app
 
         # $null check, not truthiness: an empty (but successfully read) report is a hashtable
         # that evaluates to $false
