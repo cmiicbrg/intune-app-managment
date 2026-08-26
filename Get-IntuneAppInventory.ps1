@@ -189,19 +189,23 @@ try {
     Write-Host ("  Families present: {0}, near supersedence graph limit: {1}" -f $s.FamiliesPresent, $s.FamiliesNearGraphLimit)
     Write-Host ("  Retention: {0} delete candidate(s), {1} to review" -f $s.DeleteCandidates, $s.ReviewItems)
     Write-Host ""
-    $analysis.Families | Sort-Object Family | ForEach-Object {
-        [PSCustomObject]@{
-            Family   = $_.Family
-            InPlan   = $_.InPlan
-            Versions = $_.VersionCount
-            Newest   = if ($_.Newest) { $_.Newest.Version } else { '-' }
-            Graph    = $_.SupersedenceGraphNodes
-            Policy   = "$($_.Policy.KeepNewest)/$($_.Policy.KeepNewerThanWeeks)w"
-            Keep     = $_.KeepCount
-            Delete   = $_.DeleteCandidateCount
-            Review   = $_.ReviewCount
-        }
-    } | Format-Table -AutoSize | Out-Host
+    $analysis.Families |
+        Sort-Object Family |
+        ForEach-Object {
+            [PSCustomObject]@{
+                Family   = $_.Family
+                InPlan   = $_.InPlan
+                Versions = $_.VersionCount
+                Newest   = if ($_.Newest) { $_.Newest.Version } else { '-' }
+                Graph    = $_.SupersedenceGraphNodes
+                Policy   = "$($_.Policy.KeepNewest)/$($_.Policy.KeepNewerThanWeeks)w"
+                Keep     = $_.KeepCount
+                Delete   = $_.DeleteCandidateCount
+                Review   = $_.ReviewCount
+            }
+        } |
+        Format-Table -AutoSize |
+        Out-Host
 
     if ($analysis.Anomalies.Count -gt 0) {
         Write-Host "Anomalies:" -ForegroundColor Yellow
