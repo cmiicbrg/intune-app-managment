@@ -9,6 +9,69 @@
 
 . (Join-Path $PSScriptRoot "AppCleanup.ps1")
 
+# The one-line description of a planned deletion, used for the decision prompt and the console.
+function Format-AppCleanupLabel {
+    param([Parameter(Mandatory = $true)] $Deletion)
+
+    $assignmentInfo = if ($null -ne $Deletion.AssignmentCount) { "$($Deletion.AssignmentCount) assignment(s)" } else { 'assignments unknown' }
+    $superseded = if ($null -ne $Deletion.SupersededWeeks) { "superseded $($Deletion.SupersededWeeks) weeks ago" } else { 'superseded at an unknown time' }
+
+    return "$($Deletion.DisplayName) v$($Deletion.DisplayVersion) [$($Deletion.Family)] - rank $($Deletion.Rank), $superseded, $($Deletion.AgeWeeks) weeks old, $assignmentInfo"
+}
+
+# Unlinks and deletes one version, returning @{ Outcome; Detail }.
+#
+# Everything here happens AFTER the decision (an interactive prompt may have sat open for a
+# while): the relationships are read fresh now. Intune refuses to delete an app that is part of
+# a supersedence relationship, so the version is unlinked first - unless it has become a
+# dependency target in the meantime, in which case nothing is touched.
+function Remove-IntuneAppVersion {
+    param(
+        [Parameter(Mandatory = $true)] $Deletion
+    )
+
+    try {
+        $removal = Remove-InteropAppRelationships -AppId $Deletion.Id
+    }
+    catch {
+        return @{ Outcome = 'Skipped'; Detail = "could not re-read relationships: $($_.Exception.Message)" }
+    }
+
+    if ($removal.DependencyTargets.Count -gt 0) {
+        return @{ Outcome = 'Skipped'; Detail = "is now a dependency target of: $($removal.DependencyTargets -join ', ') - nothing was changed" }
+    }
+    if ($removal.Error) {
+        return @{ Outcome = 'Failed'; Detail = "$($removal.Error) ($($removal.Removed) of $($removal.Total) relationship(s) were removed before that - the app is partially unlinked and still in Intune; re-run the cleanup)" }
+    }
+
+    try {
+        Remove-InteropWin32App -AppId $Deletion.Id
+        return @{ Outcome = 'Deleted'; Detail = "$($removal.Removed) relationship(s) removed first" }
+    }
+    catch {
+        $detail = $_.Exception.Message
+        if ($removal.Removed -gt 0) {
+            $detail += " (its $($removal.Removed) relationship(s) were already removed, so the app is now unlinked and still in Intune - re-run the cleanup)"
+        }
+        return @{ Outcome = 'Failed'; Detail = $detail }
+    }
+}
+
+# Reports one version's outcome on the console.
+function Write-AppCleanupOutcome {
+    param(
+        [Parameter(Mandatory = $true)] [string]$Outcome,
+        [Parameter(Mandatory = $true)] [string]$Label,
+        [AllowNull()] [string]$Detail
+    )
+
+    switch ($Outcome) {
+        'Deleted' { Write-Host "  Deleted $Label" -ForegroundColor Green }
+        'Skipped' { Write-Host "  Skipped $Label - $Detail" -ForegroundColor Yellow }
+        'Failed' { Write-Host "  FAILED  $Label - $Detail" -ForegroundColor Red }
+    }
+}
+
 function Invoke-IntuneAppCleanup {
     <#
     .SYNOPSIS
@@ -43,9 +106,7 @@ function Invoke-IntuneAppCleanup {
 
     $results = [System.Collections.Generic.List[object]]::new()
     foreach ($deletion in @($Plan.Deletions)) {
-        $assignmentInfo = if ($null -ne $deletion.AssignmentCount) { "$($deletion.AssignmentCount) assignment(s)" } else { 'assignments unknown' }
-        $superseded = if ($null -ne $deletion.SupersededWeeks) { "superseded $($deletion.SupersededWeeks) weeks ago" } else { 'superseded at an unknown time' }
-        $label = "$($deletion.DisplayName) v$($deletion.DisplayVersion) [$($deletion.Family)] - rank $($deletion.Rank), $superseded, $($deletion.AgeWeeks) weeks old, $assignmentInfo"
+        $label = Format-AppCleanupLabel -Deletion $deletion
         $outcome = [ordered]@{
             Id              = $deletion.Id
             Family          = $deletion.Family
@@ -68,50 +129,11 @@ function Invoke-IntuneAppCleanup {
             continue
         }
 
-        # Everything below happens AFTER the decision (an interactive prompt may have sat open
-        # for a while): the relationships are read fresh now. Intune refuses to delete an app
-        # that is part of a supersedence relationship, so the version is unlinked first - unless
-        # it has become a dependency target in the meantime, in which case nothing is touched.
-        $removal = $null
-        try {
-            $removal = Remove-InteropAppRelationships -AppId $deletion.Id
-        }
-        catch {
-            $outcome.Outcome = 'Skipped'
-            $outcome.Detail = "could not re-read relationships: $($_.Exception.Message)"
-            Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
-            $results.Add([PSCustomObject]$outcome)
-            continue
-        }
-        if ($removal.DependencyTargets.Count -gt 0) {
-            $outcome.Outcome = 'Skipped'
-            $outcome.Detail = "is now a dependency target of: $($removal.DependencyTargets -join ', ') - nothing was changed"
-            Write-Host "  Skipped $label - $($outcome.Detail)" -ForegroundColor Yellow
-            $results.Add([PSCustomObject]$outcome)
-            continue
-        }
-        if ($removal.Error) {
-            $outcome.Outcome = 'Failed'
-            $outcome.Detail = "$($removal.Error) ($($removal.Removed) of $($removal.Total) relationship(s) were removed before that - the app is partially unlinked and still in Intune; re-run the cleanup)"
-            Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
-            $results.Add([PSCustomObject]$outcome)
-            continue
-        }
+        $result = Remove-IntuneAppVersion -Deletion $deletion
+        $outcome.Outcome = $result.Outcome
+        $outcome.Detail = $result.Detail
+        Write-AppCleanupOutcome -Outcome $result.Outcome -Label $label -Detail $result.Detail
 
-        try {
-            Remove-InteropWin32App -AppId $deletion.Id
-            $outcome.Outcome = 'Deleted'
-            $outcome.Detail = "$($removal.Removed) relationship(s) removed first"
-            Write-Host "  Deleted $label" -ForegroundColor Green
-        }
-        catch {
-            $outcome.Outcome = 'Failed'
-            $outcome.Detail = $_.Exception.Message
-            if ($removal.Removed -gt 0) {
-                $outcome.Detail += " (its $($removal.Removed) relationship(s) were already removed, so the app is now unlinked and still in Intune - re-run the cleanup)"
-            }
-            Write-Host "  FAILED  $label - $($outcome.Detail)" -ForegroundColor Red
-        }
         $results.Add([PSCustomObject]$outcome)
     }
     return @($results)

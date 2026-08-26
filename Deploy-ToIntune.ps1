@@ -139,6 +139,148 @@ if ($PSCmdlet.ParameterSetName -eq 'TenantName' -and -not $ShowPlan) {
     $ClientSecret = $tenantCreds.ClientSecret
 }
 
+# Assigns the app to All Users, unless that target is already assigned. Returns the ids of the
+# assignments created here (used to enable auto-update on supersedence).
+function Add-AppAllUsersAssignment {
+    param(
+        [Parameter(Mandatory = $true)] [string]$AppId,
+        [AllowEmptyCollection()] [array]$ExistingTargets = @(),
+        [bool]$AutoUpdateSuperseded
+    )
+
+    if ($ExistingTargets -contains 'AllUsers') {
+        Write-Host "  All Users: already assigned" -ForegroundColor Gray
+        return @()
+    }
+
+    Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
+    $assignment = Add-InteropAllUsersAssignment -AppId $AppId -Intent "available" -Notification "showAll" -AutoUpdateSuperseded $AutoUpdateSuperseded
+    if ($assignment -and $assignment.id) {
+        Write-Host "  Assigned to All Users" -ForegroundColor Green
+        return @($assignment.id)
+    }
+
+    Write-Host "  All Users assignment was NOT created (see warning above)" -ForegroundColor Yellow
+    return @()
+}
+
+# Assigns the app to All Devices (required intent), unless that target is already assigned.
+function Add-AppAllDevicesAssignment {
+    param(
+        [Parameter(Mandatory = $true)] [string]$AppId,
+        [AllowEmptyCollection()] [array]$ExistingTargets = @()
+    )
+
+    if ($ExistingTargets -contains 'AllDevices') {
+        Write-Host "  All Devices: already assigned" -ForegroundColor Gray
+        return
+    }
+
+    Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
+    $deviceAssignment = Add-InteropAllDevicesAssignment -AppId $AppId -Intent "required" -Notification "showAll"
+    if ($deviceAssignment -and $deviceAssignment.id) {
+        Write-Host "  Assigned to All Devices" -ForegroundColor Green
+        return
+    }
+
+    Write-Host "  All Devices assignment was NOT created (see warning above)" -ForegroundColor Yellow
+}
+
+# Resolves the Groups module once per app rather than once per group: Get-Module -ListAvailable
+# scans the whole module path, and Install-Module can prompt. $false means every group assignment
+# is skipped while the All Users / All Devices assignments stay applied. Honors -SkipInstallation
+# like Install-RequiredModules.
+function Initialize-AppGroupsModule {
+    param([bool]$SkipModuleInstallation)
+
+    try {
+        if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
+            if ($SkipModuleInstallation) {
+                throw "Microsoft.Graph.Groups is not installed and -SkipInstallation was specified"
+            }
+            Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
+            Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
+        }
+        Import-Module Microsoft.Graph.Groups -ErrorAction Stop
+        return $true
+    }
+    catch {
+        Write-Host "  Warning: Microsoft.Graph.Groups is unavailable, skipping all group assignments" -ForegroundColor Yellow
+        Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+}
+
+# The Entra ID group of that display name, or $null when there is none. Single quotes are doubled
+# per the OData string-literal rules, so a name like "Teachers' Devices" resolves instead of
+# producing an invalid filter.
+function Resolve-EntraGroup {
+    param([Parameter(Mandatory = $true)] [string]$GroupName)
+
+    $odataGroupName = $GroupName -replace "'", "''"
+    $group = Get-MgGroup -Filter "displayName eq '$odataGroupName'" -ErrorAction Stop
+    if (-not $group) {
+        return $null
+    }
+
+    if ($group -is [array] -and $group.Count -gt 1) {
+        Write-Host "  Warning: Multiple groups found with name '$GroupName', using first match" -ForegroundColor Yellow
+        return $group[0]
+    }
+
+    return $group
+}
+
+# Assigns the app to one group of the assignment spec. Every failure is contained here: the
+# remaining groups and the rest of the app's deployment are unaffected.
+#
+# Note: group assignment IDs are deliberately not returned - matching existing behaviour, where
+# auto-update supersedence is only enabled for All Users assignments.
+function Add-AppGroupAssignment {
+    param(
+        [Parameter(Mandatory = $true)] [string]$AppId,
+        [Parameter(Mandatory = $true)] $GroupAssignment,
+        [AllowEmptyCollection()] [array]$ExistingTargets = @(),
+        [bool]$AutoUpdateSuperseded
+    )
+
+    $groupName = $GroupAssignment.Name
+    $groupIntent = if ($GroupAssignment.Intent) { $GroupAssignment.Intent } else { 'Available' }
+    Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
+
+    try {
+        # Ensure connection is still valid. Skips this group only.
+        if (-not (Test-IntuneConnection)) {
+            Write-Warning "  Connection lost, assignment to group '$groupName' will be skipped"
+            return
+        }
+
+        $group = Resolve-EntraGroup -GroupName $groupName
+        if (-not $group) {
+            Write-Host "  Warning: Group '$groupName' not found" -ForegroundColor Yellow
+            return
+        }
+
+        if ($ExistingTargets -contains "Group:$($group.Id)") {
+            Write-Host "  Group '$groupName': already assigned" -ForegroundColor Gray
+            return
+        }
+
+        $intent = $groupIntent.ToLower()
+        $groupResult = Add-InteropGroupAssignment -AppId $AppId -GroupId $group.Id -Intent $intent -Notification "showAll" -AutoUpdateSuperseded $AutoUpdateSuperseded
+        if ($groupResult -and $groupResult.id) {
+            Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
+        }
+        else {
+            Write-Host "  Group '$groupName' assignment was NOT created (see warning above)" -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Host "  Warning: Failed to assign to group '$groupName': $_" -ForegroundColor Yellow
+        Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 # Applies an assignment spec to an app already present in Intune and returns the IDs of the
 # assignments that were created (used to enable auto-update on supersedence).
 #
@@ -179,116 +321,420 @@ function Set-AppAssignment {
     $existingTargets = @(Get-InteropAppAssignment -AppId $AppId)
 
     if ($AssignAllUsers) {
-        if ($existingTargets -contains 'AllUsers') {
-            Write-Host "  All Users: already assigned" -ForegroundColor Gray
-        }
-        else {
-            Write-Host "  Assigning to All Users..." -ForegroundColor Cyan
-            $assignment = Add-InteropAllUsersAssignment -AppId $AppId -Intent "available" -Notification "showAll" -AutoUpdateSuperseded $AutoUpdateSuperseded
-            if ($assignment -and $assignment.id) {
-                $assignmentIds += $assignment.id
-                Write-Host "  Assigned to All Users" -ForegroundColor Green
-            }
-            else {
-                Write-Host "  All Users assignment was NOT created (see warning above)" -ForegroundColor Yellow
-            }
-        }
+        $assignmentIds += @(Add-AppAllUsersAssignment -AppId $AppId -ExistingTargets $existingTargets -AutoUpdateSuperseded $AutoUpdateSuperseded)
     }
 
     if ($AssignAllDevices) {
-        if ($existingTargets -contains 'AllDevices') {
-            Write-Host "  All Devices: already assigned" -ForegroundColor Gray
-        }
-        else {
-            Write-Host "  Assigning to All Devices..." -ForegroundColor Cyan
-            $deviceAssignment = Add-InteropAllDevicesAssignment -AppId $AppId -Intent "required" -Notification "showAll"
-            if ($deviceAssignment -and $deviceAssignment.id) {
-                Write-Host "  Assigned to All Devices" -ForegroundColor Green
-            }
-            else {
-                Write-Host "  All Devices assignment was NOT created (see warning above)" -ForegroundColor Yellow
-            }
-        }
+        Add-AppAllDevicesAssignment -AppId $AppId -ExistingTargets $existingTargets
     }
 
-    # Resolve the Groups module once per app rather than once per group: Get-Module
-    # -ListAvailable scans the whole module path, and Install-Module can prompt. If it is
-    # unavailable, skip every group assignment but keep the All Users / All Devices
-    # assignments applied above. Honors -SkipInstallation like Install-RequiredModules.
-    $groupsModuleReady = $true
-    if (@($AssignGroups).Count -gt 0) {
-        try {
-            if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Groups)) {
-                if ($SkipInstallation) {
-                    throw "Microsoft.Graph.Groups is not installed and -SkipInstallation was specified"
-                }
-                Write-Host "  Installing Microsoft.Graph.Groups module..." -ForegroundColor Yellow
-                Install-Module -Name Microsoft.Graph.Groups -Scope CurrentUser -Force -AllowClobber
-            }
-            Import-Module Microsoft.Graph.Groups -ErrorAction Stop
-        }
-        catch {
-            Write-Host "  Warning: Microsoft.Graph.Groups is unavailable, skipping all group assignments" -ForegroundColor Yellow
-            Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
-            $groupsModuleReady = $false
-        }
+    if (@($AssignGroups).Count -eq 0) {
+        return $assignmentIds
+    }
+    if (-not (Initialize-AppGroupsModule -SkipModuleInstallation ([bool]$SkipInstallation))) {
+        return $assignmentIds
     }
 
     foreach ($groupAssignment in @($AssignGroups)) {
-        if (-not $groupsModuleReady) { break }
-
-        $groupName = $groupAssignment.Name
-        $groupIntent = if ($groupAssignment.Intent) { $groupAssignment.Intent } else { 'Available' }
-        Write-Host "  Assigning to group: $groupName..." -ForegroundColor Cyan
-
-        try {
-            # Ensure connection is still valid. Skips this group only - remaining groups
-            # and the rest of the app's deployment are unaffected.
-            if (-not (Test-IntuneConnection)) {
-                Write-Warning "  Connection lost, assignment to group '$groupName' will be skipped"
-                continue
-            }
-
-            # Query Entra ID group by display name. Single quotes are doubled per the OData
-            # string-literal rules, so a name like "Teachers' Devices" resolves instead of
-            # producing an invalid filter.
-            $odataGroupName = $groupName -replace "'", "''"
-            $group = Get-MgGroup -Filter "displayName eq '$odataGroupName'" -ErrorAction Stop
-
-            if ($group) {
-                if ($group -is [array] -and $group.Count -gt 1) {
-                    Write-Host "  Warning: Multiple groups found with name '$groupName', using first match" -ForegroundColor Yellow
-                    $group = $group[0]
-                }
-
-                if ($existingTargets -contains "Group:$($group.Id)") {
-                    Write-Host "  Group '$groupName': already assigned" -ForegroundColor Gray
-                    continue
-                }
-
-                # Note: group assignment IDs are deliberately not collected into $assignmentIds -
-                # matching existing behaviour, where auto-update supersedence is only enabled for
-                # All Users assignments.
-                $intent = $groupIntent.ToLower()
-                $groupResult = Add-InteropGroupAssignment -AppId $AppId -GroupId $group.Id -Intent $intent -Notification "showAll" -AutoUpdateSuperseded $AutoUpdateSuperseded
-                if ($groupResult -and $groupResult.id) {
-                    Write-Host "  Assigned to group '$groupName' (ID: $($group.Id)) as $groupIntent" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "  Group '$groupName' assignment was NOT created (see warning above)" -ForegroundColor Yellow
-                }
-            }
-            else {
-                Write-Host "  Warning: Group '$groupName' not found" -ForegroundColor Yellow
-            }
-        }
-        catch {
-            Write-Host "  Warning: Failed to assign to group '$groupName': $_" -ForegroundColor Yellow
-            Write-Host "  Error details: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+        Add-AppGroupAssignment -AppId $AppId -GroupAssignment $groupAssignment -ExistingTargets $existingTargets -AutoUpdateSuperseded $AutoUpdateSuperseded
     }
 
     return $assignmentIds
+}
+
+# Reports one existing version and returns its raw version string, or $null when the version
+# cannot be determined at all (that app is then skipped).
+function Get-ExistingAppVersionRaw {
+    param([Parameter(Mandatory = $true)] $App)
+
+    # Version from displayVersion, else parsed from the display name (shared helper)
+    $versionInfo = Get-IntuneAppVersion -App $App
+    if ($null -eq $versionInfo) {
+        Write-Host "    - $($App.displayName) (version unknown - skipping)" -ForegroundColor Yellow
+        return $null
+    }
+
+    if ($versionInfo.Source -eq 'displayVersion') {
+        Write-Host "    - $($App.displayName) (v$($versionInfo.Raw))" -ForegroundColor Gray
+    }
+    else {
+        Write-Host "    - $($App.displayName) (v$($versionInfo.Raw) extracted from name)" -ForegroundColor Gray
+    }
+
+    return $versionInfo.Raw
+}
+
+# Compares every existing version of the family against the version to deploy and returns
+# @{ NewestOlderApp; SameVersionApp } - the version to supersede (only the newest older one, so
+# the chain stays linear) and the app that already carries this exact version ($null with
+# -ForceUpdate, which re-creates the package instead).
+function Get-AppDeploymentVersionState {
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [array]$ExistingApps,
+        [Parameter(Mandatory = $true)] [string]$NewVersion,
+        [bool]$ForceUpdate
+    )
+
+    $state = @{ NewestOlderApp = $null; SameVersionApp = $null }
+    $olderApps = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($existingApp in $ExistingApps) {
+        $existingVersion = Get-ExistingAppVersionRaw -App $existingApp
+        if ($null -eq $existingVersion) { continue }
+
+        try {
+            # Compare versions
+            $existingVer = [version]$existingVersion
+            $newVer = [version]$NewVersion
+
+            if ($existingVer -lt $newVer) {
+                Write-Host "      -> Older version: $existingVersion < $NewVersion" -ForegroundColor Gray
+                $olderApps.Add([PSCustomObject]@{ App = $existingApp; Version = $existingVer })
+            }
+            elseif ($existingVer -eq $newVer) {
+                Write-Host "      -> Same version ($existingVersion = $NewVersion)" -ForegroundColor Yellow
+                if (-not $ForceUpdate) { $state.SameVersionApp = $existingApp }
+            }
+            else {
+                Write-Host "      -> Newer version exists ($existingVersion > $NewVersion)" -ForegroundColor Cyan
+            }
+        }
+        catch {
+            Write-Host "      Warning: Could not compare versions: $_" -ForegroundColor Yellow
+        }
+    }
+
+    # Track only the newest older version for supersedence (creates proper chain)
+    $state.NewestOlderApp = ($olderApps | Sort-Object Version -Descending | Select-Object -First 1).App
+    return $state
+}
+
+# Reports the family's existing versions and what the new version means for them
+# (see Get-AppDeploymentVersionState).
+function Resolve-AppDeploymentState {
+    param(
+        [AllowEmptyCollection()] [array]$ExistingApps = @(),
+        [string]$AppName,
+        [string]$NewVersion,
+        [bool]$ForceUpdate
+    )
+
+    if (-not $ExistingApps) {
+        Write-Host "  No existing apps found - creating new..." -ForegroundColor Cyan
+        return @{ NewestOlderApp = $null; SameVersionApp = $null }
+    }
+
+    Write-Host "  Found $($ExistingApps.Count) existing app(s) for '$AppName'" -ForegroundColor Yellow
+
+    # Analyze all existing apps to find versions (always check all, don't rely on exact match)
+    $state = Get-AppDeploymentVersionState -ExistingApps $ExistingApps -NewVersion $NewVersion -ForceUpdate $ForceUpdate
+
+    if ($state.NewestOlderApp) {
+        Write-Host "  Will supersede most recent older version: $($state.NewestOlderApp.displayName) v$($state.NewestOlderApp.displayVersion)" -ForegroundColor Yellow
+    }
+    if ($state.SameVersionApp) {
+        return $state
+    }
+
+    if ($state.NewestOlderApp) {
+        Write-Host "  Creating new version with supersedence..." -ForegroundColor Cyan
+    }
+    else {
+        Write-Host "  No older versions found - creating new app without supersedence" -ForegroundColor Gray
+    }
+
+    return $state
+}
+
+# Pre-flight: Intune caps a supersedence graph at 11 nodes. If the version to be superseded
+# already sits in a full graph, the upload would succeed but the supersedence would fail, leaving
+# an unlinked version - throw before uploading anything.
+function Assert-SupersedenceHeadroom {
+    param(
+        [AllowEmptyCollection()] [array]$Records = @(),
+        [AllowNull()] $NewestOlderApp,
+        [string]$AppName
+    )
+
+    if ($null -eq $NewestOlderApp) {
+        return
+    }
+
+    $headroom = Test-SupersedenceHeadroom -Records $Records -AppId $NewestOlderApp.Id
+    if ($headroom.Unknown) {
+        throw "Cannot verify that the new version can supersede $($NewestOlderApp.displayName): $($headroom.Reason). Nothing was uploaded - retry the deployment."
+    }
+    if (-not $headroom.CanAddVersion) {
+        throw "The supersedence graph of '$AppName' already has $($headroom.Nodes) node(s) - Intune's limit is $($headroom.Limit), so the new version could not supersede $($NewestOlderApp.displayName). Run .\Remove-OldIntuneAppVersions.ps1 for this tenant (or loosen its retention policy) and deploy again."
+    }
+    if ($headroom.WillFill) {
+        Write-Host "  Warning: this version fills the supersedence graph of '$AppName' ($($headroom.NodesAfter) of $($headroom.Limit) nodes); the next one will fail unless old versions are removed first" -ForegroundColor Yellow
+    }
+}
+
+# The upload parameters for one app, including its icon when there is one (a failed icon is
+# cosmetic and never stops the deployment).
+function New-AppUploadParams {
+    param(
+        [Parameter(Mandatory = $true)] [hashtable]$AppConfig,
+        [string]$IntuneWinPath,
+        [string]$IconPath
+    )
+
+    $appParams = @{
+        FilePath             = $IntuneWinPath
+        DisplayName          = $AppConfig.DisplayName
+        Description          = $AppConfig.Description
+        Publisher            = $AppConfig.Publisher
+        AppVersion           = $AppConfig.AppVersion
+        InstallExperience    = $AppConfig.InstallExperience
+        RestartBehavior      = $AppConfig.RestartBehavior
+        DetectionRule        = $AppConfig.DetectionRules
+        RequirementRule      = $AppConfig.RequirementRule
+        InstallCommandLine   = $AppConfig.InstallCommandLine
+        UninstallCommandLine = $AppConfig.UninstallCommandLine
+        Verbose              = $true
+    }
+
+    # Add icon if available (must be converted to base64)
+    if ($IconPath -and (Test-Path $IconPath)) {
+        Write-Host "  Adding app icon: $(Split-Path $IconPath -Leaf)" -ForegroundColor Gray
+        try {
+            $appParams.Icon = New-InteropAppIcon -FilePath $IconPath
+        }
+        catch {
+            Write-Host "  Warning: Failed to add icon: $_" -ForegroundColor Yellow
+        }
+    }
+
+    return $appParams
+}
+
+# Uploads the package to Intune. An Azure Storage failure mid-upload can still leave the app
+# created, so a failure is followed by a lookup before it is treated as one.
+function Publish-AppPackage {
+    param(
+        [Parameter(Mandatory = $true)] [hashtable]$AppParams,
+        [Parameter(Mandatory = $true)] [hashtable]$AppConfig
+    )
+
+    try {
+        $Win32App = Publish-InteropWin32App -AppParams $AppParams
+
+        # Validate that the app was created successfully with a valid ID
+        if (-not $Win32App -or -not $Win32App.id) {
+            throw "App creation returned but no valid app ID was provided"
+        }
+
+        Write-Host "  Successfully created new app: $($AppConfig.DisplayName) v$($AppConfig.AppVersion)" -ForegroundColor Green
+        Write-Host "    App ID: $($Win32App.id)" -ForegroundColor Gray
+        return $Win32App
+    }
+    catch {
+        Write-Host "  Warning: Upload encountered an error: $_" -ForegroundColor Yellow
+
+        # Check if app was created in Intune despite the error
+        Write-Host "  Checking if app was created in Intune..." -ForegroundColor Gray
+        Start-Sleep -Seconds 10
+
+        $createdApp = Get-InteropWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
+        if ($createdApp -and $createdApp.id) {
+            Write-Host "  Found created app in Intune (ID: $($createdApp.id))" -ForegroundColor Green
+            return $createdApp
+        }
+
+        throw "App creation failed and app not found in Intune: $_"
+    }
+}
+
+# Links the new version over the versions it replaces.
+function Set-AppSupersedence {
+    param(
+        [Parameter(Mandatory = $true)] $Win32App,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [array]$OldVersionApps,
+        [Parameter(Mandatory = $true)] [hashtable]$AppConfig
+    )
+
+    if ($OldVersionApps.Count -eq 0) {
+        return
+    }
+
+    Write-Host "  Setting up supersedence relationships..." -ForegroundColor Cyan
+
+    foreach ($oldApp in $OldVersionApps) {
+        try {
+            Write-Host "    Superseding: $($oldApp.displayName) v$($oldApp.displayVersion)" -ForegroundColor Gray
+
+            # Get supersedence type from app config (default to "Update" if not specified)
+            $supersedenceType = if ($AppConfig.SupersedenceType) { $AppConfig.SupersedenceType } else { "Update" }
+            Write-Host "      Supersedence type: $supersedenceType" -ForegroundColor Gray
+
+            Add-InteropSupersedence `
+                -AppId $Win32App.id `
+                -SupersededAppId $oldApp.id `
+                -SupersedenceType $supersedenceType
+
+            Write-Host "    [OK] Supersedence configured ($supersedenceType): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
+        }
+        catch {
+            # The app exists in Intune now but is not linked into the chain and has no
+            # assignments yet. Assigning it anyway would put an unlinked version into the
+            # Company Portal, so this deployment fails loudly instead.
+            throw "Failed to set supersedence for $($oldApp.displayName): $($_.Exception.Message) '$($AppConfig.DisplayName)' v$($AppConfig.AppVersion) (ID $($Win32App.id)) exists without supersedence and without assignments - delete it in Intune, fix the chain (cleanup / retention), then deploy again."
+        }
+    }
+}
+
+# Deploys a dependency that is not in Intune yet, from the package this repository builds for it
+# (no assignment - a dependency is installed through the app that depends on it).
+function Publish-DependencyApp {
+    param(
+        [Parameter(Mandatory = $true)] [string]$DependencyName,
+        [Parameter(Mandatory = $true)] $DependencyConfig
+    )
+
+    # Find the dependency's app entry in $appsToDeploy
+    $depAppEntry = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $DependencyName }
+    if (-not $depAppEntry) {
+        Write-Host "    [Err] Dependency '$DependencyName' not found in appsToDeploy" -ForegroundColor Red
+        return $null
+    }
+
+    $depFolder = Join-Path (Join-Path $BaseDir "packages") $depAppEntry.Folder
+    $depIntunewinFiles = Get-ChildItem -Path $depFolder -File |
+        Where-Object { $_.Name -like $depAppEntry.Pattern -and $_.Extension -eq ".intunewin" } |
+        Sort-Object LastWriteTime -Descending
+
+    if ($depIntunewinFiles.Count -eq 0) {
+        Write-Host "    [Err] No .intunewin package found for dependency '$DependencyName'" -ForegroundColor Red
+        Write-Host "    Run: .\Download-And-Package-Software.ps1 -AppName $DependencyName" -ForegroundColor Yellow
+        return $null
+    }
+
+    $depIntunewinFile = $depIntunewinFiles[0]
+    $depVersion = "1.0"
+    if ($depIntunewinFile.BaseName -match '(\d+\.[\d\.]+)') {
+        $depVersion = $matches[1].TrimEnd('.')
+    }
+
+    $depMetaData = Get-InteropPackageMetadata -FilePath $depIntunewinFile.FullName
+    $depSetupFile = $depMetaData.ApplicationInfo.SetupFile
+
+    # Build config for the dependency
+    if ($depAppEntry.PackageType -eq "MSI") {
+        $depAppConfig = Get-MsiAppConfig -AppName $DependencyName -Version $depVersion -SetupFile $depSetupFile -IntuneWinPath $depIntunewinFile.FullName
+    }
+    else {
+        $depAppConfig = Get-FileAppConfig -AppName $DependencyName -Version $depVersion -SetupFile $depSetupFile
+    }
+
+    # Build upload params (no assignment)
+    $depAppParams = @{
+        FilePath             = $depIntunewinFile.FullName
+        DisplayName          = $depAppConfig.DisplayName
+        Description          = $depAppConfig.Description
+        Publisher            = $depAppConfig.Publisher
+        AppVersion           = $depAppConfig.AppVersion
+        InstallExperience    = $depAppConfig.InstallExperience
+        RestartBehavior      = $depAppConfig.RestartBehavior
+        DetectionRule        = $depAppConfig.DetectionRules
+        RequirementRule      = $depAppConfig.RequirementRule
+        InstallCommandLine   = $depAppConfig.InstallCommandLine
+        UninstallCommandLine = $depAppConfig.UninstallCommandLine
+        Verbose              = $true
+    }
+
+    # Add icon if available
+    $depIconPath = Join-Path $depFolder $DependencyConfig.IconFile
+    if ($DependencyConfig.IconFile -and (Test-Path $depIconPath)) {
+        try {
+            $depAppParams.Icon = New-InteropAppIcon -FilePath $depIconPath
+        }
+        catch {
+            # The icon is cosmetic - deploy the dependency without one
+            Write-Warning "    Could not read the icon for '$DependencyName' ($depIconPath): $($_.Exception.Message)"
+        }
+    }
+
+    $depIntuneApp = Publish-InteropWin32App -AppParams $depAppParams
+    Write-Host "    Auto-deployed '$DependencyName' to Intune (ID: $($depIntuneApp.id))" -ForegroundColor Green
+    return $depIntuneApp
+}
+
+# The Intune app one dependency name refers to: the newest app of that family, auto-deployed
+# first when the tenant does not have it yet. $null when it cannot be resolved.
+function Resolve-AppDependencyApp {
+    param(
+        [Parameter(Mandatory = $true)] [string]$DependencyName,
+        [AllowNull()] $AllIntuneApps
+    )
+
+    Write-Host "    Resolving dependency: $DependencyName" -ForegroundColor Gray
+
+    # Get the dependency's config to find its display name pattern
+    $depConfig = Get-AppConfiguration -AppName $DependencyName
+    if (-not $depConfig) {
+        Write-Host "    [Err] Dependency '$DependencyName' not found in AppConfig" -ForegroundColor Red
+        return $null
+    }
+
+    # Search Intune for the newest app of the dependency's family (same naming-convention
+    # classifier as everywhere else)
+    $depNamePattern = Get-AppFamilyNamePattern -DisplayNameTemplate $depConfig.DisplayNameTemplate
+    $depIntuneApp = $AllIntuneApps | Where-Object { $_.displayName -match $depNamePattern } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
+    if ($depIntuneApp) {
+        return $depIntuneApp
+    }
+
+    # Auto-deploy dependency if not found in Intune
+    Write-Host "    Dependency '$DependencyName' not found in Intune, auto-deploying..." -ForegroundColor Yellow
+    return (Publish-DependencyApp -DependencyName $DependencyName -DependencyConfig $depConfig)
+}
+
+# Resolves every dependency of the app and links them all in a single call. A dependency that
+# cannot be resolved is reported and left out; the app itself still deploys.
+function Set-AppDependency {
+    param(
+        [Parameter(Mandatory = $true)] $Win32App,
+        [Parameter(Mandatory = $true)] [hashtable]$AppConfig
+    )
+
+    if (-not ($AppConfig.Dependencies -and $AppConfig.Dependencies.Count -gt 0)) {
+        return
+    }
+
+    Write-Host "  Setting up dependency relationships..." -ForegroundColor Cyan
+    $dependencyAppIds = @()
+    $allIntuneApps = Get-InteropWin32App
+
+    foreach ($depName in $AppConfig.Dependencies) {
+        try {
+            $depIntuneApp = Resolve-AppDependencyApp -DependencyName $depName -AllIntuneApps $allIntuneApps
+            if (-not $depIntuneApp) { continue }
+
+            # Collect dependency app ID for batch linking
+            $dependencyAppIds += $depIntuneApp.id
+            Write-Host "    [OK] Resolved: $($depIntuneApp.displayName)" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "    [Err] Failed to resolve dependency '$depName': $_" -ForegroundColor Red
+        }
+    }
+
+    if ($dependencyAppIds.Count -eq 0) {
+        return
+    }
+
+    # Link all dependencies in a single call
+    try {
+        Add-InteropDependency `
+            -AppId $Win32App.id `
+            -DependencyAppIds $dependencyAppIds
+        Write-Host "  Dependencies linked ($($dependencyAppIds.Count))" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  [Err] Failed to link dependencies: $_" -ForegroundColor Red
+    }
 }
 
 # Create app configuration and upload
@@ -327,320 +773,47 @@ function Publish-App {
         # .displayVersion / .id access below and in Get-IntuneAppVersion resolves them all the same
         # (PowerShell property access is case-insensitive; pinned by a SharedFunctions test).
         $allExistingApps = @($ExistingApps)
-        
-        if ($allExistingApps) {
-            Write-Host "  Found $($allExistingApps.Count) existing app(s) for '$AppName'" -ForegroundColor Yellow
-            
-            # Analyze all existing apps to find versions (always check all, don't rely on exact match)
-            $oldVersionApps = @()
-            $sameVersionExists = $false
-            $sameVersionApp = $null
-            $newestOlderApp = $null
-            $newestOlderVersion = $null
-            
-            foreach ($existingApp in $allExistingApps) {
-                # Version from displayVersion, else parsed from the display name (shared helper)
-                $versionInfo = Get-IntuneAppVersion -App $existingApp
-                if ($null -eq $versionInfo) {
-                    Write-Host "    - $($existingApp.displayName) (version unknown - skipping)" -ForegroundColor Yellow
-                    continue
-                }
+        $state = Resolve-AppDeploymentState -ExistingApps $allExistingApps -AppName $AppName -NewVersion $NewVersion -ForceUpdate ([bool]$ForceUpdate)
 
-                $existingVersion = $versionInfo.Raw
-                if ($versionInfo.Source -eq 'displayVersion') {
-                    Write-Host "    - $($existingApp.displayName) (v$existingVersion)" -ForegroundColor Gray
-                }
-                else {
-                    Write-Host "    - $($existingApp.displayName) (v$existingVersion extracted from name)" -ForegroundColor Gray
-                }
+        # Same version already in Intune (unless ForceUpdate): skip the upload, but still
+        # reconcile assignments. Adopting or changing a deployment plan for apps that are
+        # already deployed would otherwise silently do nothing, even though -ShowPlan
+        # reports the new assignments. Set-AppAssignment skips targets that are already
+        # assigned, so this only fills in what is missing.
+        if ($state.SameVersionApp) {
+            Write-Host "  Version $NewVersion already exists in Intune (use -ForceUpdate to recreate the package)" -ForegroundColor Yellow
+            Write-Host "  Reconciling assignments on the existing app..." -ForegroundColor Cyan
+            $null = Set-AppAssignment -AppId $state.SameVersionApp.id -AppConfig $AppConfig `
+                -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
+                -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
+            return $state.SameVersionApp
+        }
 
-                try {
-                    # Compare versions
-                    $existingVer = [version]$existingVersion
-                    $newVer = [version]$NewVersion
-                    
-                    if ($existingVer -lt $newVer) {
-                        Write-Host "      -> Older version: $existingVersion < $NewVersion" -ForegroundColor Gray
-                        
-                        # Track only the newest older version for supersedence (creates proper chain)
-                        if ($null -eq $newestOlderVersion -or $existingVer -gt $newestOlderVersion) {
-                            $newestOlderApp = $existingApp
-                            $newestOlderVersion = $existingVer
-                        }
-                    }
-                    elseif ($existingVer -eq $newVer) {
-                        Write-Host "      -> Same version ($existingVersion = $NewVersion)" -ForegroundColor Yellow
-                        if (-not $ForceUpdate) {
-                            $sameVersionExists = $true
-                            $sameVersionApp = $existingApp
-                        }
-                    }
-                    else {
-                        Write-Host "      -> Newer version exists ($existingVersion > $NewVersion)" -ForegroundColor Cyan
-                    }
-                }
-                catch {
-                    Write-Host "      Warning: Could not compare versions: $_" -ForegroundColor Yellow
-                }
-            }
-            
-            # Add only the newest older version for supersedence
-            if ($null -ne $newestOlderApp) {
-                Write-Host "  Will supersede most recent older version: $($newestOlderApp.displayName) v$($newestOlderApp.displayVersion)" -ForegroundColor Yellow
-                $oldVersionApps = @($newestOlderApp)
-            }
-            
-            # Same version already in Intune (unless ForceUpdate): skip the upload, but still
-            # reconcile assignments. Adopting or changing a deployment plan for apps that are
-            # already deployed would otherwise silently do nothing, even though -ShowPlan
-            # reports the new assignments. Set-AppAssignment skips targets that are already
-            # assigned, so this only fills in what is missing.
-            if ($sameVersionExists) {
-                Write-Host "  Version $NewVersion already exists in Intune (use -ForceUpdate to recreate the package)" -ForegroundColor Yellow
-                Write-Host "  Reconciling assignments on the existing app..." -ForegroundColor Cyan
-                $null = Set-AppAssignment -AppId $sameVersionApp.id -AppConfig $AppConfig `
-                    -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
-                    -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
-                return $sameVersionApp
-            }
-            
-            if ($oldVersionApps.Count -gt 0) {
-                Write-Host "  Creating new version with supersedence..." -ForegroundColor Cyan
-            }
-            else {
-                Write-Host "  No older versions found - creating new app without supersedence" -ForegroundColor Gray
-            }
-        }
-        else {
-            Write-Host "  No existing apps found - creating new..." -ForegroundColor Cyan
-        }
-            
-        # Pre-flight: Intune caps a supersedence graph at 11 nodes. If the version to be superseded
-        # already sits in a full graph, the upload would succeed but the supersedence would fail,
-        # leaving an unlinked version - stop before uploading anything.
-        if ($null -ne $newestOlderApp) {
-            $headroom = Test-SupersedenceHeadroom -Records $allExistingApps -AppId $newestOlderApp.Id
-            if ($headroom.Unknown) {
-                throw "Cannot verify that the new version can supersede $($newestOlderApp.displayName): $($headroom.Reason). Nothing was uploaded - retry the deployment."
-            }
-            if (-not $headroom.CanAddVersion) {
-                throw "The supersedence graph of '$AppName' already has $($headroom.Nodes) node(s) - Intune's limit is $($headroom.Limit), so the new version could not supersede $($newestOlderApp.displayName). Run .\Remove-OldIntuneAppVersions.ps1 for this tenant (or loosen its retention policy) and deploy again."
-            }
-            if ($headroom.WillFill) {
-                Write-Host "  Warning: this version fills the supersedence graph of '$AppName' ($($headroom.NodesAfter) of $($headroom.Limit) nodes); the next one will fail unless old versions are removed first" -ForegroundColor Yellow
-            }
-        }
+        Assert-SupersedenceHeadroom -Records $allExistingApps -NewestOlderApp $state.NewestOlderApp -AppName $AppName
 
         # Create new app
-        $appParams = @{
-            FilePath             = $IntuneWinPath
-            DisplayName          = $AppConfig.DisplayName
-            Description          = $AppConfig.Description
-            Publisher            = $AppConfig.Publisher
-            AppVersion           = $AppConfig.AppVersion
-            InstallExperience    = $AppConfig.InstallExperience
-            RestartBehavior      = $AppConfig.RestartBehavior
-            DetectionRule        = $AppConfig.DetectionRules
-            RequirementRule      = $AppConfig.RequirementRule
-            InstallCommandLine   = $AppConfig.InstallCommandLine
-            UninstallCommandLine = $AppConfig.UninstallCommandLine
-            Verbose              = $true
-        }
-            
-        # Add icon if available (must be converted to base64)
-        if ($IconPath -and (Test-Path $IconPath)) {
-            Write-Host "  Adding app icon: $(Split-Path $IconPath -Leaf)" -ForegroundColor Gray
-            try {
-                $iconFile = New-InteropAppIcon -FilePath $IconPath
-                $appParams.Icon = $iconFile
-            }
-            catch {
-                Write-Host "  Warning: Failed to add icon: $_" -ForegroundColor Yellow
-            }
-        }
-            
+        $appParams = New-AppUploadParams -AppConfig $AppConfig -IntuneWinPath $IntuneWinPath -IconPath $IconPath
+
         # Upload app to Intune with error handling for Azure Storage failures
-        $Win32App = $null
-        try {
-            $Win32App = Publish-InteropWin32App -AppParams $appParams
-                
-            # Validate that the app was created successfully with a valid ID
-            if (-not $Win32App -or -not $Win32App.id) {
-                throw "App creation returned but no valid app ID was provided"
-            }
-                
-            Write-Host "  Successfully created new app: $($AppConfig.DisplayName) v$($AppConfig.AppVersion)" -ForegroundColor Green
-            Write-Host "    App ID: $($Win32App.id)" -ForegroundColor Gray
-        }
-        catch {
-            Write-Host "  Warning: Upload encountered an error: $_" -ForegroundColor Yellow
-                
-            # Check if app was created in Intune despite the error
-            Write-Host "  Checking if app was created in Intune..." -ForegroundColor Gray
-            Start-Sleep -Seconds 10
-                
-            $createdApp = Get-InteropWin32App -DisplayName $AppConfig.DisplayName -ErrorAction SilentlyContinue
-            if ($createdApp -and $createdApp.id) {
-                Write-Host "  Found created app in Intune (ID: $($createdApp.id))" -ForegroundColor Green
-                $Win32App = $createdApp
-            }
-            else {
-                throw "App creation failed and app not found in Intune: $_"
-            }
-        }
-            
+        $Win32App = Publish-AppPackage -AppParams $appParams -AppConfig $AppConfig
+
         # Final validation
         if (-not $Win32App -or -not $Win32App.id) {
             throw "No valid app object available for supersedence and assignment operations"
         }
-                
+
         # Set up supersedence for older versions
-        if ($oldVersionApps.Count -gt 0) {
-            Write-Host "  Setting up supersedence relationships..." -ForegroundColor Cyan
-                
-            foreach ($oldApp in $oldVersionApps) {
-                try {
-                    Write-Host "    Superseding: $($oldApp.displayName) v$($oldApp.displayVersion)" -ForegroundColor Gray
-                        
-                    # Get supersedence type from app config (default to "Update" if not specified)
-                    $supersedenceType = if ($AppConfig.SupersedenceType) { $AppConfig.SupersedenceType } else { "Update" }
-                    Write-Host "      Supersedence type: $supersedenceType" -ForegroundColor Gray
-                        
-                    Add-InteropSupersedence `
-                        -AppId $Win32App.id `
-                        -SupersededAppId $oldApp.id `
-                        -SupersedenceType $supersedenceType
-                        
-                    Write-Host "    [OK] Supersedence configured ($supersedenceType): $($oldApp.displayName) -> $($Win32App.displayName) v$($Win32App.displayVersion)" -ForegroundColor Green
-                }
-                catch {
-                    # The app exists in Intune now but is not linked into the chain and has no
-                    # assignments yet. Assigning it anyway would put an unlinked version into the
-                    # Company Portal, so this deployment fails loudly instead.
-                    throw "Failed to set supersedence for $($oldApp.displayName): $($_.Exception.Message) '$($AppConfig.DisplayName)' v$($AppConfig.AppVersion) (ID $($Win32App.id)) exists without supersedence and without assignments - delete it in Intune, fix the chain (cleanup / retention), then deploy again."
-                }
-            }
-        }
-        
+        Set-AppSupersedence -Win32App $Win32App -OldVersionApps @($state.NewestOlderApp | Where-Object { $_ }) -AppConfig $AppConfig
+
         # Set up dependencies
-        if ($AppConfig.Dependencies -and $AppConfig.Dependencies.Count -gt 0) {
-            Write-Host "  Setting up dependency relationships..." -ForegroundColor Cyan
-            $dependencyAppIds = @()
-            $allIntuneApps = Get-InteropWin32App
-            
-            foreach ($depName in $AppConfig.Dependencies) {
-                try {
-                    Write-Host "    Resolving dependency: $depName" -ForegroundColor Gray
-                    
-                    # Get the dependency's config to find its display name pattern
-                    $depConfig = Get-AppConfiguration -AppName $depName
-                    if (-not $depConfig) {
-                        Write-Host "    [Err] Dependency '$depName' not found in AppConfig" -ForegroundColor Red
-                        continue
-                    }
-                    
-                    # Search Intune for the newest app of the dependency's family (same naming-convention
-                    # classifier as everywhere else)
-                    $depNamePattern = Get-AppFamilyNamePattern -DisplayNameTemplate $depConfig.DisplayNameTemplate
-                    $depIntuneApp = $allIntuneApps | Where-Object { $_.displayName -match $depNamePattern } | Sort-Object -Property createdDateTime -Descending | Select-Object -First 1
-                    
-                    # Auto-deploy dependency if not found in Intune
-                    if (-not $depIntuneApp) {
-                        Write-Host "    Dependency '$depName' not found in Intune, auto-deploying..." -ForegroundColor Yellow
-                        
-                        # Find the dependency's app entry in $appsToDeploy
-                        $depAppEntry = $script:appsToDeploy | Where-Object { $_.AppConfigName -eq $depName }
-                        if (-not $depAppEntry) {
-                            Write-Host "    [Err] Dependency '$depName' not found in appsToDeploy" -ForegroundColor Red
-                            continue
-                        }
-                        
-                        $depFolder = Join-Path (Join-Path $BaseDir "packages") $depAppEntry.Folder
-                        $depIntunewinFiles = Get-ChildItem -Path $depFolder -File |
-                            Where-Object { $_.Name -like $depAppEntry.Pattern -and $_.Extension -eq ".intunewin" } |
-                            Sort-Object LastWriteTime -Descending
-                        
-                        if ($depIntunewinFiles.Count -eq 0) {
-                            Write-Host "    [Err] No .intunewin package found for dependency '$depName'" -ForegroundColor Red
-                            Write-Host "    Run: .\Download-And-Package-Software.ps1 -AppName $depName" -ForegroundColor Yellow
-                            continue
-                        }
-                        
-                        $depIntunewinFile = $depIntunewinFiles[0]
-                        $depVersion = "1.0"
-                        if ($depIntunewinFile.BaseName -match '(\d+\.[\d\.]+)') {
-                            $depVersion = $matches[1].TrimEnd('.')
-                        }
-                        
-                        $depMetaData = Get-InteropPackageMetadata -FilePath $depIntunewinFile.FullName
-                        $depSetupFile = $depMetaData.ApplicationInfo.SetupFile
-                        
-                        # Build config for the dependency
-                        if ($depAppEntry.PackageType -eq "MSI") {
-                            $depAppConfig = Get-MsiAppConfig -AppName $depName -Version $depVersion -SetupFile $depSetupFile -IntuneWinPath $depIntunewinFile.FullName
-                        }
-                        else {
-                            $depAppConfig = Get-FileAppConfig -AppName $depName -Version $depVersion -SetupFile $depSetupFile
-                        }
-                        
-                        # Build upload params (no assignment)
-                        $depAppParams = @{
-                            FilePath             = $depIntunewinFile.FullName
-                            DisplayName          = $depAppConfig.DisplayName
-                            Description          = $depAppConfig.Description
-                            Publisher            = $depAppConfig.Publisher
-                            AppVersion           = $depAppConfig.AppVersion
-                            InstallExperience    = $depAppConfig.InstallExperience
-                            RestartBehavior      = $depAppConfig.RestartBehavior
-                            DetectionRule        = $depAppConfig.DetectionRules
-                            RequirementRule      = $depAppConfig.RequirementRule
-                            InstallCommandLine   = $depAppConfig.InstallCommandLine
-                            UninstallCommandLine = $depAppConfig.UninstallCommandLine
-                            Verbose              = $true
-                        }
-                        
-                        # Add icon if available
-                        $depIconPath = Join-Path $depFolder $depConfig.IconFile
-                        if ($depConfig.IconFile -and (Test-Path $depIconPath)) {
-                            try {
-                                $depAppParams.Icon = New-InteropAppIcon -FilePath $depIconPath
-                            }
-                            catch { }
-                        }
-                        
-                        $depIntuneApp = Publish-InteropWin32App -AppParams $depAppParams
-                        Write-Host "    Auto-deployed '$depName' to Intune (ID: $($depIntuneApp.id))" -ForegroundColor Green
-                    }
-                    
-                    # Collect dependency app ID for batch linking
-                    $dependencyAppIds += $depIntuneApp.id
-                    Write-Host "    [OK] Resolved: $($depIntuneApp.displayName)" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "    [Err] Failed to resolve dependency '$depName': $_" -ForegroundColor Red
-                }
-            }
-            
-            # Link all dependencies in a single call
-            if ($dependencyAppIds.Count -gt 0) {
-                try {
-                    Add-InteropDependency `
-                        -AppId $Win32App.id `
-                        -DependencyAppIds $dependencyAppIds
-                    Write-Host "  Dependencies linked ($($dependencyAppIds.Count))" -ForegroundColor Green
-                }
-                catch {
-                    Write-Host "  [Err] Failed to link dependencies: $_" -ForegroundColor Red
-                }
-            }
-        }
-        
+        Set-AppDependency -Win32App $Win32App -AppConfig $AppConfig
+
         # Assign if requested. Auto-update for superseded apps is requested as part of creating
         # the assignment (see Set-AppAssignment) rather than patched in afterwards.
         $null = Set-AppAssignment -AppId $Win32App.id -AppConfig $AppConfig `
             -AssignAllUsers $AssignAllUsers -AssignAllDevices $AssignAllDevices -AssignGroups $AssignGroups `
             -AutoUpdateSuperseded ($AppConfig.AutoUpdate -eq $true)
-        
+
         return $Win32App
     }
     catch {

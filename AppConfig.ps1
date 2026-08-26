@@ -489,6 +489,56 @@ $script:AppConfigurations = @{
     }
 }
 
+# A download-URL allowlist entry is only usable when it is a non-empty https:// prefix ending in
+# '/' and without surrounding whitespace. A blank prefix would match every URL; whitespace padding
+# or a non-HTTPS scheme means the prefix can never match at runtime (mis-pasted allowlist); and
+# without a trailing '/' a prefix match could cross an authority boundary ("https://vendor.example"
+# would also match "https://vendor.example.evil.com/").
+# Case-insensitive like the runtime check in Get-WingetInstallerInfo.
+function Test-AppConfigUrlPrefix {
+    param($Prefix)
+
+    if ([string]::IsNullOrWhiteSpace($Prefix)) { return $false }
+    if ("$Prefix" -ne "$Prefix".Trim()) { return $false }
+    if (-not "$Prefix".StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+
+    return "$Prefix".EndsWith('/')
+}
+
+# The policy violations of one app configuration (see Get-AppConfigPolicyViolation).
+function Get-AppConfigAppViolation {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Name,
+
+        [Parameter(Mandatory=$true)]
+        $Configuration
+    )
+
+    $violations = @()
+
+    if ($Configuration.AllowUnsignedInstaller -and -not ($Configuration.WingetPackageId -or $Configuration.ExpectedSha256)) {
+        $violations += "${Name}: AllowUnsignedInstaller requires WingetPackageId or ExpectedSha256 - downloads must stay verifiable"
+    }
+
+    if (-not $Configuration.WingetPackageId) {
+        return $violations
+    }
+
+    if (-not $Configuration.AllowedDownloadUrlPrefixes) {
+        return $violations + "${Name}: WingetPackageId requires AllowedDownloadUrlPrefixes to pin where installers may be fetched from"
+    }
+
+    # One message per app, not per bad entry - the allowlist is fixed as a whole
+    foreach ($prefix in $Configuration.AllowedDownloadUrlPrefixes) {
+        if (-not (Test-AppConfigUrlPrefix -Prefix $prefix)) {
+            return $violations + "${Name}: every AllowedDownloadUrlPrefixes entry must be a non-empty https:// prefix ending in '/' and without surrounding whitespace (found '$prefix')"
+        }
+    }
+
+    return $violations
+}
+
 # Download-integrity policy: every app must anchor the integrity of its downloads somewhere.
 # Signed installers are covered by the default Authenticode check (plus ExpectedPublisher);
 # an app that opts out of the signature check (AllowUnsignedInstaller) must instead be
@@ -502,31 +552,7 @@ function Get-AppConfigPolicyViolation {
 
     $violations = @()
     foreach ($name in ($Configurations.Keys | Sort-Object)) {
-        $cfg = $Configurations[$name]
-        if ($cfg.AllowUnsignedInstaller -and -not ($cfg.WingetPackageId -or $cfg.ExpectedSha256)) {
-            $violations += "${name}: AllowUnsignedInstaller requires WingetPackageId or ExpectedSha256 - downloads must stay verifiable"
-        }
-        if ($cfg.WingetPackageId) {
-            if (-not $cfg.AllowedDownloadUrlPrefixes) {
-                $violations += "${name}: WingetPackageId requires AllowedDownloadUrlPrefixes to pin where installers may be fetched from"
-            }
-            else {
-                foreach ($prefix in $cfg.AllowedDownloadUrlPrefixes) {
-                    # A blank prefix would match every URL; whitespace padding or a non-HTTPS
-                    # scheme means the prefix can never match at runtime (mis-pasted allowlist);
-                    # and without a trailing '/' a prefix match could cross an authority boundary
-                    # ("https://vendor.example" would also match "https://vendor.example.evil.com/").
-                    # Case-insensitive like the runtime check in Get-WingetInstallerInfo.
-                    if ([string]::IsNullOrWhiteSpace($prefix) -or
-                        "$prefix" -ne "$prefix".Trim() -or
-                        -not "$prefix".StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase) -or
-                        -not "$prefix".EndsWith('/')) {
-                        $violations += "${name}: every AllowedDownloadUrlPrefixes entry must be a non-empty https:// prefix ending in '/' and without surrounding whitespace (found '$prefix')"
-                        break
-                    }
-                }
-            }
-        }
+        $violations += @(Get-AppConfigAppViolation -Name $name -Configuration $Configurations[$name])
     }
     return $violations
 }
@@ -542,6 +568,56 @@ if ($configPolicyViolations.Count -gt 0) {
 # Also consumed by Save-AppVersionCache in SharedFunctions.ps1.
 $script:AppVersionCachePath = Join-Path $PSScriptRoot "AppVersions.json"
 
+# The parsed version cache, or $null when there is none or it cannot be read.
+function Read-AppVersionCache {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return $null
+    }
+
+    try {
+        return Get-Content -Path $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        Write-Warning "Ignoring unreadable version cache '$Path': $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# $true when the seed in this file is demonstrably newer than the cached version - the only case
+# in which the cache does not win. Unparseable on either side means the cache wins.
+function Test-AppConfigSeedIsNewer {
+    param($SeedVersion, $CachedVersion)
+
+    if (-not $SeedVersion) { return $false }
+
+    $seedParsed = $null
+    $cachedParsed = $null
+    if (-not [version]::TryParse($SeedVersion, [ref]$seedParsed)) { return $false }
+    if (-not [version]::TryParse($CachedVersion, [ref]$cachedParsed)) { return $false }
+
+    return $seedParsed -gt $cachedParsed
+}
+
+# Overlays one cache entry onto its (by-reference) app configuration.
+function Update-AppConfigFromCache {
+    param($AppConfig, $Cached)
+
+    if ([string]::IsNullOrWhiteSpace($Cached.Version)) {
+        return
+    }
+    if (Test-AppConfigSeedIsNewer -SeedVersion $AppConfig.FallbackVersion -CachedVersion $Cached.Version) {
+        return
+    }
+
+    $AppConfig.FallbackVersion = $Cached.Version
+    if ($Cached.Url) { $AppConfig.FallbackUrl = $Cached.Url }
+    # Recorded alongside the URL because FilenameTemplate cannot always reproduce the real
+    # asset name (7-Zip's 7z2602-x64.msi, Inkscape's dated builds, Next-Exam's build stamps)
+    if ($Cached.Filename) { $AppConfig.FallbackFilename = $Cached.Filename }
+}
+
 # Overlay the last successfully downloaded version/URL/filename onto the seed fallbacks defined
 # above, so FallbackVersion and FallbackUrl stay current without anyone editing this file.
 #
@@ -550,52 +626,16 @@ $script:AppVersionCachePath = Join-Path $PSScriptRoot "AppVersions.json"
 # which means a stale cache can never drag a freshly pulled AppConfig.ps1 backwards - that is what
 # makes it safe to auto-resolve AppVersions.json merges in favour of the local copy (.gitattributes).
 function Import-AppVersionCache {
-    if (-not (Test-Path $script:AppVersionCachePath)) {
-        return
-    }
-
-    try {
-        $cache = Get-Content -Path $script:AppVersionCachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    }
-    catch {
-        Write-Warning "Ignoring unreadable version cache '$script:AppVersionCachePath': $($_.Exception.Message)"
-        return
-    }
-
-    if (-not $cache.Apps) {
+    $cache = Read-AppVersionCache -Path $script:AppVersionCachePath
+    if (-not $cache -or -not $cache.Apps) {
         return
     }
 
     foreach ($entry in $cache.Apps.PSObject.Properties) {
         # Silently ignore apps the cache knows about but this config no longer defines
-        if (-not $script:AppConfigurations.ContainsKey($entry.Name)) {
-            continue
+        if ($script:AppConfigurations.ContainsKey($entry.Name)) {
+            Update-AppConfigFromCache -AppConfig $script:AppConfigurations[$entry.Name] -Cached $entry.Value
         }
-
-        $appConfig = $script:AppConfigurations[$entry.Name]
-        $cached = $entry.Value
-
-        if ([string]::IsNullOrWhiteSpace($cached.Version)) {
-            continue
-        }
-
-        # Keep the seed when it is demonstrably newer than the cache
-        $seedVersion = $appConfig.FallbackVersion
-        if ($seedVersion) {
-            $seedParsed = $null
-            $cachedParsed = $null
-            if ([version]::TryParse($seedVersion, [ref]$seedParsed) -and
-                [version]::TryParse($cached.Version, [ref]$cachedParsed) -and
-                $seedParsed -gt $cachedParsed) {
-                continue
-            }
-        }
-
-        $appConfig.FallbackVersion = $cached.Version
-        if ($cached.Url) { $appConfig.FallbackUrl = $cached.Url }
-        # Recorded alongside the URL because FilenameTemplate cannot always reproduce the real
-        # asset name (7-Zip's 7z2602-x64.msi, Inkscape's dated builds, Next-Exam's build stamps)
-        if ($cached.Filename) { $appConfig.FallbackFilename = $cached.Filename }
     }
 }
 
