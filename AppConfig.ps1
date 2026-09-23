@@ -62,7 +62,12 @@ $script:AppConfigurations = @{
         # download is verified against that pinned hash instead of a signature.
         WingetPackageId = "7zip.7zip"
         WingetInstallerType = "wix"  # selects the x64 MSI entry (the EXE entries are "exe")
-        AllowedDownloadUrlPrefixes = @("https://github.com/ip7z/7zip/releases/download/")
+        # Igor Pavlov publishes releases on both his own site and his GitHub organization, and
+        # the winget manifests alternate between them (26.02 -> GitHub, 26.03 -> 7-zip.org)
+        AllowedDownloadUrlPrefixes = @(
+            "https://www.7-zip.org/a/",
+            "https://github.com/ip7z/7zip/releases/download/"
+        )
         # No FilenameTemplate: winget-pinned apps store the installer under the manifest
         # URL's real filename, which the version cache records
         PackageType = "MSI"
@@ -92,7 +97,10 @@ $script:AppConfigurations = @{
         InstallCommandTemplate = '"{0}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /ALLUSERS'
         UninstallCommandTemplate = '"C:\Program Files\GIMP 3\uninst\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
         DetectionPath = "C:\Program Files\GIMP 3\bin"
-        DetectionFile = "gimp-3.0.exe"
+        # GIMP names its binary after the minor series (gimp-3.0.exe, gimp-3.2.exe, ...) and also
+        # ships the series-independent gimp-3.exe; detecting the latter survives minor upgrades
+        # (a rule on gimp-3.0.exe reported every GIMP 3.2 install as failed)
+        DetectionFile = "gimp-3.exe"
         DetectionType = "File"
         DetectionOperator = "equal"
         ExpectedPublisher = "Jernej"
@@ -453,15 +461,18 @@ $script:AppConfigurations = @{
         GitHubRepo = "Bildungsportal/next-exam"
         GitHubApiUrl = "https://api.github.com/repos/Bildungsportal/next-exam/releases/latest"
         GitHubAssetPattern = "Next-Exam-Student_[\d\.]+_\d+_x64\.msi$"
-        FallbackUrl = "https://github.com/Bildungsportal/next-exam/releases/download/1.1.3/Next-Exam-Student_1.1.3.1_20260318_x64.msi"
-        FallbackVersion = "1.1.3.1"
+        FallbackUrl = "https://github.com/Bildungsportal/next-exam/releases/download/2.1.0.3/Next-Exam-Student_2.1.0.3_20260922_x64.msi"
+        FallbackVersion = "2.1.0.3"
         FilenameTemplate = "Next-Exam-Student_{0}_x64.msi"
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn ALLUSERS=1'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
-        ExpectedPublisher = "thomas.weissel@bildung.gv.at"
+        # Since 2.1.0.3 the Windows builds are signed via Azure Artifact Signing (see the release
+        # notes); the certificate subject names the project's association instead of the
+        # maintainer's personal address used up to 1.1.3.1
+        ExpectedPublisher = "Open Source Open Schools (OSOS) Austria"
         AutoUpdate = $true
     }
     
@@ -476,15 +487,18 @@ $script:AppConfigurations = @{
         GitHubRepo = "Bildungsportal/next-exam"
         GitHubApiUrl = "https://api.github.com/repos/Bildungsportal/next-exam/releases/latest"
         GitHubAssetPattern = "Next-Exam-Teacher_[\d\.]+_\d+_x64\.msi$"
-        FallbackUrl = "https://github.com/Bildungsportal/next-exam/releases/download/1.1.3/Next-Exam-Teacher_1.1.3.1_20260318_x64.msi"
-        FallbackVersion = "1.1.3.1"
+        FallbackUrl = "https://github.com/Bildungsportal/next-exam/releases/download/2.1.0.3/Next-Exam-Teacher_2.1.0.3_20260922_x64.msi"
+        FallbackVersion = "2.1.0.3"
         FilenameTemplate = "Next-Exam-Teacher_{0}_x64.msi"
         PackageType = "MSI"
         InstallCommandTemplate = 'msiexec /i "{0}" /qn ALLUSERS=1'
         UninstallCommandTemplate = 'msiexec /x {0} /qn'  # {0} will be MSI product code
         DetectionType = "MSI"
         DetectionOperator = "ProductCodeOnly"
-        ExpectedPublisher = "thomas.weissel@bildung.gv.at"
+        # Since 2.1.0.3 the Windows builds are signed via Azure Artifact Signing (see the release
+        # notes); the certificate subject names the project's association instead of the
+        # maintainer's personal address used up to 1.1.3.1
+        ExpectedPublisher = "Open Source Open Schools (OSOS) Austria"
         AutoUpdate = $true
     }
 }

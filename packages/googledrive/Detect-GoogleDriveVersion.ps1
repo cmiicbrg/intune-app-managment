@@ -2,6 +2,9 @@
 # Returns exit code 0 if installed version >= required version, 1 otherwise
 # Used by Intune Win32 app detection
 #
+# Intune only treats the app as installed when the script exits 0 AND writes to STDOUT;
+# exit 0 with empty output counts as "not installed". Every path therefore writes one line.
+#
 # Google Drive installs GoogleDriveFS.exe in versioned subfolders:
 #   C:\Program Files\Google\Drive File Stream\123.0.1.0\GoogleDriveFS.exe
 # This script finds the newest installed version and compares it.
@@ -64,7 +67,7 @@ function Get-GoogleDriveVersion {
 $installedVersion = Get-GoogleDriveVersion
 
 if (-not $installedVersion) {
-    # Not installed
+    Write-Output "Google Drive not found"
     exit 1
 }
 
@@ -72,17 +75,20 @@ if (-not $installedVersion) {
 try {
     $installedVer = [version]$installedVersion
     $requiredVer = [version]$RequiredVersion
-    
+
     if ($installedVer -ge $requiredVer) {
         # Compliant: installed version is >= required
+        Write-Output "Google Drive $installedVersion is installed (required: $RequiredVersion)"
         exit 0
     }
     else {
         # Non-compliant: needs update
+        Write-Output "Google Drive $installedVersion is older than required $RequiredVersion"
         exit 1
     }
 }
 catch {
     # Version comparison failed - assume non-compliant
+    Write-Output "Error comparing Google Drive version '$installedVersion' with '$RequiredVersion': $_"
     exit 1
 }

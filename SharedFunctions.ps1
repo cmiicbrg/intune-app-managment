@@ -1000,6 +1000,23 @@ function Get-MsiAppConfig {
     }
 }
 
+# The value a file-version detection rule must carry. The Intune agent compares the file's
+# four-part numeric version resource (3.0.23.0) as a System.Version against the rule value, and
+# System.Version treats a missing part as -1, so an "equal" rule with the three-part "3.0.23"
+# taken from a file name never matches: the install succeeds and the app is then reported as
+# not detected (0x87D1041C - BRGEnns VLC, 2026-08-23). Pads a dotted numeric version to four
+# parts; a value that is not a plain dotted number (or already has four parts) is returned as is.
+# Padding is harmless for the ordered operators: 3.7.8.0 >= 3.7.8 and >= 3.7.8.0 agree.
+function ConvertTo-FileDetectionVersion {
+    param([string]$Version)
+
+    if ($Version -notmatch '^\d+(\.\d+){0,3}$') { return $Version }
+
+    $parts = @($Version -split '\.')
+    while ($parts.Count -lt 4) { $parts += '0' }
+    return ($parts -join '.')
+}
+
 # The detection rule of a file-based app: registry existence, registry version, or (the default)
 # file version.
 function New-FileAppDetectionRule {
@@ -1011,13 +1028,13 @@ function New-FileAppDetectionRule {
     )
 
     if ($AppConfig.DetectionType -ne "Registry") {
-        # Default: file-based detection
+        # Default: file-based detection, against the file's four-part version resource
         return New-InteropFileDetectionRule `
             -Path $AppConfig.DetectionPath `
             -FileOrFolder $AppConfig.DetectionFile `
             -Check32BitOn64System $CommonSettings.Check32BitOn64System `
             -Operator $Operator `
-            -VersionValue $Version
+            -VersionValue (ConvertTo-FileDetectionVersion -Version $Version)
     }
 
     if ($Operator -notin @('exists', 'doesNotExist', 'notExists')) {

@@ -109,7 +109,7 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
             $rule.path | Should -Be 'C:\Program Files\Mozilla Firefox'
             $rule.fileOrFolderName | Should -Be 'firefox.exe'
             $rule.operator | Should -Be 'greaterThanOrEqual'
-            $rule.detectionValue | Should -Be '143.0.1'
+            $rule.detectionValue | Should -Be '143.0.1.0' -Because 'the agent compares the four-part numeric file version, so the rule value is padded to four parts'
         }
 
         It 'formats install and uninstall command lines from the templates' {
@@ -120,6 +120,22 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         It 'keeps the full version as AppVersion but only the major version in the display name' {
             $config.AppVersion | Should -Be '143.0.1'
             $config.DisplayName | Should -Be 'Mozilla Firefox 143 (German)'
+        }
+    }
+
+    Context 'Get-FileAppConfig - VLC (EXE with "equal" file detection from a file-name version)' {
+        # The VLC installer carries no version resource, so the deploy falls back to the
+        # three-part version in the file name. Intune compares the installed vlc.exe's numeric
+        # 3.0.23.0 as a System.Version, and 3.0.23 is not equal to 3.0.23.0 - the rule must be padded.
+        BeforeAll {
+            $config = Get-FileAppConfig -AppName 'VLC' -Version '3.0.23' -SetupFile 'vlc-3.0.23-win64.exe'
+        }
+
+        It 'pads the detection value to four parts while the app version stays as deployed' {
+            $config.DetectionRules.operator | Should -Be 'equal'
+            $config.DetectionRules.detectionValue | Should -Be '3.0.23.0'
+            $config.DetectionRules.fileOrFolderName | Should -Be 'vlc.exe'
+            $config.AppVersion | Should -Be '3.0.23' -Because 'displayVersion drives supersedence and the inventory, not detection'
         }
     }
 
@@ -158,6 +174,56 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
 
         It 'uses the MSI product code for uninstall (MSI package type)' {
             $config.UninstallCommandLine | Should -Be "msiexec /x $mockProductCode /qn"
+        }
+    }
+
+    Context 'Custom detection scripts (DetectionScriptPath)' {
+        # Intune marks a script-detected app as installed only when the script exits 0 AND
+        # writes to STDOUT; exit 0 with empty output counts as "not installed". A script that
+        # forgets the output makes every install report as failed after succeeding and re-runs
+        # the installer on each retry (what broke Google Drive until v3.6.1), so every "exit 0"
+        # must be preceded by output in its own block.
+        BeforeAll {
+            $scriptApps = @(Get-AllAppNames | Where-Object { (Get-AppConfiguration -AppName $_).DetectionScriptPath })
+            $detectionScripts = @{}
+            foreach ($name in $scriptApps) {
+                $detectionScripts[$name] = Join-Path $repoRoot (Get-AppConfiguration -AppName $name).DetectionScriptPath
+            }
+        }
+
+        It 'exists in the repository for every script-detected app' {
+            $scriptApps.Count | Should -BeGreaterOrEqual 2 -Because 'GeoGebra and Google Drive use script detection'
+            foreach ($name in $scriptApps) {
+                $detectionScripts[$name] | Should -Exist -Because "$name declares DetectionScriptPath"
+            }
+        }
+
+        It 'writes to STDOUT before every "exit 0", which Intune requires to report "installed"' {
+            foreach ($name in $scriptApps) {
+                $tokens = $null
+                $errors = $null
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($detectionScripts[$name], [ref]$tokens, [ref]$errors)
+                $errors | Should -BeNullOrEmpty -Because "$name's detection script must parse"
+
+                $exitZero = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.ExitStatementAst] -and "$($node.Pipeline.Extent.Text)" -eq '0'
+                }, $true))
+                $exitZero.Count | Should -BeGreaterOrEqual 1 -Because "$name's detection script needs a detected path"
+
+                foreach ($exit in $exitZero) {
+                    # The enclosing block: a StatementBlockAst (if/else/try body) or the script's NamedBlockAst
+                    $block = $exit.Parent
+                    while ($block -and -not $block.PSObject.Properties['Statements']) { $block = $block.Parent }
+                    $outputBefore = @($block.Statements |
+                        Where-Object { $_.Extent.StartOffset -lt $exit.Extent.StartOffset } |
+                        ForEach-Object { $_.FindAll({
+                            param($node)
+                            $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in @('Write-Output', 'Write-Host')
+                        }, $true) })
+                    $outputBefore.Count | Should -BeGreaterOrEqual 1 -Because "$name line $($exit.Extent.StartLineNumber): 'exit 0' without STDOUT output is 'not installed' for Intune"
+                }
+            }
         }
     }
 
