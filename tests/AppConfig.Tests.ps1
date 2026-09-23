@@ -96,6 +96,12 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         It 'still uses the MSI product code for uninstall' {
             $config.UninstallCommandLine | Should -Be "msiexec /x $mockProductCode /qn"
         }
+
+        It 'pads a short version in the file rule, like the EXE path does' {
+            $short = Get-MsiAppConfig -AppName 'Chrome' -Version '151.0.7922' -SetupFile 'GoogleChrome-151.0.7922-Enterprise-x64.msi' -IntuneWinPath $dummyIntuneWin
+            $short.DetectionRules.detectionValue | Should -Be '151.0.7922.0' -Because 'hybrid MSI apps use the same file-version comparison as EXE apps'
+            $short.AppVersion | Should -Be '151.0.7922'
+        }
     }
 
     Context 'Get-FileAppConfig - Firefox (EXE with file-based detection)' {
@@ -136,6 +142,29 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
             $config.DetectionRules.detectionValue | Should -Be '3.0.23.0'
             $config.DetectionRules.fileOrFolderName | Should -Be 'vlc.exe'
             $config.AppVersion | Should -Be '3.0.23' -Because 'displayVersion drives supersedence and the inventory, not detection'
+        }
+    }
+
+    Context 'Get-FileAppConfig - GIMP (EXE with "equal" file detection on the series-independent binary)' {
+        # GIMP 3.2 ships gimp-3.2.exe and gimp-3.exe but no gimp-3.0.exe, so a rule on the
+        # minor-versioned name reported every 3.2 install as failed. The installer's version
+        # resource is four-part already ("3.2.6.0"); the file-name fallback would be padded.
+        BeforeAll {
+            $config = Get-FileAppConfig -AppName 'GIMP' -Version '3.2.6.0' -SetupFile 'gimp-3.2.6-setup.exe'
+        }
+
+        It 'detects gimp-3.exe in the GIMP 3 bin folder with an "equal" version rule' {
+            $rule = $config.DetectionRules
+            $rule.'@odata.type' | Should -Be '#microsoft.graph.win32LobAppFileSystemDetection'
+            $rule.path | Should -Be 'C:\Program Files\GIMP 3\bin'
+            $rule.fileOrFolderName | Should -Be 'gimp-3.exe' -Because 'gimp-3.0.exe does not exist in GIMP 3.2'
+            $rule.operator | Should -Be 'equal'
+            $rule.detectionValue | Should -Be '3.2.6.0'
+        }
+
+        It 'pads a file-name version to four parts' {
+            (Get-FileAppConfig -AppName 'GIMP' -Version '3.2.6' -SetupFile 'gimp-3.2.6-setup.exe').DetectionRules.detectionValue |
+                Should -Be '3.2.6.0'
         }
     }
 
@@ -182,7 +211,9 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         # writes to STDOUT; exit 0 with empty output counts as "not installed". A script that
         # forgets the output makes every install report as failed after succeeding and re-runs
         # the installer on each retry (what broke Google Drive until v3.6.1), so every "exit 0"
-        # must be preceded by output in its own block.
+        # must be preceded by output in its own block. Only the success stream counts: an
+        # explicit Write-Output or a bare expression statement ("text", $version). Write-Host
+        # targets the Information stream and is deliberately not accepted.
         BeforeAll {
             $scriptApps = @(Get-AllAppNames | Where-Object { (Get-AppConfiguration -AppName $_).DetectionScriptPath })
             $detectionScripts = @{}
@@ -219,7 +250,16 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
                         Where-Object { $_.Extent.StartOffset -lt $exit.Extent.StartOffset } |
                         ForEach-Object { $_.FindAll({
                             param($node)
-                            $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -in @('Write-Output', 'Write-Host')
+                            if ($node -is [System.Management.Automation.Language.CommandAst]) {
+                                return $node.GetCommandName() -eq 'Write-Output'
+                            }
+                            # A bare expression statement emits its value to the success stream
+                            # (assignments are AssignmentStatementAst, conditions hang off their
+                            # if/while node, so neither is a direct child of a statement block)
+                            $node -is [System.Management.Automation.Language.PipelineAst] -and
+                                $node.Parent.PSObject.Properties['Statements'] -and
+                                $node.PipelineElements.Count -eq 1 -and
+                                $node.PipelineElements[0] -is [System.Management.Automation.Language.CommandExpressionAst]
                         }, $true) })
                     $outputBefore.Count | Should -BeGreaterOrEqual 1 -Because "$name line $($exit.Extent.StartLineNumber): 'exit 0' without STDOUT output is 'not installed' for Intune"
                 }

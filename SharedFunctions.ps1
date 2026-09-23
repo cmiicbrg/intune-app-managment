@@ -936,7 +936,8 @@ function Get-MsiAppConfig {
     # Determine detection method based on config
     if ($appConfig.DetectionFile) {
         # Hybrid MSI: Use file-based detection for auto-update MSI apps (like Chrome)
-        # MSI version doesn't reflect actual app version after auto-update
+        # MSI version doesn't reflect actual app version after auto-update. The rule value is
+        # padded to four parts like every file-version rule (see ConvertTo-FileDetectionVersion).
         $detectionOperator = if ($appConfig.DetectionOperator) {
             $appConfig.DetectionOperator
         } else {
@@ -948,7 +949,7 @@ function Get-MsiAppConfig {
             -FileOrFolder $appConfig.DetectionFile `
             -Check32BitOn64System $commonSettings.Check32BitOn64System `
             -Operator $detectionOperator `
-            -VersionValue $Version
+            -VersionValue (ConvertTo-FileDetectionVersion -Version $Version)
         
         # Use provided version for display name and app version
         $fullVersion = $Version
