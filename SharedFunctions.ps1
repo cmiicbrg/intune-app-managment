@@ -936,7 +936,8 @@ function Get-MsiAppConfig {
     # Determine detection method based on config
     if ($appConfig.DetectionFile) {
         # Hybrid MSI: Use file-based detection for auto-update MSI apps (like Chrome)
-        # MSI version doesn't reflect actual app version after auto-update
+        # MSI version doesn't reflect actual app version after auto-update. The rule value is
+        # padded to four parts like every file-version rule (see ConvertTo-FileDetectionVersion).
         $detectionOperator = if ($appConfig.DetectionOperator) {
             $appConfig.DetectionOperator
         } else {
@@ -948,7 +949,7 @@ function Get-MsiAppConfig {
             -FileOrFolder $appConfig.DetectionFile `
             -Check32BitOn64System $commonSettings.Check32BitOn64System `
             -Operator $detectionOperator `
-            -VersionValue $Version
+            -VersionValue (ConvertTo-FileDetectionVersion -Version $Version)
         
         # Use provided version for display name and app version
         $fullVersion = $Version
@@ -1000,6 +1001,23 @@ function Get-MsiAppConfig {
     }
 }
 
+# The value a file-version detection rule must carry. The Intune agent compares the file's
+# four-part numeric version resource (3.0.23.0) as a System.Version against the rule value, and
+# System.Version treats a missing part as -1, so an "equal" rule with the three-part "3.0.23"
+# taken from a file name never matches: the install succeeds and the app is then reported as
+# not detected (0x87D1041C - BRGEnns VLC, 2026-08-23). Pads a dotted numeric version to four
+# parts; a value that is not a plain dotted number (or already has four parts) is returned as is.
+# Padding is harmless for the ordered operators: 3.7.8.0 >= 3.7.8 and >= 3.7.8.0 agree.
+function ConvertTo-FileDetectionVersion {
+    param([string]$Version)
+
+    if ($Version -notmatch '^\d+(\.\d+){0,3}$') { return $Version }
+
+    $parts = @($Version -split '\.')
+    while ($parts.Count -lt 4) { $parts += '0' }
+    return ($parts -join '.')
+}
+
 # The detection rule of a file-based app: registry existence, registry version, or (the default)
 # file version.
 function New-FileAppDetectionRule {
@@ -1011,13 +1029,13 @@ function New-FileAppDetectionRule {
     )
 
     if ($AppConfig.DetectionType -ne "Registry") {
-        # Default: file-based detection
+        # Default: file-based detection, against the file's four-part version resource
         return New-InteropFileDetectionRule `
             -Path $AppConfig.DetectionPath `
             -FileOrFolder $AppConfig.DetectionFile `
             -Check32BitOn64System $CommonSettings.Check32BitOn64System `
             -Operator $Operator `
-            -VersionValue $Version
+            -VersionValue (ConvertTo-FileDetectionVersion -Version $Version)
     }
 
     if ($Operator -notin @('exists', 'doesNotExist', 'notExists')) {
@@ -1128,8 +1146,14 @@ function Get-ScriptAppConfig {
         # Read the detection script and inject the required version
         $scriptContent = Get-Content $scriptPath -Raw
 
-        # Replace the param block to inject the actual version
-        $scriptWithVersion = $scriptContent -replace 'param\(\s*\[Parameter\(Mandatory=\$true\)\]\s*\[string\]\$RequiredVersion\s*\)', "`$RequiredVersion = '$Version'"
+        # Replace the param block with a literal assignment. The block is the contract between the
+        # scripts and this injection; a script without it (or one whose block drifted) would be
+        # deployed uninjected and never detect the app - refuse instead of shipping a broken rule.
+        $paramBlock = 'param\(\s*(?:\[Parameter\([^)]*\)\]\s*)?\[string\]\$RequiredVersion\s*\)'
+        if ($scriptContent -notmatch $paramBlock) {
+            throw "Detection script '$scriptPath' has no 'param([string]`$RequiredVersion)' block to inject the version into - the deployed rule would never detect the app"
+        }
+        $scriptWithVersion = $scriptContent -replace $paramBlock, "`$RequiredVersion = '$Version'"
 
         $DetectionRule = New-InteropScriptDetectionRule `
             -ScriptContent $scriptWithVersion `
