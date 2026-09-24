@@ -570,6 +570,37 @@ Describe 'Get-IntuneAppVersion' {
 
 # These execute against real installer binaries in packages/, which are not in git.
 # They run on a workstation with downloaded packages and are excluded in CI via -ExcludeTag LocalOnly.
+Describe 'ConvertTo-FileDetectionVersion' {
+    # Intune compares a file's four-part numeric version resource as a System.Version, where a
+    # missing part counts as -1: "3.0.23" never equals the installed 3.0.23.0 (BRGEnns VLC).
+    It 'pads a dotted numeric version to four parts' {
+        ConvertTo-FileDetectionVersion -Version '3.0.23' | Should -Be '3.0.23.0'
+        ConvertTo-FileDetectionVersion -Version '154.0' | Should -Be '154.0.0.0'
+        ConvertTo-FileDetectionVersion -Version '26' | Should -Be '26.0.0.0'
+    }
+
+    It 'leaves a four-part version unchanged' {
+        ConvertTo-FileDetectionVersion -Version '8.9.8.0' | Should -Be '8.9.8.0'
+        ConvertTo-FileDetectionVersion -Version '151.0.7922.109' | Should -Be '151.0.7922.109'
+    }
+
+    It 'leaves anything that is not a plain dotted number unchanged' {
+        ConvertTo-FileDetectionVersion -Version '1.2.3.4.5' | Should -Be '1.2.3.4.5' -Because 'five parts is not a System.Version'
+        ConvertTo-FileDetectionVersion -Version '3.0.23-rc1' | Should -Be '3.0.23-rc1'
+        ConvertTo-FileDetectionVersion -Version 'Latest' | Should -Be 'Latest'
+        ConvertTo-FileDetectionVersion -Version '' | Should -Be ''
+    }
+
+    It 'keeps the ordered operators equivalent: padded and unpadded values compare the same' {
+        # 3.7.8.0 >= 3.7.8 and 3.7.8.0 >= 3.7.8.0 are both true, so padding cannot break a
+        # greaterThanOrEqual rule that worked before
+        [version]'3.7.8.0' -ge [version](ConvertTo-FileDetectionVersion -Version '3.7.8') | Should -BeTrue
+        [version]'3.7.8.0' -ge [version]'3.7.8' | Should -BeTrue
+        [version]'3.7.8.0' -eq [version](ConvertTo-FileDetectionVersion -Version '3.7.8') | Should -BeTrue -Because 'this is the case the unpadded value fails'
+        [version]'3.7.8.0' -eq [version]'3.7.8' | Should -BeFalse
+    }
+}
+
 Describe 'Get-InstallerVersion (real installers)' -Tag 'LocalOnly' {
     BeforeDiscovery {
         $repoRoot = Split-Path $PSScriptRoot -Parent

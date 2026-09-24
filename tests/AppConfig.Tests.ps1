@@ -96,6 +96,12 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         It 'still uses the MSI product code for uninstall' {
             $config.UninstallCommandLine | Should -Be "msiexec /x $mockProductCode /qn"
         }
+
+        It 'pads a short version in the file rule, like the EXE path does' {
+            $short = Get-MsiAppConfig -AppName 'Chrome' -Version '151.0.7922' -SetupFile 'GoogleChrome-151.0.7922-Enterprise-x64.msi' -IntuneWinPath $dummyIntuneWin
+            $short.DetectionRules.detectionValue | Should -Be '151.0.7922.0' -Because 'hybrid MSI apps use the same file-version comparison as EXE apps'
+            $short.AppVersion | Should -Be '151.0.7922'
+        }
     }
 
     Context 'Get-FileAppConfig - Firefox (EXE with file-based detection)' {
@@ -109,7 +115,7 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
             $rule.path | Should -Be 'C:\Program Files\Mozilla Firefox'
             $rule.fileOrFolderName | Should -Be 'firefox.exe'
             $rule.operator | Should -Be 'greaterThanOrEqual'
-            $rule.detectionValue | Should -Be '143.0.1'
+            $rule.detectionValue | Should -Be '143.0.1.0' -Because 'the agent compares the four-part numeric file version, so the rule value is padded to four parts'
         }
 
         It 'formats install and uninstall command lines from the templates' {
@@ -120,6 +126,45 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         It 'keeps the full version as AppVersion but only the major version in the display name' {
             $config.AppVersion | Should -Be '143.0.1'
             $config.DisplayName | Should -Be 'Mozilla Firefox 143 (German)'
+        }
+    }
+
+    Context 'Get-FileAppConfig - VLC (EXE with "equal" file detection from a file-name version)' {
+        # The VLC installer carries no version resource, so the deploy falls back to the
+        # three-part version in the file name. Intune compares the installed vlc.exe's numeric
+        # 3.0.23.0 as a System.Version, and 3.0.23 is not equal to 3.0.23.0 - the rule must be padded.
+        BeforeAll {
+            $config = Get-FileAppConfig -AppName 'VLC' -Version '3.0.23' -SetupFile 'vlc-3.0.23-win64.exe'
+        }
+
+        It 'pads the detection value to four parts while the app version stays as deployed' {
+            $config.DetectionRules.operator | Should -Be 'equal'
+            $config.DetectionRules.detectionValue | Should -Be '3.0.23.0'
+            $config.DetectionRules.fileOrFolderName | Should -Be 'vlc.exe'
+            $config.AppVersion | Should -Be '3.0.23' -Because 'displayVersion drives supersedence and the inventory, not detection'
+        }
+    }
+
+    Context 'Get-FileAppConfig - GIMP (EXE with "equal" file detection on the series-independent binary)' {
+        # GIMP 3.2 ships gimp-3.2.exe and gimp-3.exe but no gimp-3.0.exe, so a rule on the
+        # minor-versioned name reported every 3.2 install as failed. The installer's version
+        # resource is four-part already ("3.2.6.0"); the file-name fallback would be padded.
+        BeforeAll {
+            $config = Get-FileAppConfig -AppName 'GIMP' -Version '3.2.6.0' -SetupFile 'gimp-3.2.6-setup.exe'
+        }
+
+        It 'detects gimp-3.exe in the GIMP 3 bin folder with an "equal" version rule' {
+            $rule = $config.DetectionRules
+            $rule.'@odata.type' | Should -Be '#microsoft.graph.win32LobAppFileSystemDetection'
+            $rule.path | Should -Be 'C:\Program Files\GIMP 3\bin'
+            $rule.fileOrFolderName | Should -Be 'gimp-3.exe' -Because 'gimp-3.0.exe does not exist in GIMP 3.2'
+            $rule.operator | Should -Be 'equal'
+            $rule.detectionValue | Should -Be '3.2.6.0'
+        }
+
+        It 'pads a file-name version to four parts' {
+            (Get-FileAppConfig -AppName 'GIMP' -Version '3.2.6' -SetupFile 'gimp-3.2.6-setup.exe').DetectionRules.detectionValue |
+                Should -Be '3.2.6.0'
         }
     }
 
@@ -153,11 +198,122 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         It 'injects the required version into the detection script content' {
             $scriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($config.DetectionRules.scriptContent))
             $scriptText | Should -Match ([regex]::Escape("`$RequiredVersion = '6.0.906.2'"))
-            $scriptText | Should -Not -Match 'Parameter\(Mandatory' -Because 'the mandatory param block must be replaced by the injected version'
+            $scriptText | Should -Not -Match 'param\(' -Because 'the param block must be replaced by the injected version'
         }
 
         It 'uses the MSI product code for uninstall (MSI package type)' {
             $config.UninstallCommandLine | Should -Be "msiexec /x $mockProductCode /qn"
+        }
+    }
+
+    Context 'Get-ScriptAppConfig - version injection safety' {
+        # A detection script deployed without the injected version never detects the app (or, with
+        # a mandatory parameter, hangs the agent for an hour), so the injection must be verified.
+        BeforeAll {
+            $driveDir = Join-Path $workDir 'packages\googledrive'
+            New-Item -ItemType Directory -Path $driveDir -Force | Out-Null
+            $driveScript = Join-Path $driveDir 'Detect-GoogleDriveVersion.ps1'
+            $realDriveScript = Join-Path $repoRoot 'packages\googledrive\Detect-GoogleDriveVersion.ps1'
+        }
+
+        It 'injects the version into the Google Drive script and removes its param block' {
+            Copy-Item $realDriveScript $driveScript -Force
+            $config = Get-ScriptAppConfig -AppName 'GoogleDrive' -Version '131.0.2.0' -SetupFile 'GoogleDriveSetup-131.0.2.0.exe' -IntuneWinPath $dummyIntuneWin
+            $scriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($config.DetectionRules.scriptContent))
+            $scriptText | Should -Match ([regex]::Escape("`$RequiredVersion = '131.0.2.0'"))
+            $scriptText | Should -Not -Match 'param\('
+        }
+
+        It 'refuses to build a rule from a script without the injectable param block' {
+            "Write-Output 'installed'`nexit 0`n" | Set-Content $driveScript
+            { Get-ScriptAppConfig -AppName 'GoogleDrive' -Version '131.0.2.0' -SetupFile 'GoogleDriveSetup-131.0.2.0.exe' -IntuneWinPath $dummyIntuneWin } |
+                Should -Throw -ExpectedMessage '*no*param*RequiredVersion*'
+        }
+
+        AfterAll {
+            Remove-Item $driveScript -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context 'Custom detection scripts (DetectionScriptPath)' {
+        # Intune marks a script-detected app as installed only when the script exits 0 AND
+        # writes to STDOUT; exit 0 with empty output counts as "not installed". A script that
+        # forgets the output makes every install report as failed after succeeding and re-runs
+        # the installer on each retry (what broke Google Drive until v3.6.1), so every "exit 0"
+        # must be preceded by output in its own block. Only the success stream counts: an
+        # explicit Write-Output or a bare expression statement ("text", $version). Write-Host
+        # targets the Information stream and is deliberately not accepted.
+        BeforeAll {
+            $scriptApps = @(Get-AllAppNames | Where-Object { (Get-AppConfiguration -AppName $_).DetectionScriptPath })
+            $detectionScripts = @{}
+            foreach ($name in $scriptApps) {
+                $detectionScripts[$name] = Join-Path $repoRoot (Get-AppConfiguration -AppName $name).DetectionScriptPath
+            }
+        }
+
+        It 'exists in the repository for every script-detected app' {
+            $scriptApps.Count | Should -BeGreaterOrEqual 2 -Because 'GeoGebra and Google Drive use script detection'
+            foreach ($name in $scriptApps) {
+                $detectionScripts[$name] | Should -Exist -Because "$name declares DetectionScriptPath"
+            }
+        }
+
+        It 'declares RequiredVersion as an optional parameter and exits early when it is missing' {
+            # A script uploaded by hand runs without the injected version. A mandatory parameter
+            # makes PowerShell prompt for it, and the agent then waits for its 60-minute timeout
+            # (observed with Google Drive 122/123/129 in BRGEnns on 2026-09-24); an optional one
+            # with an explicit guard exits within a second.
+            foreach ($name in $scriptApps) {
+                $tokens = $null
+                $errors = $null
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($detectionScripts[$name], [ref]$tokens, [ref]$errors)
+                $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'RequiredVersion' }
+                $param | Should -Not -BeNullOrEmpty -Because "$name's script must take RequiredVersion for the deploy-time injection"
+                ($param.Attributes | ForEach-Object { $_.Extent.Text }) -join ' ' | Should -Not -Match 'Mandatory' -Because "${name}: a mandatory parameter hangs the agent when the version was not injected"
+
+                $guard = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -match 'RequiredVersion'
+                }, $true)
+                $guard | Should -Not -BeNullOrEmpty -Because "$name's script must exit early when RequiredVersion is empty"
+            }
+        }
+
+        It 'writes to STDOUT before every "exit 0", which Intune requires to report "installed"' {
+            foreach ($name in $scriptApps) {
+                $tokens = $null
+                $errors = $null
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($detectionScripts[$name], [ref]$tokens, [ref]$errors)
+                $errors | Should -BeNullOrEmpty -Because "$name's detection script must parse"
+
+                $exitZero = @($ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.ExitStatementAst] -and "$($node.Pipeline.Extent.Text)" -eq '0'
+                }, $true))
+                $exitZero.Count | Should -BeGreaterOrEqual 1 -Because "$name's detection script needs a detected path"
+
+                foreach ($exit in $exitZero) {
+                    # The enclosing block: a StatementBlockAst (if/else/try body) or the script's NamedBlockAst
+                    $block = $exit.Parent
+                    while ($block -and -not $block.PSObject.Properties['Statements']) { $block = $block.Parent }
+                    $outputBefore = @($block.Statements |
+                        Where-Object { $_.Extent.StartOffset -lt $exit.Extent.StartOffset } |
+                        ForEach-Object { $_.FindAll({
+                            param($node)
+                            if ($node -is [System.Management.Automation.Language.CommandAst]) {
+                                return $node.GetCommandName() -eq 'Write-Output'
+                            }
+                            # A bare expression statement emits its value to the success stream
+                            # (assignments are AssignmentStatementAst, conditions hang off their
+                            # if/while node, so neither is a direct child of a statement block)
+                            $node -is [System.Management.Automation.Language.PipelineAst] -and
+                                $node.Parent.PSObject.Properties['Statements'] -and
+                                $node.PipelineElements.Count -eq 1 -and
+                                $node.PipelineElements[0] -is [System.Management.Automation.Language.CommandExpressionAst]
+                        }, $true) })
+                    $outputBefore.Count | Should -BeGreaterOrEqual 1 -Because "$name line $($exit.Extent.StartLineNumber): 'exit 0' without STDOUT output is 'not installed' for Intune"
+                }
+            }
         }
     }
 
