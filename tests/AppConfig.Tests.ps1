@@ -198,11 +198,40 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
         It 'injects the required version into the detection script content' {
             $scriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($config.DetectionRules.scriptContent))
             $scriptText | Should -Match ([regex]::Escape("`$RequiredVersion = '6.0.906.2'"))
-            $scriptText | Should -Not -Match 'Parameter\(Mandatory' -Because 'the mandatory param block must be replaced by the injected version'
+            $scriptText | Should -Not -Match 'param\(' -Because 'the param block must be replaced by the injected version'
         }
 
         It 'uses the MSI product code for uninstall (MSI package type)' {
             $config.UninstallCommandLine | Should -Be "msiexec /x $mockProductCode /qn"
+        }
+    }
+
+    Context 'Get-ScriptAppConfig - version injection safety' {
+        # A detection script deployed without the injected version never detects the app (or, with
+        # a mandatory parameter, hangs the agent for an hour), so the injection must be verified.
+        BeforeAll {
+            $driveDir = Join-Path $workDir 'packages\googledrive'
+            New-Item -ItemType Directory -Path $driveDir -Force | Out-Null
+            $driveScript = Join-Path $driveDir 'Detect-GoogleDriveVersion.ps1'
+            $realDriveScript = Join-Path $repoRoot 'packages\googledrive\Detect-GoogleDriveVersion.ps1'
+        }
+
+        It 'injects the version into the Google Drive script and removes its param block' {
+            Copy-Item $realDriveScript $driveScript -Force
+            $config = Get-ScriptAppConfig -AppName 'GoogleDrive' -Version '131.0.2.0' -SetupFile 'GoogleDriveSetup-131.0.2.0.exe' -IntuneWinPath $dummyIntuneWin
+            $scriptText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($config.DetectionRules.scriptContent))
+            $scriptText | Should -Match ([regex]::Escape("`$RequiredVersion = '131.0.2.0'"))
+            $scriptText | Should -Not -Match 'param\('
+        }
+
+        It 'refuses to build a rule from a script without the injectable param block' {
+            "Write-Output 'installed'`nexit 0`n" | Set-Content $driveScript
+            { Get-ScriptAppConfig -AppName 'GoogleDrive' -Version '131.0.2.0' -SetupFile 'GoogleDriveSetup-131.0.2.0.exe' -IntuneWinPath $dummyIntuneWin } |
+                Should -Throw -ExpectedMessage '*no*param*RequiredVersion*'
+        }
+
+        AfterAll {
+            Remove-Item $driveScript -Force -ErrorAction SilentlyContinue
         }
     }
 
@@ -226,6 +255,27 @@ Describe 'App config generation (golden guard for issue #8/#9 refactors)' {
             $scriptApps.Count | Should -BeGreaterOrEqual 2 -Because 'GeoGebra and Google Drive use script detection'
             foreach ($name in $scriptApps) {
                 $detectionScripts[$name] | Should -Exist -Because "$name declares DetectionScriptPath"
+            }
+        }
+
+        It 'declares RequiredVersion as an optional parameter and exits early when it is missing' {
+            # A script uploaded by hand runs without the injected version. A mandatory parameter
+            # makes PowerShell prompt for it, and the agent then waits for its 60-minute timeout
+            # (observed with Google Drive 122/123/129 in BRGEnns on 2026-09-24); an optional one
+            # with an explicit guard exits within a second.
+            foreach ($name in $scriptApps) {
+                $tokens = $null
+                $errors = $null
+                $ast = [System.Management.Automation.Language.Parser]::ParseFile($detectionScripts[$name], [ref]$tokens, [ref]$errors)
+                $param = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'RequiredVersion' }
+                $param | Should -Not -BeNullOrEmpty -Because "$name's script must take RequiredVersion for the deploy-time injection"
+                ($param.Attributes | ForEach-Object { $_.Extent.Text }) -join ' ' | Should -Not -Match 'Mandatory' -Because "${name}: a mandatory parameter hangs the agent when the version was not injected"
+
+                $guard = $ast.FindAll({
+                    param($node)
+                    $node -is [System.Management.Automation.Language.IfStatementAst] -and $node.Clauses[0].Item1.Extent.Text -match 'RequiredVersion'
+                }, $true)
+                $guard | Should -Not -BeNullOrEmpty -Because "$name's script must exit early when RequiredVersion is empty"
             }
         }
 

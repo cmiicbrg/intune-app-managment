@@ -1146,8 +1146,14 @@ function Get-ScriptAppConfig {
         # Read the detection script and inject the required version
         $scriptContent = Get-Content $scriptPath -Raw
 
-        # Replace the param block to inject the actual version
-        $scriptWithVersion = $scriptContent -replace 'param\(\s*\[Parameter\(Mandatory=\$true\)\]\s*\[string\]\$RequiredVersion\s*\)', "`$RequiredVersion = '$Version'"
+        # Replace the param block with a literal assignment. The block is the contract between the
+        # scripts and this injection; a script without it (or one whose block drifted) would be
+        # deployed uninjected and never detect the app - refuse instead of shipping a broken rule.
+        $paramBlock = 'param\(\s*(?:\[Parameter\([^)]*\)\]\s*)?\[string\]\$RequiredVersion\s*\)'
+        if ($scriptContent -notmatch $paramBlock) {
+            throw "Detection script '$scriptPath' has no 'param([string]`$RequiredVersion)' block to inject the version into - the deployed rule would never detect the app"
+        }
+        $scriptWithVersion = $scriptContent -replace $paramBlock, "`$RequiredVersion = '$Version'"
 
         $DetectionRule = New-InteropScriptDetectionRule `
             -ScriptContent $scriptWithVersion `

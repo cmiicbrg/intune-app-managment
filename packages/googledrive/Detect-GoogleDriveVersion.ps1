@@ -10,9 +10,17 @@
 # This script finds the newest installed version and compares it.
 
 param(
-    [Parameter(Mandatory=$true)]
     [string]$RequiredVersion
 )
+
+# Deploy-ToIntune.ps1 replaces the param block above with a literal assignment. A script uploaded
+# by hand arrives without it - and a *mandatory* parameter would then make PowerShell prompt for
+# input, so the Intune agent waits for its 60-minute script timeout and every other app on the
+# device queues behind it. Fail fast instead.
+if ([string]::IsNullOrWhiteSpace($RequiredVersion)) {
+    Write-Output "RequiredVersion was not injected - deploy this script through Deploy-ToIntune.ps1"
+    exit 1
+}
 
 function Get-GoogleDriveVersion {
     # Method 1: Scan Drive File Stream folder for newest version subfolder (most accurate after auto-update)
