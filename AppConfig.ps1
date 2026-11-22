@@ -501,6 +501,51 @@ $script:AppConfigurations = @{
         ExpectedPublisher = "Open Source Open Schools (OSOS) Austria"
         AutoUpdate = $true
     }
+
+    McAfeeRemoval = @{
+        Name = "McAfeeRemoval"
+        DisplayNameTemplate = "McAfee Removal {0}"
+        Publisher = "Intune App Management"
+        Description = "Removes the McAfee software preinstalled by the device manufacturer (LiveSafe / Total Protection, the newer McAfee app, WebAdvisor, Safe Connect, Security Scan and the McAfee Store apps), so that Microsoft Defender protects the device. A restart completes the removal."
+        Folder = "mcafee-removal"
+        IntuneWinPattern = "McAfeeRemoval-*.intunewin"
+        # Not a vendor installer that is downloaded and wrapped: New-McAfeeRemovalPackage
+        # (McAfeeRemovalPackage.ps1) assembles the package from the two scripts in the package
+        # folder and the two pinned McAfee ingredients below. The package version is the one
+        # declared in Remove-McAfee.ps1 - raise it there with every change, including a new pin.
+        PackageBuilder = "McAfeeRemoval"
+        # Ingredient 1: McAfee's Consumer Product Removal tool (MCPR), the official download -
+        # the removal recipes for every McAfee consumer product. Pinned to the build this
+        # package was put together with: what a new MCPR build deletes on student devices is
+        # reviewed before it is rolled out, not picked up silently.
+        McprUrl = "https://download.mcafee.com/molbin/iss-loc/SupportTools/MCPR/MCPR.exe"
+        McprVersion = "10.5.374.0"
+        McprSha256 = "D4D2266A19876BECCC95A97E1E5821EF42D98D503818C1E3F19BE75E9358B100"
+        # Ingredient 2: the MCPR engine (mccleanup.exe) of build 10.4.123.0, which replaces the
+        # one in MCPR. Engines from 10.5 on validate their parent process and remove nothing
+        # unless McAfee's interactive wizard started them; 10.4.123.0 is the last that runs
+        # unattended. McAfee no longer offers it, so it comes out of community archives (URLs
+        # pinned to a commit) - accepted only as exactly this file with McAfee's signature.
+        McprEngineVersion = "10.4.123.0"
+        McprEngineSha256 = "74347C1437A0E711AC300CD9A67BE67E92785C15201A9F445D52D55565878461"
+        McprEngineArchiveUrls = @(
+            "https://raw.githubusercontent.com/kevinmalinoski/Intune-Blog-Resources/e848b562f335bb92fa06904c9749243b745a7617/McAfee%20Removal/MCPR-SOURCE-FILES.zip",
+            "https://raw.githubusercontent.com/andrew-s-taylor/public/8051f4b7d05c3c80b64a368701281f27d63c2ffa/De-Bloat/mcafeeclean.zip"
+        )
+        ExpectedPublisher = "McAfee, LLC"  # both ingredients must carry this signature on top of their pin
+        PackageType = "EXE"
+        InstallCommandTemplate = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{0}"'
+        UninstallCommandTemplate = 'cmd.exe /c exit 0'  # nothing to undo - McAfee is not put back
+        # "Installed" means no McAfee product is left. Devices without McAfee are detected right
+        # away and never download the package.
+        DetectionType = "Script"
+        DetectionOperator = "ScriptOnly"
+        DetectionScriptPath = "packages\mcafee-removal\Detect-McAfeeRemoval.ps1"
+        # The removal needs a restart to finish and says so with exit code 3010: Intune then asks
+        # the user to restart (never forces it) instead of ignoring the code like for other apps
+        RestartBehavior = "basedOnReturnCode"
+        AutoUpdate = $false
+    }
 }
 
 # A download-URL allowlist entry is only usable when it is a non-empty https:// prefix ending in
@@ -519,6 +564,39 @@ function Test-AppConfigUrlPrefix {
     return "$Prefix".EndsWith('/')
 }
 
+# The policy violations of an assembled package (PackageBuilder): its ingredients are not covered
+# by the installer checks, so each one must be pinned by SHA-256, signed by a named publisher and
+# fetched over HTTPS.
+function Get-AppConfigIngredientViolation {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Name,
+
+        [Parameter(Mandatory=$true)]
+        $Configuration
+    )
+
+    $violations = @()
+
+    foreach ($pin in 'McprSha256', 'McprEngineSha256') {
+        if ("$($Configuration[$pin])" -notmatch '^[0-9A-Fa-f]{64}$') {
+            $violations += "${Name}: $pin must be a 64-character SHA-256 - package ingredients must stay verifiable"
+        }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Configuration.ExpectedPublisher)) {
+        $violations += "${Name}: ExpectedPublisher is required - package ingredients must carry a known signature"
+    }
+
+    foreach ($url in @($Configuration.McprUrl) + @($Configuration.McprEngineArchiveUrls)) {
+        if (-not "$url".StartsWith('https://', [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $violations + "${Name}: every ingredient URL must be an https:// URL (found '$url')"
+        }
+    }
+
+    return $violations
+}
+
 # The policy violations of one app configuration (see Get-AppConfigPolicyViolation).
 function Get-AppConfigAppViolation {
     param(
@@ -533,6 +611,15 @@ function Get-AppConfigAppViolation {
 
     if ($Configuration.AllowUnsignedInstaller -and -not ($Configuration.WingetPackageId -or $Configuration.ExpectedSha256)) {
         $violations += "${Name}: AllowUnsignedInstaller requires WingetPackageId or ExpectedSha256 - downloads must stay verifiable"
+    }
+
+    if ($Configuration.PackageBuilder) {
+        $violations += @(Get-AppConfigIngredientViolation -Name $Name -Configuration $Configuration)
+    }
+
+    # A typo here would only surface as a rejected upload, after the package has been built
+    if ($Configuration.RestartBehavior -and $Configuration.RestartBehavior -notin @('suppress', 'allow', 'basedOnReturnCode', 'force')) {
+        $violations += "${Name}: RestartBehavior must be suppress, allow, basedOnReturnCode or force (found '$($Configuration.RestartBehavior)')"
     }
 
     if (-not $Configuration.WingetPackageId) {

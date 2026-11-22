@@ -17,6 +17,7 @@ $BaseDir = $PSScriptRoot
 
 # Import shared functions and configuration
 . (Join-Path $PSScriptRoot "SharedFunctions.ps1")
+. (Join-Path $PSScriptRoot "McAfeeRemovalPackage.ps1")   # builder of the one assembled package
 
 # Build the fallback result for an app whose live version lookup failed.
 # Prefers the filename recorded in AppVersions.json, because FilenameTemplate cannot always
@@ -276,7 +277,18 @@ foreach ($appName in $allAppNames) {
     if (-not (Test-Path $appFolder)) {
         New-Item -ItemType Directory -Path $appFolder -Force | Out-Null
     }
-    
+
+    # The McAfee removal is not one vendor installer to download and wrap: its builder assembles
+    # the package from the scripts in the package folder and pinned, verified ingredients
+    if ($appConfig.PackageBuilder -eq 'McAfeeRemoval') {
+        New-McAfeeRemovalPackage -AppConfig $appConfig -AppFolder $appFolder | Out-Null
+        continue
+    }
+    if ($appConfig.PackageBuilder) {
+        Write-Host "  Skipping - unknown PackageBuilder '$($appConfig.PackageBuilder)' in AppConfig.ps1" -ForegroundColor Red
+        continue
+    }
+
     # Get version info
     $versionInfo = Get-LatestVersionInfo -AppConfig $appConfig
     if (-not $versionInfo) {

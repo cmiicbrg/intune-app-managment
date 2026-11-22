@@ -62,6 +62,21 @@ catch {
 
 Write-Host ""
 
+# 7-Zip is only needed to build the McAfee removal package (it unpacks McAfee's removal tool)
+Write-Host "Checking 7-Zip (only needed for the McAfee removal package)..." -ForegroundColor Cyan
+$sevenZipFound = [bool](Get-Command '7z.exe' -ErrorAction SilentlyContinue)
+foreach ($programRoot in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+    if ($programRoot -and (Test-Path (Join-Path $programRoot '7-Zip\7z.exe'))) { $sevenZipFound = $true }
+}
+if ($sevenZipFound) {
+    Write-Host "[OK] 7-Zip found" -ForegroundColor Green
+}
+else {
+    Write-Host "[SKIP] 7-Zip not found - install it before packaging McAfeeRemoval: winget install --id 7zip.7zip" -ForegroundColor Yellow
+}
+
+Write-Host ""
+
 # Install NuGet provider if needed
 Write-Host "Checking NuGet provider..." -ForegroundColor Cyan
 $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue

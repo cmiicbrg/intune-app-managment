@@ -10,7 +10,8 @@
         "SevenZip": { "AllUsers": true },
         "NotepadPlusPlus": { "AllUsers": true },
         "KeePassXC": { "AllUsers": true },
-        "VCRedist": {}
+        "VCRedist": {},
+        "McAfeeRemoval": { "AllDevices": true }
       }
     },
     "Fabrikam": {
