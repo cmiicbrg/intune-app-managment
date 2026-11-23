@@ -918,6 +918,20 @@ function Remove-OldAppFiles {
     }
 }
 
+# How Intune treats the restart codes of an app's installer: the common setting ("suppress" -
+# installers here are told not to restart and their codes are ignored), unless the app declares
+# its own RestartBehavior. The McAfee removal does: it needs a restart to finish and asks for it
+# with exit code 3010.
+function Get-AppRestartBehavior {
+    param(
+        [Parameter(Mandatory=$true)] $AppConfig,
+        [Parameter(Mandatory=$true)] $CommonSettings
+    )
+
+    if ($AppConfig.RestartBehavior) { return $AppConfig.RestartBehavior }
+    return $CommonSettings.RestartBehavior
+}
+
 # Generic function to create MSI-based app configuration
 function Get-MsiAppConfig {
     param(
@@ -993,7 +1007,7 @@ function Get-MsiAppConfig {
         Publisher = $Publisher
         AppVersion = $fullVersion
         InstallExperience = $commonSettings.InstallExperience
-        RestartBehavior = $commonSettings.RestartBehavior
+        RestartBehavior = Get-AppRestartBehavior -AppConfig $appConfig -CommonSettings $commonSettings
         DetectionRules = $DetectionRule
         RequirementRule = $RequirementRule
         InstallCommandLine = $InstallCommand
@@ -1099,7 +1113,7 @@ function Get-FileAppConfig {
         Publisher = $appConfig.Publisher
         AppVersion = $Version
         InstallExperience = $commonSettings.InstallExperience
-        RestartBehavior = $commonSettings.RestartBehavior
+        RestartBehavior = Get-AppRestartBehavior -AppConfig $appConfig -CommonSettings $commonSettings
         DetectionRules = $DetectionRule
         RequirementRule = $RequirementRule
         InstallCommandLine = $InstallCommand
@@ -1192,7 +1206,7 @@ function Get-ScriptAppConfig {
         Publisher = $appConfig.Publisher
         AppVersion = $Version
         InstallExperience = $commonSettings.InstallExperience
-        RestartBehavior = $commonSettings.RestartBehavior
+        RestartBehavior = Get-AppRestartBehavior -AppConfig $appConfig -CommonSettings $commonSettings
         DetectionRules = $DetectionRule
         RequirementRule = $RequirementRule
         InstallCommandLine = $InstallCommand

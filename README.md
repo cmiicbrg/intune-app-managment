@@ -19,6 +19,7 @@ To upgrade:
 - **Silent installation** with pre-configured commands
 - **Supersedence management** - automatically replaces older versions
 - **Icon support** for Company Portal
+- **McAfee removal** - one package that takes the preinstalled McAfee software off new devices (see [McAfee Removal](#mcafee-removal))
 - **Multi-tenant support** with flexible authentication
 - **Single-app or batch processing**
 
@@ -46,6 +47,7 @@ To upgrade:
 | Visual C++ Redistributable | EXE | Web scraping (Microsoft) |
 | NextExam Teacher | MSI | Manual update |
 | NextExam Student | MSI | Manual update |
+| McAfee Removal | Script | Own package version (assembled package, see [McAfee Removal](#mcafee-removal)) |
 
 ## Download Integrity
 
@@ -55,6 +57,8 @@ Every installer download is verified before it is packaged (`Invoke-FileDownload
 2. **Unsigned/unreliably signed vendors** (7-Zip, VLC, Inkscape): version, download URL and SHA-256 are taken as one bundle from the package's community [winget manifest](https://github.com/microsoft/winget-pkgs) (`WingetPackageId` in `AppConfig.ps1`), which Microsoft's validation pipeline independently downloads, hashes and scans before merge. The download is verified against that pinned hash, and the manifest's URL must match the app's `AllowedDownloadUrlPrefixes` so a manifest can never redirect downloads away from the vendor's own infrastructure. If no manifest exists yet for a new release, the app is skipped until one is merged (typically hours to a few days) - for these apps that lag is accepted as a deliberate quarantine window.
 
 The policy is enforced at load time: `AppConfig.ps1` refuses to load a configuration in which an app sets `AllowUnsignedInstaller` without a winget pin or an explicit `ExpectedSha256` (`Get-AppConfigPolicyViolation`). There is deliberately no unverified fallback URL for winget-pinned apps.
+
+The [McAfee Removal](#mcafee-removal) package is assembled from two McAfee files instead of one installer. Both are held to both tiers at once: each must match a SHA-256 pinned in `AppConfig.ps1` **and** carry a valid Authenticode signature of McAfee, LLC. The load-time policy rejects the configuration when a pin, the publisher or an HTTPS URL is missing.
 
 ## Prerequisites
 
@@ -167,6 +171,7 @@ For automated pipelines, you can still pass credentials directly:
 - `AppConfig.ps1` - Application configuration (included)
 - `SharedFunctions.ps1` - Common functions (included)
 - `TenantConfig.ps1` - Secure tenant credential management (included)
+- **7-Zip** - only for building the [McAfee Removal](#mcafee-removal) package (`winget install --id 7zip.7zip`); every other app is packaged without it
 
 ## Quick Start
 
@@ -286,6 +291,7 @@ intune-app-management/
 ├── TenantDeployments.example.json         # Deployment plan schema reference
 ├── AuthenticationManager.ps1              # Microsoft Graph authentication
 ├── Download-And-Package-Software.ps1      # Download & packaging script
+├── McAfeeRemovalPackage.ps1               # Builder of the McAfee removal package
 ├── Deploy-ToIntune.ps1                    # Deployment script
 ├── VERSION.txt                            # Version tracking
 ├── intune-tenants.json                    # Encrypted tenant config (git-ignored)
@@ -297,6 +303,12 @@ intune-app-management/
 │   ├── chrome/
 │   │   ├── GoogleChrome-142.0-Enterprise-x64.msi
 │   │   └── GoogleChrome-142.0-Enterprise-x64.intunewin
+│   ├── mcafee-removal/
+│   │   ├── Remove-McAfee.ps1              # removal script (in git)
+│   │   ├── Detect-McAfeeRemoval.ps1       # detection rule (in git)
+│   │   ├── MCPR-10.5.374.0.exe            # verified ingredient (downloaded)
+│   │   ├── mccleanup-10.4.123.0.exe       # verified ingredient (downloaded)
+│   │   └── McAfeeRemoval-1.0.0.intunewin
 │   └── ... (other apps)
 └── LICENSE
 ```
@@ -564,6 +576,70 @@ the next download run re-syncs it to whatever the vendors are actually shipping.
 deliberately **not** applied to `AppConfig.ps1`, where it would silently discard upstream changes
 such as newly added applications.
 
+## McAfee Removal
+
+Notebook manufacturers preinstall McAfee. `McAfeeRemoval` is a package that takes it off again, so that Microsoft Defender (configured through your Intune policies) is the device's antivirus. It removes:
+
+- the classic suite (McAfee LiveSafe, Total Protection, Internet Security) and the newer "McAfee" app (WPS) that replaced it on current devices
+- McAfee WebAdvisor / SiteAdvisor, Safe Connect, Security Scan Plus and True Key
+- the McAfee Store apps (McAfee Personal Security, the shell integration package)
+- what they leave behind: services, drivers, scheduled tasks, folders, shortcuts and registry keys
+
+It does not touch McAfee's managed business products (ePolicy Orchestrator agent, VirusScan Enterprise): next to those it stops and changes nothing.
+
+### How it behaves in Intune
+
+The app is "installed" when no McAfee product is left. Its detection rule and the removal script use the same definition (`Get-McAfeeFootprint` in `packages/mcafee-removal/Detect-McAfeeRemoval.ps1`): an entry in *Installed apps*, a Store package (installed for a user, or provisioned in the Windows image for future users), a service or a driver means McAfee is present; folders and registry leftovers alone do not.
+
+A device is only reported as free of McAfee when every one of these inventories could be read. If the Store package lists cannot be read, the detection answers "Cannot confirm that McAfee is gone" and the app is not detected: Intune checks again on its next cycle, and a McAfee Store app can never hide behind a failed read. The removal script follows the same rule and ends with exit code 1 instead of claiming success.
+
+- A device **without McAfee** is detected at once. It never downloads the package and nothing runs.
+- A device **with McAfee** runs `Remove-McAfee.ps1` as SYSTEM, without any dialog. This takes a few minutes.
+- **A restart is part of the removal.** Files that are in use or protected by McAfee's drivers can only be deleted while Windows starts. The script then ends with exit code 3010, and Intune asks the user to restart - it never forces the restart (this app sets `RestartBehavior = "basedOnReturnCode"`; every other app keeps `suppress`). Only a real restart counts: shutting down with Fast Startup does not process the pending deletions.
+- In the lab tests this package follows (see [Credits](#credits)), the classic suite was gone after that one restart, while **the newer McAfee app (WPS) needed a second run**: its main service is protected against being stopped, so the first run can only disable what surrounds it. After the restart Intune finds McAfee still present, runs the script again, and that run finishes the job. Until then the app shows as *pending restart* or *failed* in Intune - that is the expected intermediate state, not an error to act on.
+- The script asks for a restart for at most two restarts in a row. If McAfee is still installed after that it ends with exit code 1, the app stays *failed*, and the log names what is left.
+
+Deploy it as a required app for devices, in the tenant's deployment plan:
+
+```json
+"McAfeeRemoval": { "AllDevices": true }
+```
+
+If your Enrollment Status Page blocks device use until required apps are installed, keep this app out of the blocking apps: an app that needs a restart, and possibly a second run after it, is not "installed" at the point where the status page checks.
+
+### Logs
+
+Everything is written to the Intune Management Extension log folder, so **Collect diagnostics** in Intune returns it:
+
+- `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\McAfeeRemoval.log` - what was found, each step with its exit code, what is left, the exit code of the run
+- `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\McAfeeRemoval-mccleanup.log` - the very detailed log of McAfee's removal engine
+
+### Try it on one device first
+
+McAfee changes what it preinstalls, and no two device models carry quite the same set. Before assigning the app to all devices, look at one device of each model:
+
+```powershell
+# On the device, from the package folder: lists what is installed and what would be done, changes nothing
+powershell.exe -ExecutionPolicy Bypass -File .\Remove-McAfee.ps1 -ReportOnly
+```
+
+Then assign the app to a test group (`"Groups": [{ "Name": "...", "Intent": "Required" }]`) and read `McAfeeRemoval.log` after the first run and after the restart. For products without a silent uninstaller the log also records the uninstall command the product registered - useful when a new McAfee generation needs a new approach.
+
+### How the package is built
+
+`Download-And-Package-Software.ps1 -AppName McAfeeRemoval` assembles the package (`McAfeeRemovalPackage.ps1`) from the two scripts in `packages/mcafee-removal/` and McAfee's own removal tool, MCPR. It needs **7-Zip** on the packaging machine and two McAfee files:
+
+| Ingredient | Why | Source |
+| --- | --- | --- |
+| `MCPR.exe` 10.5.374.0 | The removal recipes for every McAfee consumer product. It is a self-extractor that only starts an interactive wizard, so it is unpacked with 7-Zip instead of being run. | McAfee's official download |
+| `mccleanup.exe` 10.4.123.0 | The engine that executes the recipes. The engine inside current MCPR builds validates its parent process and removes nothing unless that wizard started it; 10.4.123.0 is the last build that runs unattended. It replaces the engine in the unpacked tool. | Community archives (McAfee no longer offers this build) |
+
+Both files are pinned by SHA-256 in `AppConfig.ps1` and must carry McAfee's signature (see [Download Integrity](#download-integrity)). The verified files stay in the package folder and are re-verified on every build, so a build does not depend on the archives staying online; if they ever disappear, a copy of that `mccleanup.exe` saved as `packages/mcafee-removal/mccleanup-10.4.123.0.exe` is accepted on the same terms.
+
+MCPR is pinned on purpose rather than taken as "latest": when McAfee publishes a new build, the packaging run stops and says so. Review the new build, then update `McprVersion` and `McprSha256`.
+
+The version of the package is declared in `Remove-McAfee.ps1` (`$script:McAfeeRemovalVersion`). **Raise it with every change** to the two scripts or to the pins: a changed package under an unchanged version is never rolled out, because the deployment finds the version already in Intune. A new version supersedes the old one like any other app; devices where McAfee is already gone are detected by the new version too and run nothing.
+
 ## Features in Detail
 
 ### Version Detection Methods
@@ -586,6 +662,7 @@ such as newly added applications.
 - **GeoGebra**: PowerShell script detection (MSI product code doesn't change between versions)
 - **KeePassXC**: Custom install script with silent INI config deployment
 - **Google Earth Pro**: Uses OMAHA=1 flag for built-in auto-update
+- **McAfee Removal**: Assembled from scripts and pinned McAfee ingredients instead of one installer; asks for a restart through exit code 3010
 
 ### Supersedence
 
@@ -763,4 +840,5 @@ Third-party software notices - see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.
 
 - **IntuneWinAppUtil**: Microsoft Win32 Content Prep Tool
 - **IntuneWin32App Module** by [Nickolaj Andersen](https://github.com/MSEndpointMgr/IntuneWin32App): powered deployments through v3.1; the native Graph implementation in `IntuneInterop.ps1` was informed by its request sequences
+- **McAfee Removal for Intune** by [Kevin Malinoski](https://github.com/kevinmalinoski/Intune-Blog-Resources/tree/main/McAfee%20Removal), building on Tbone and SMB to the Cloud: documented that current MCPR engines refuse unattended runs and lab-tested the engine build and product list the McAfee removal package uses
 - **Development Assistance**: Created with assistance from GitHub Copilot (Claude Sonnet 4.5)
